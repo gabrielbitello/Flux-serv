@@ -23,6 +23,16 @@ regras diferentes para dev (banco descartável) e prod (banco sagrado).
 | Sono | NUNCA dorme. Healthcheck `mysqladmin ping` a cada 10 s |
 | Admin | **Adminer** (container único, ~40 MB, sem dependências) — mais leve que phpmyadmin. Acesso **LAN-only**: o Caddy expõe `db.bitello.xyz` apenas no server block interno (192.168.140.2), nunca pelo tunnel público; painel linka. Credenciais são as dos users de projeto — o que pode ver/editar é o grant do user, não a UI |
 
+FATO (inventário do WSL Ubuntu, 09/10/2026, `docker ps -a` + `docker images`): o
+estado atual NUNCA foi "um banco só". Além do `mariadb` compartilhado
+(`mysql:8.4`, Up), existem legados por-dev hoje `Exited`: `vippers-dev-mysql` e
+`pedi-dev-mysql` (ambos `mysql:9.3`), e 5 imagens de banco mortas em disco
+(`mysql:8.0`, `mysql:9.3`, `mariadb:11.4`, `mariadb:11.8` + a 8.4 em uso) —
+sobras da era dokploy (`vippers-dev` com imagem local `vippers-vippers-dev`).
+O guard + `flux-db` encerram essa era: um motor só. Migração dos dados dos
+legados: `flux migrate-from-wsl` (09), descarte dos containers/imagens só com
+ok explícito do Gabriel.
+
 Um banco por projeto por ambiente: `{name}_dev` e `{name}_prod` (worktrees de
 branch: `{name}_{branch-slug}_dev`, 02). O app recebe as credenciais via `.env`
 mantido no lado VM (injetado pelo `flux env` no cadastro: `DB_HOST=flux-db`,
