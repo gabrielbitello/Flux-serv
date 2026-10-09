@@ -22,7 +22,7 @@ flux-cli/      binário do Windows
 
 | Módulo | Função |
 |---|---|
-| **router** (axum, :8080) | dispatch por `Host`; proxy hyper para o container; injeção do overlay de beat; páginas de espera/estado; intercept de `/robots.txt` + `/sitemap.xml` (gerados na ausência em prod, sempre `Disallow` em dev — R22/R23, 03) + `X-Robots-Tag: noindex` em todo host dev; catch-all para o painel em `flux.bitello.xyz` |
+| **router** (axum, :8080) | dispatch por `Host`; proxy hyper para o container; injeção do overlay de beat; páginas de espera/estado; intercept de `/robots.txt` + `/sitemap.xml` (gerados na ausência em prod, sempre `Disallow` em dev — R22/R23, 03) + `X-Robots-Tag: noindex` em todo host dev; **borda**: rate limit por host + teto de body (abaixo); catch-all para o painel em `flux.bitello.xyz` |
 | **control API** (axum, :7420, bind 127.0.0.1) | REST para o CLI e painel — token obrigatório (09). Endpoints: projetos (register/up/down/status), sync, db, logs (SSE), infra (vm/tunnel/caddy), panel auth |
 | **docker** (bollard) | inspect/stats/events/start/stop/exec; listener de `docker events` alimenta o re-sync do sono (04) e o cache de IPs |
 | **sleep manager** | sinais de interação, leases, sweep 60 s, cooldown, decisões de stop/start (04) |
@@ -30,6 +30,7 @@ flux-cli/      binário do Windows
 | **deploy orchestrator** | recebe deploy do CI (token por projeto), release imutável + blue-green + drain de jobs (10) |
 | **resource manager** | slice `flux-dev.slice` (cota global de dev), limites individuais de prod, sleep-to-admit, política de pressão de RAM (11) |
 | **sync receiver** | inotify em `/srv/flux/projects/*` (observa migrations para a janela de silêncio e arquivos de compose para invalidar render) — a transferência em si é do mutagen |
+| **sampler + alertas** | métricas de 30 s, rollup 1 min no SQLite, `/metrics` Prometheus, disparo de alertas outbound (13) |
 | **infra watchers** | systemd (caddy/cloudflared/flux-db) e health; estados expostos na API e no painel |
 | **panel** | UI server-side (08) embutida no binário via `rust-embed` |
 
@@ -61,6 +62,23 @@ settings(k PK, v)                                                 -- tokens de A
 - Log de acesso estruturado (host, método, caminho, status, duração) no
   `events` — sem corpo de resposta (o porteiro logava cauda do corpo para
   debug; isso vira modo `--trace` temporário).
+
+### Borda do router: rate limit e teto de body (R30)
+
+A borda é o `fluxd` — Cloudflare segura ataque volumétrico, mas abuso fino
+(crawler mal-educado, script em loop) chega na VM:
+
+- **Rate limit por host** (token bucket em memória): default 300 req/min com
+  burst 100; override por projeto `[limits] rate` no `flux.toml`. Excedeu →
+  `429` brandiado (HTML) ou `429` JSON em rota de API — nunca 500 cru.
+- **Conexões concorrentes por host**: teto 100 (fila curta, depois 429).
+- **Teto de body**: `proxy.max_body_bytes` default 100 MB (config global, 09).
+  Acima → `413` antes de ler o corpo inteiro (stream aborta cedo — upload de
+  10 GB não enchendo RAM da VM). Uploads legítimos grandes: subir o teto por
+  projeto é override consciente.
+- Slowloris: os timeouts do proxy (connect 5 s, idle read 300 s) + teto de
+  conexões cobrem; header timeout de 30 s fecha request sem headers.
+- Rate limit de deploy (10/min, 10) fica INDEPENDENTE e mais apertado.
 
 ### Compose e subprocessos
 

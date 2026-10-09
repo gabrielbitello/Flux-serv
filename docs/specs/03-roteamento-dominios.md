@@ -84,8 +84,10 @@ de Caddy por deploy, nenhuma config dinâmica para quebrar.
   desde o primeiro byte, com limite configurável para "injetar" só respostas
   HTML pequenas).
 - Health: container Running + resposta HTTP no path de health do projeto
-  (padrão `/up`, Laravel). Só considero "acordado e saudável" após health OK —
-  entre start e health OK, o visitante vê página de espera com a fase real.
+  (default `/up` para laravel; node/rust exigem `[health] path` ou caem para
+  check TCP — tabela por stack em 06, R26). Só considero "acordado e saudável"
+  após health OK — entre start e health OK, o visitante vê página de espera
+  com a fase real.
 
 ### Bots: homologação invisível + robots/sitemap automáticos (R22, R23)
 
@@ -155,6 +157,8 @@ JS quando detecta mudança de fase (SSE opcional):
 | `GET /robots.txt` em prod sem o arquivo no release | gerado `Allow: /` + linha `Sitemap:` (R23) |
 | `GET /sitemap.xml` em prod sem o arquivo no release | urlset gerado com a raiz + `lastmod` do release ativo (R23) |
 | Qualquer rota de host dev | resposta normal + header `X-Robots-Tag: noindex, nofollow, noarchive` (R22) |
+| Rate limit por host excedido (R30, 07) | `429` brandiado (HTML p/ browser, JSON + `Retry-After` p/ API) — nunca 500 cru |
+| Upload acima do teto de body (R30, 07) | `413` antes de ler o corpo inteiro (stream aborta cedo) |
 
 ## Decisões
 

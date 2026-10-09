@@ -27,6 +27,28 @@ API).
 - Devs continuam com limite individual menor por padrão (`mem_limit` 1,5 GB,
   `cpus` 1,5) para um dev maluco não consumir a cota sozinho.
 
+### Fila de execução global — o host manda (R27)
+
+O Gabriel **usa o PC** enquanto a VM trabalha: CPU do host não explode, em
+nenhum cenário. Três camadas, da mais dura à mais fina:
+
+1. **Teto absoluto**: vCPUs da VM = metade dos logical processors do host (01).
+   O Hyper-V nunca dá ao guest mais do que isso — é o piso de garantia do
+   Windows.
+2. **Cota de dev** (slice, acima) continua valendo para tudo que é dev.
+3. **Fila de builds com concorrência 1**: `[queue] build_concurrency` default
+   **1** — UM build por vez na VM inteira. Fila persistente no SQLite com
+   prioridade: **deploy de prod > provision on_wake > build de dev**. Três
+   devs + um deploy juntos = fila, não paralelismo.
+- Builds de dev na fila rodam com `nice +10` e ionice `idle` (scope systemd ao
+  redor do sidecar); builds de prod, nice normal — prod passa na frente E roda
+  mais "de verdade".
+- Provision `on_wake` (composer/npm, 04) TAMBÉM entra na fila — 3 devs
+  acordando juntos não disparam 3 `npm install` paralelos.
+- Painel mostra a fila: quem espera, posição, motivo.
+- Obs.: 1 build por vez não deixa prod lento — deploy típico tem 1 build de
+  prod; a fila existe para o cenário raro de disputa, e nele prod ganha.
+
 ### Limite individual de prod
 
 - `flux.toml` do projeto:
@@ -111,6 +133,10 @@ anti-explosão) é a spec [12](12-vm-hibernacao-porteiro-central.md).
 - **Nunca** acordar prod com página de espera quando dá unpause — página só
   entra no caminho de pressão (stop) ou primeira subida.
 - **Nunca** deixar `flux-db`/Adminer/`fluxd` dentro da cota de dev.
+- **Nunca** configurar a VM com todos os vCPUs do host — Gabriel usa o PC
+  junto (R27, 01).
+- **Nunca** rodar 2+ builds em paralelo fora da fila — concorrência é
+  `[queue] build_concurrency`, fila com prioridade prod.
 
 ## Critérios de aceite
 
@@ -125,3 +151,5 @@ anti-explosão) é a spec [12](12-vm-hibernacao-porteiro-central.md).
 5. Worker processa job e manda e-mail com HTTP pausado há horas.
 6. Pressão RAM > 85% → prods ociosos vão de `pause` a `stop` e o painel mostra
    a política ativa.
+7. 3 devs + 1 deploy buildando juntos: 1 build por vez no `docker stats`/painel,
+   prod primeiro; Task Manager do Windows mostra o host utilizável o tempo todo.

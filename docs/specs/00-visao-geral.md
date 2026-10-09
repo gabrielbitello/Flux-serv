@@ -41,6 +41,13 @@ em Rust + rsync de 4s via devfactory) por uma plataforma única:
 | R21 | API acorda sem quebrar app (sem resposta que buga parser, sem timeout) e prod acorda mais rápido que dev | 12 |
 | R22 | Homologação (`-d`) escondida de bots: `robots.txt` `Disallow: /` sempre em dev + `X-Robots-Tag: noindex` em toda resposta de dev | 03 |
 | R23 | `robots.txt`/`sitemap.xml` gerados automaticamente para prod quando o projeto não traz os arquivos; arquivo preexistente NUNCA é sobrescrito | 03, 07, 10 |
+| R24 | Observável: métricas + histórico no painel, alertas outbound (Telegram/Discord/e-mail), dead-man's switch, uptime externo, logs com rotação | 13 |
+| R25 | Recuperável: snapshot pré-migrate de prod, DR com `flux export/import` (VM nova ≤ 30 min), upgrade do fluxd/flux com rollback, boot do host com VM de pé | 14, 01 |
+| R26 | Multi-stack: PHP/Laravel com suporte máximo, Node e Rust de primeira classe (health, schema e build por tipo) | 06 |
+| R27 | O host manda: VM sem tomar o PC — vCPUs capado, fila de builds (concorrência 1) com prioridade prod | 11, 01 |
+| R28 | Isolamento de rede entre projetos (rede por projeto + `flux-db-net`); projeto A não alcança banco do projeto B | 05 |
+| R29 | Guard de runtime: `privileged`, namespaces host, `cap_add` crítica, devices, docker.sock bloqueados (ou `--ack` auditado) | 05 |
+| R30 | Borda com rate limit por host, teto de conexões e teto de body (`429`/`413`, nunca 500 cru) | 03, 07 |
 
 ## Arquitetura
 
@@ -87,7 +94,7 @@ host desconhecido = página brandiada do Flux.
 | `flux` | Windows | Comandos no repo, orquestra sync e chama a VM via SSH |
 | `fluxhost` (serviço Windows) | Windows | **Porteiro central** (12): gerencia Start/Save da VM sem UAC + listener `:8443` que segura o tunnel quando a VM dorme e a acorda sob demanda |
 | mutagen | Windows (daemon) + agente injetado na VM via SSH | Sync contínuo unidirecional Windows → VM |
-| `fluxd serve` | VM | Router HTTP, wake/sleep, painel, API de controle (inclui endpoint de deploy do CI), pipeline de migrations, guard de imagens, blue-green de prod |
+| `fluxd serve` | VM | Router HTTP, wake/sleep, painel, API de controle (inclui endpoint de deploy do CI), pipeline de migrations, guard de imagens/runtime, blue-green de prod, métricas + alertas, fila de builds, snapshot pré-migrate |
 | `fluxd ctl` | VM (chamado por SSH) | Subcomandos de baixo nível para o CLI |
 | GitHub Actions | infra do GitHub | Dispara deploy de prod por push (template na spec 10) |
 | Adminer | container na VM | Gerenciador do banco único, LAN-only, linkado do painel (05) |
@@ -152,7 +159,7 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 
 | Fase | Entrega | Aceite resumido |
 |---|---|---|
-| F1 | `flux setup host` + provisionamento da VM Bookworm (01) | `flux vm status` verde; SSH com chave própria; Docker ativo na VM |
+| F1 | `flux setup host` + provisionamento da VM Bookworm + auto-start/pós-boot (01) | `flux vm status` verde; SSH com chave própria; Docker ativo; reboot do Windows → VM volta sozinha, prods de pé |
 | F2 | Sync mutagen (02) | edição no Windows aparece em `/srv/flux/projects/{name}` em < 5 s; excludes respeitados |
 | F3 | `fluxd` router + página de espera + wake + bots em dev (03) | container off → URL mostra página de espera 200 e sobe sozinha; `-d` responde `robots.txt` `Disallow` e header `noindex` |
 | F4 | Sono automático (04) | 15 min sem interação → `docker stop`; request → acorda |
@@ -165,6 +172,10 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 | F11 | Branch routing (02/03) | `{branch}-{name}-d.bitello.xyz` serve a branch local; branch só no GitHub → aviso |
 | F12 | Envs de prod cifrados + Adminer (09/05) | credencial sem texto claro em disco; gerenciador de DB acessível |
 | F13 | Hibernação da VM + porteiro central + wake de API (12) | VM Save/Resume sob demanda; API 503 `Retry-After` sem quebrar app; fila de wake sem explosão |
+| F14 | Segurança de plataforma: redes por projeto, guard runtime, rate limit/borda (05/07/03) | projeto A não alcança banco do B; `privileged` bloqueado; 429/413 na borda |
+| F15 | Observabilidade: métricas + histórico + alertas + logs (13) | painel com curva 24h; crash loop → alerta no canal < 2 min; dead-man provado |
+| F16 | Ciclo de vida: snapshot pré-migrate, DR export/import, upgrade fluxd/flux (14) | deploy com pendência gera dump registrado; ensaio DR ≤ 30 min medido; upgrade com 0 request perdido |
+| F17 | Multi-stack: node e rust de primeira classe (06) | projeto node com `migrate_cmd` + health própria sobe igual a laravel |
 
 ## Perguntas em aberto (decisão do Gabriel, com recomendação)
 

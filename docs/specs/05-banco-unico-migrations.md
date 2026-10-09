@@ -16,7 +16,7 @@ regras diferentes para dev (banco descartável) e prod (banco sagrado).
 |---|---|
 | Container | `flux-db`, gerido pelo `fluxd` (compose próprio, não é de projeto) |
 | Imagem | `mysql:8.4` — FATO: paridade com o WSL atual (`MYSQL_VERSION=8.4.11`) |
-| Rede | `flux-net` (bridge docker), hostname `flux-db`; porta **não publicada** |
+| Rede | `flux-db-net` (bridge docker, ver isolamento abaixo), hostname `flux-db`; porta **não publicada** |
 | Volume | `flux-db-data` (dados) + `/srv/flux/db/init` montado ro em `/docker-entrypoint-initdb.d` (mesmo desenho do atual `/opt/mariadb/init`) |
 | TZ | `America/Sao_Paulo` (paridade com o atual) |
 | Credenciais | root em `/srv/flux/secrets/db-root.env` (600); por projeto: user `{name}` com senha gerada no cadastro, grants só nos bancos dele; user read-only `flux_panel_ro` por projeto com **apenas `SELECT` em prod** (R18) |
@@ -48,6 +48,22 @@ mantido no lado VM (injetado pelo `flux env` no cadastro: `DB_HOST=flux-db`,
 Adminer em prod: **visualizar só** (R18) — nenhum UPDATE/INSERT/DROP chega ao
 banco de prod pela UI; a garantia é o grant SQL, não o botão.
 
+### Isolamento de rede entre projetos (R28)
+
+Rede única `flux-net` para todos = container do projeto A alcança o banco do
+projeto B. Desenho isolado:
+
+- **`flux-db-net`**: o `flux-db` (e o Adminer) conecta SOMENTE nela.
+- **`flux-{name}-net`** por projeto (uma para dev, uma para prod —
+  `flux-{name}-prod-net`): containers do projeto nela + attach na
+  `flux-db-net`. O app enxerga `flux-db` e seus companheiros de projeto,
+  NUNCA containers de outro projeto.
+- `fluxd` conecta em todas (é o proxy/dono); `flux_db` nunca entra em rede de
+  projeto. Overrides de compose (06) aplicam os attaches — o compose do projeto
+  segue intocado.
+- Effect: vazamento de container (RCE num app dev) não vira pivô para o banco
+  de outro projeto — o grant SQL (05) deixa de ser a única fronteira.
+
 ### Guard de imagens de banco (proibição)
 
 No `flux up`/`deploy`/`build`, o `fluxd` analisa **antes** de qualquer pull:
@@ -67,6 +83,23 @@ Match por prefixo/regex do repositório da imagem (ex.: `mysql:8.4`,
 `bitnami/mariadb`, `library/postgres`). Pegou = **falha com erro explícito**:
 arquivo, linha, imagem e a instrução "remova o service e aponte para
 `flux-db`". Build/up não roda. Log no painel. Sem override.
+
+### Guard de runtime (R29)
+
+O mesmo ponto de análise (antes de qualquer pull/up/deploy) valida chaves de
+segurança do compose — bloqueadas com erro explícito, liberáveis só com
+`--ack` auditado no `deploy_log`/`events`:
+
+| Chave | Regra |
+|---|---|
+| `privileged: true` | bloqueada (container = root na VM) |
+| `network_mode: host`, `pid: host`, `ipc: host` | bloqueadas (fura isolamento R28 e namespaces) |
+| `cap_add` contendo `SYS_ADMIN`, `NET_ADMIN`, `NET_RAW`, `DAC_OVERRIDE`, `DAC_READ_SEARCH` | bloqueada |
+| `devices:` com qualquer device não vazio | bloqueada (GPU/`/dev/net/tun` etc. exigem `--ack` justificado) |
+| `docker.sock` montado (volume) | bloqueada — regra já existente, agora com teste |
+| `user: root` | PERMITIDO com aviso (muitos Dockerfile base exigem; recomendação no relatório do guard, não bloqueio) |
+
+`--ack {motivo}` grava quem, quando, qual chave e por quê — nunca silencioso.
 
 ### Pipeline de migrations
 
@@ -135,6 +168,9 @@ Fluxo a cada `up`/`deploy` (com lock por projeto+ambiente — nunca dois runners
 - **Nunca** apagar `flux-db-data` em operação normal; reset de dados é
   `migrate:fresh` por projeto, nunca drop do servidor.
 - **Nunca** aplicar seed em prod.
+- **Nunca** conectar container de projeto direto na `flux-db-net` sem estar no
+  projeto correspondente — isolamento R28 é desenho, não promessa.
+- **Nunca** liberar chave do guard de runtime sem `--ack` com motivo gravado.
 
 ## Critérios de aceite
 

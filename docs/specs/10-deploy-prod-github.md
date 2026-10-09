@@ -43,6 +43,9 @@ background em andamento. Arquivos de prod são imutáveis e servidos no perfil
    `public/robots.txt` e `public/sitemap.xml` no worktree do release) — o
    router usa os flags para servir robots/sitemap gerados quando faltam (03).
 5. **Migrations**: pipeline de prod (05) — só `migrate`, mutação bloqueia.
+   Há pendência? Snapshot pré-migrate ANTES do `migrate --force` (14): dump
+   `--single-transaction` registrado no `deploy_log`; dump falhou = deploy
+   para com erro, banco intacto.
 6. **Blue-green** (abaixo): sobe cor nova, health, troca, drena cor velha.
 7. **Pós**: URL final no log da action; painel registra release no histórico.
 
@@ -84,6 +87,11 @@ PHP roda pré-compilado. No build do release, o `fluxd` aplica:
 - opcache preload quando o projeto declara;
 - `APP_ENV=production`, `APP_DEBUG=false` forçados pelo fluxd (não dependem do
   `.env`).
+
+Perfil por `framework` (R26, tabela completa em 06): os comandos acima são do
+**laravel** (suporte máximo); `node` = `npm ci --omit=dev` + build;
+`rust` = `cargo build --release` no sidecar. Assets pelo fluxd, blue-green,
+drain e recursos são idênticos para qualquer stack.
 
 Servir estático: o **router do `fluxd`** intercepta prefixos de asset
 (`/build/*`, `/vendor/*`, `favicon`, fonts — lista derivada do release) e

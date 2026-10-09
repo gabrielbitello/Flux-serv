@@ -30,7 +30,7 @@ de docker. Os comandos básicos do docker/compose existem com prefixo `flux`.
 | `flux restart [env]` | down + up (sem rebuild) |
 | `flux status [env]` | sync, containers, health, banco, migrations pendentes, URL, sono |
 | `flux ps [env]` | espelho do `docker compose ps` |
-| `flux logs [-f] [svc] [env]` | logs com lease de sono ativo enquanto roda |
+| `flux logs [-f] [--since 2h] [--until 1h] [svc] [env]` | logs com lease de sono ativo; janela histórica com `--since/--until` (13) |
 | `flux exec <cmd…> [env]` | `docker exec` no container principal |
 | `flux shell [env]` | `flux exec bash` |
 | `flux build [env]` | build das imagens (sem subir) |
@@ -43,11 +43,13 @@ de docker. Os comandos básicos do docker/compose existem com prefixo `flux`.
 | `flux sync status\|pause\|resume\|reset` | controle da sync (02) |
 | `flux env pull\|push\|edit` | ciclo do `.env` exclusivo da VM (02) |
 | `flux vm status\|start\|stop\|ssh\|checkpoint` | ciclo da VM (01) |
+| `flux vm upgrade` | checkpoint Hyper-V + novo fluxd com rollback automático (14) |
+| `flux self-update` | atualiza o CLI no Windows com checksum verificado (14) |
+| `flux export\|import` | DR: zip de config+state+secrets cifrados com passphrase; reergue VM nova (14) |
+| `flux db restore {name} {arquivo} --yes` | restaura dump pré-migrate de prod (14) |
 | `flux tunnel status` | saúde do cloudflared (03) |
 | `flux panel` | abre o painel no browser (login único) |
-| `flux setup host\|vm\|tunnel` | provisionamento (01/03/09) |
-
-`[env]` = `dev` (default) ou `prod`. Sempre -d (detached) por padrão; `-a` anexa.
+| `flux setup host\|vm\|tunnel\|uptime` | provisionamento + endpoint `healthz` p/ monitor externo (01/03/09/13) |
 
 `[env]` = `dev` (default) ou `prod`. Sempre -d (detached) por padrão; `-a` anexa.
 Deploy de prod não é comando do CLI: é `git push` disparando a GitHub Action
@@ -71,6 +73,27 @@ flux tool rust -- cargo build --release  # rust:1
 - Imagens oficiais, versões pinadas no config global (`[tools]`), pull on
   demand com progresso no terminal; container `--rm`, nada fica de pé.
 - Sem `flux tool`, projeto Laravel não exige PHP, Node nem Composer no Windows.
+
+### Multi-stack: PHP primeiro, Node e Rust cidadãos de primeira classe (R26)
+
+O suporte MAIOR é Laravel/PHP — é o que os projetos reais usam (vippers, pedi)
+e o único caminho 100% automático v1. `framework` é auto-detectado
+(`artisan` → laravel; `Cargo.toml` → rust; `package.json` com server → node;
+senão static) e cada tipo resolve health, schema e perfil de build:
+
+| | `laravel` (default, primeiro) | `node` | `rust` | `static`/`custom` |
+|---|---|---|---|---|
+| Health (03) | `/up` (`[health] path`) | `[health] path` OBRIGATÓRIO; sem ele, check TCP da porta do container | idem node | check TCP |
+| Schema/migrations (05) | pipeline artisan automático (diff/rebuild) | `[db] migrate_cmd` rodado no container a cada up/deploy (idempotência é do comando; sem hash/mutação) | idem node | nenhum |
+| Perfil estático do deploy (10) | completo (composer/opcache/caches) | `npm ci --omit=dev` + build; server node toca o app | `cargo build --release` no sidecar rust | assets servidos pelo fluxd |
+| Sono/blue-green/recursos | idênticos | idênticos | idênticos | idênticos |
+
+- Tudo que é INFRA (sync, sono, domínios, banco único, resources, deploy
+  blue-green, fila) é independente de linguagem — muda só o adapter.
+- `migrate_cmd` sem valor em node/rust: fluxd avisa no `flux up` que o projeto
+  não tem pipeline de schema (dado explícito, nunca silêncio).
+- Adapter novo (python, go...) = enum + 3 implementações; extensão prevista,
+  não prometida para v1.
 
 ### Fluxo do `flux up` (dev), passo a passo
 
@@ -104,7 +127,7 @@ O arquivo original do projeto segue intocado — overrides são gerados em
 
 ```toml
 name = "vippers"            # default: nome da pasta
-framework = "laravel"       # detectado automaticamente; adapter v1
+framework = "laravel"       # laravel | node | rust | static | custom — auto-detectado (R26, abaixo)
 
 [domains]                   # derivados de name por padrão
 # prod = "vippers.bitello.xyz"
@@ -113,6 +136,7 @@ framework = "laravel"       # detectado automaticamente; adapter v1
 [db]
 rebuild_policy = "auto"     # auto | always (só dev) | never
 seed_on_rebuild = true
+# migrate_cmd = ""          # node/rust: comando de schema dentro do container (ex.: "npm run migrate"); vazio = sem pipeline automático
 # image_guard = true        # default global true; desligar é proibido
 
 [sleep]

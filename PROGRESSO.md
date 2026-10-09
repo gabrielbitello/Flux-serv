@@ -8,8 +8,43 @@ Diário de status do projeto. Entradas acumuladas por sessão, mais recente no t
 gerenciador de containers Docker em VM Hyper-V Bookworm, CLI `flux` no Windows,
 daemon `fluxd` na VM, porteiro como estudo de caso.
 
-**Resultado**: 13 specs em `docs/specs/` (índice no [README](docs/specs/README.md))
+**Resultado**: 15 specs em `docs/specs/` (índice no [README](docs/specs/README.md))
 + template de CI em `docs/templates/deploy-workflow.yml`.
+
+**v0.3 (09/10, quarta rodada — maturidade operacional)**: Gabriel escolheu 13
+itens da lista de lacunas; viraram R24–R30, fases F14–F17 e 2 specs novas.
+
+- Spec 13 nova (R24): sampler de métricas no fluxd (rollup 1 min no SQLite,
+  retenção 30 d), histórico no painel (SVG server-side, zero lib JS), alertas
+  outbound (Telegram/Discord/e-mail com cooldown; gatilhos: crash loop, OOM,
+  disco >80/>90%, tunnel down, deploy falho, flux-db/worker parado),
+  dead-man's switch (fluxd bate no fluxhost a cada 60 s; 5 min sem = alerta
+  PELO HOST), endpoint público `healthz` p/ monitor externo gratuito, logs com
+  rotação (`json-file max-size 10m ×3`, journald 500 MB, `flux logs
+  --since/--until`).
+- Spec 14 nova (R25): snapshot pré-migrate de prod (`mysqldump
+  --single-transaction` antes de TODO migrate de deploy com pendência,
+  retenção 10, `flux db restore --yes`); DR `flux export/import` (secrets
+  cifrados com passphrase na hora; tokens regenerados; meta ≤ 30 min sem
+  dados / ≤ 60 min com); upgrade do fluxd (checkpoint Hyper-V, swap com
+  rollback automático, containers não caem) e `flux self-update` (checksum,
+  rename dance).
+- Boot do host (01, R25): VM é a primeira coisa útil do PC — `vmms` + fluxhost
+  Automatic + `AutomaticStartAction Start`; pós-boot prods voltam DE PÉ, devs
+  dormindo; Windows Update/queda de luz cobertos; vCPUs da VM = metade do
+  host (o PC continua utilizável).
+- Host manda (11, R27): fila global de builds com `[queue] build_concurrency`
+  default 1 e prioridade deploy prod > provision > build dev; dev builds com
+  nice +10/ionice idle; provision on_wake entra na fila.
+- Isolamento de rede (05, R28): `flux-{name}-net` por projeto + `flux-db-net`
+  — container do projeto A não alcança banco do projeto B.
+- Guard de runtime (05, R29): `privileged`, namespaces host, `cap_add`
+  crítica, `devices`, docker.sock bloqueados (ou `--ack` com motivo gravado).
+- Borda (07/03, R30): rate limit por host (300 req/min, burst 100, 429
+  brandiado/JSON), teto 100 conexões, `max_body_bytes` 100 MB com 413 cedo.
+- Multi-stack (06, R26): `framework = laravel|node|rust|static|custom` —
+  Laravel com suporte máximo; node/rust via `[health] path` +
+  `[db] migrate_cmd`; perfil de deploy por stack (10).
 
 **v0.2.1 (09/10, terceira rodada)**:
 
@@ -75,3 +110,7 @@ projeto ou 3306; servir 500/404 cru para host gerenciado off; sync de
 
 **Próximo**: revisão do Gabriel nas perguntas em aberto restantes da [00-visao-geral](docs/specs/00-visao-geral.md)
 (imagem do banco #1, Redis no guard #3, gerenciador #5) → F1 (setup host + VM).
+Itens da lista de maturidade NÃO escolhidos em 09/10 (ficam de fora da v0.3,
+retomar quando doer): backup de bancos agendado além do pré-migrate, restore
+testado de rotina, rotação de segredos, lock de operações gerais, clock/chrony,
+CI do próprio repo Flux, testes automatizados das specs, doctor/runbook.

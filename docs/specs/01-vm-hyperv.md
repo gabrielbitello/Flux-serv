@@ -70,6 +70,33 @@ Pipeline idempotente, cada passo verifica antes de agir:
 - **Upgrade**: `flux vm upgrade` cria checkpoint `pre-upgrade-<data>`, atualiza
   apt + fluxd (binário vem do próprio repo compilado), rollback = `Restore-VM`.
 
+### Boot do host, Windows Update e queda de energia (R25)
+
+A VM é a **primeira coisa útil do PC**: sobe no BOOT, antes de qualquer app de
+usuário (apps só nascem no login; serviços no boot).
+
+- `vmms` (Hyper-V Virtual Machine Management) é serviço Automatic; `fluxhost`
+  é SYSTEM **Automatic** (nunca Delayed — atrasaria a VM à toa) com dependência
+  de `vmms`; a VM com `Set-VM -AutomaticStartAction Start -AutomaticStartDelay 0`
+  e `Set-VM -AutomaticStopAction Save` (shutdown limpo do host = Save, não
+  desligar a seco).
+- **O host NÃO é sequestrado** (Gabriel usa o PC com a VM de pé): vCPUs da VM =
+  metade dos logical processors (passo 4), memória dinâmica devolve ociosidade,
+  builds/acordos enfileirados com teto (11/12). VM sem config nunca toma todos
+  os cores.
+- **Sequência pós-boot** (Windows Update reiniciou ou queda de luz voltou):
+  boot → `vmms` → `fluxhost` → Start-VM → systemd da VM (`docker` + `fluxd`
+  enabled) → política do `fluxd`:
+  - `flux-db` de pé;
+  - prods (HTTP + worker) voltam **DE PÉ** (`restart: unless-stopped`) — nunca
+    pausadas pós-boot: invisibilidade primeiro; a pausa por ociosidade
+    re-avalia depois do cooldown normal (11);
+  - devs ficam DORMINDO (acordam on-demand, 03);
+- **Queda de luz**: ext4 journaling + SQLite WAL + restart policies = a VM
+  volta ao estado pós-boot acima; nenhuma ação manual.
+- **Validação**: `fluxhost` confere SSH da VM em ≤ 2 min pós-boot; falhou →
+  evento local + alerta "VM não voltou" (13).
+
 ### Layout na VM
 
 ```
@@ -104,7 +131,9 @@ Pipeline idempotente, cada passo verifica antes de agir:
 
 1. `flux setup vm` em máquina limpa termina sem erro e `flux vm status` mostra:
    VM Running, SSH ok, Docker ok, Caddy ok, cloudflared ok, fluxd ok.
-2. Reboot do Windows: VM volta sozinha; `flux up` em um repo funciona logo após
-   o boot sem UAC.
-3. `flux vm ssh` abre shell na VM sem senha.
+2. Reboot do Windows: VM volta sozinha; prods de pé sem intervenção; `flux up`
+   em um repo funciona logo após o boot sem UAC.
+3. Reboot simulado com 3 prods ativos: HTTP de todos responde ≤ 3 min após o
+   login, sem comando manual.
+4. `flux vm ssh` abre shell na VM sem senha.
 4. Desligar a VM e rodar `flux up`: CLI sobe a VM e continua, mostrando progresso.

@@ -20,6 +20,7 @@ do Flux — para nenhum token vazar por git, sync ou painel.
 | Hash da senha do painel | `/srv/flux/secrets/panel.argon2` (VM) | 600 | `fluxd` (valida) |
 | Token da API de controle | gerado no `flux setup vm`, salvo no SQLite (hash) e no `%USERPROFILE%\.flux\config.toml` (claro — arquivo do usuário, ACL restrita) | — | CLI → header da API |
 | Token de deploy por projeto | `flux project token {name}` → GitHub Secrets do projeto; hash no SQLite | — | GitHub Actions → endpoint de deploy (10) |
+| Credenciais de alerta (bot/webhook) | `/srv/flux/secrets/alerts.env` (VM) + `%USERPROFILE%\.flux\alerts.token` (HOST — o fluxhost alerta com a VM morta, 13) | 600 / ACL | `fluxd`, `fluxhost` |
 | Senha root atual do WSL (`root_password`) | FATO: está em texto no `docker inspect` do container atual — a migração para o Flux é a ocasião de trocar isso | — | — |
 
 Rede interna: a `FluxSwitch` é internal-only (sem uplink direto para o host além
@@ -91,6 +92,19 @@ sync_debounce_secs = 5
 
 [image_guard]
 block = ["mysql", "mariadb", "postgres", "mongo", "redis", ...]  # default da 05
+
+[limits]
+max_body_bytes = 104857600  # 100 MB — teto de body na borda do proxy (07)
+
+[queue]
+build_concurrency = 1       # UM build por vez na VM; fila com prioridade prod (11)
+
+[logs]
+retention_days = 14         # /srv/flux/logs + prune diário (13)
+
+[alerts]
+channel = "telegram"        # telegram | discord | email (13)
+cooldown_minutes = 60       # críticos repetem a cada 15 min
 ```
 
 - Diretório `%USERPROFILE%\.flux\` com ACL do usuário apenas; log do CLI em
