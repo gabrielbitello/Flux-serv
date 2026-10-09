@@ -19,6 +19,28 @@ prompt, sem comando manual, sem apagar artefato gerado dentro da VM.
   mutagen via SSH — nada a instalar lá.
 - `flux sync status` mostra estado, latência e pendências; o painel mostra o mesmo.
 
+### Branches: um diretório na VM por worktree
+
+A URL de dev reflete o que está aberto no Windows — e branches distintas
+abrem ao mesmo tempo (requisito R15):
+
+- **Branch atual do projeto** → `{name}-d.bitello.xyz` serve
+  `/srv/flux/projects/{name}` (a pasta sincronizada normal).
+- **Branch em worktree** (ex.: `git worktree add ../vippers-api2 api2`) →
+  `api2-vippers-d.bitello.xyz` serve `/srv/flux/projects/{name}@{branch}`,
+  com sessão mutagen própria apontando para a pasta do worktree no Windows.
+  Um worktree por branch = branches simultâneas de verdade, cada uma com seu
+  container dev e banco `{name}_{branch-slug}_dev`.
+- O CLI descobre branches ao vivo: watcher leve `flux watch` (serviço opcional
+  no Windows) monitora `git worktree list` + branch atual das pastas
+  registradas e reporta ao `fluxd` em mudança (debounce 2 s). Sem o watcher,
+  `flux up` atualiza no ato.
+- **Branch que só existe no GitHub**: host responde 200 com página brandiada
+  "branch `api2` não encontrada localmente — `git worktree add` para usar",
+  nada quebra. Nunca 404 cru (03).
+- Nome de branch com `/` ou caracteres fora de `[a-z0-9-]` é sanitizado
+  (`/` → `-`) no hostname; a URL derivada é determinística.
+
 ### Excludes (os dois lados respeitam)
 
 Padrão global (não configurável por segurança/estabilidade):
@@ -98,3 +120,7 @@ Detalhe em [05](05-banco-unico-migrations.md).
    próxima sync na forma de arquivo allowlist explícito.
 4. Trocar de branch com migrations novas dispara o pipeline correto (05).
 5. `flux sync status` converge para `ok · sem pendências` após qualquer rajada.
+6. Worktree `api2` do projeto vippers → `api2-vippers-d.bitello.xyz` reflete a
+   pasta do worktree em < 5 s, banco próprio, container próprio.
+7. Host de branch inexistente localmente → página brandiada com instrução,
+   HTTP 200.

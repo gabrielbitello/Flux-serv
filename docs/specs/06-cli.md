@@ -34,7 +34,11 @@ de docker. Os comandos básicos do docker/compose existem com prefixo `flux`.
 | `flux exec <cmd…> [env]` | `docker exec` no container principal |
 | `flux shell [env]` | `flux exec bash` |
 | `flux build [env]` | build das imagens (sem subir) |
-| `flux deploy` | modo prod: snapshot de código + build + migrate (bloqueia mutação) + health |
+| `flux prod rollback {name}` | reativa release anterior em prod (10), sem build |
+| `flux init ci` | escreve `.github/workflows/deploy.yml` no projeto a partir do template (10) |
+| `flux project token {name}` | gera/rotaciona token de deploy do projeto (vai para GitHub Secrets) |
+| `flux tool <runtime> [args…]` | roda comando em container efêmero na VM — toolchain sob demanda (abaixo) |
+| `flux watch` | serviço leve no Windows: monitora branches/worktrees e reporta ao `fluxd` (02) |
 | `flux db status\|migrate\|fresh\|seed\|console\|dump` | banco do projeto (ver 05); `console` = cliente SQL no container `flux-db` |
 | `flux sync status\|pause\|resume\|reset` | controle da sync (02) |
 | `flux env pull\|push\|edit` | ciclo do `.env` exclusivo da VM (02) |
@@ -44,6 +48,29 @@ de docker. Os comandos básicos do docker/compose existem com prefixo `flux`.
 | `flux setup host\|vm\|tunnel` | provisionamento (01/03/09) |
 
 `[env]` = `dev` (default) ou `prod`. Sempre -d (detached) por padrão; `-a` anexa.
+
+`[env]` = `dev` (default) ou `prod`. Sempre -d (detached) por padrão; `-a` anexa.
+Deploy de prod não é comando do CLI: é `git push` disparando a GitHub Action
+(10). O CLI opera prod para diagnóstico/rollback, nunca para publicar.
+
+### `flux tool` — toolchain sob demanda (R17)
+
+Rodar build/ferramenta SEM instalar nada no PC — o container efêmero sobe na
+VM, executa e morre:
+
+```bash
+flux tool node -- npm run build          # node:22 (pinado no config global)
+flux tool php -- artisan tinker          # php:8.4-cli com os mounts do projeto
+flux tool composer -- require foo/bar    # composer:2
+flux tool rust -- cargo build --release  # rust:1
+```
+
+- Mounts idênticos aos do container do projeto (precedente: sidecar node do
+  `provision-dev.sh` do porteiro) — `vendor/` e `node_modules/` ficam na VM,
+  o Windows nunca baixa dependência.
+- Imagens oficiais, versões pinadas no config global (`[tools]`), pull on
+  demand com progresso no terminal; container `--rm`, nada fica de pé.
+- Sem `flux tool`, projeto Laravel não exige PHP, Node nem Composer no Windows.
 
 ### Fluxo do `flux up` (dev), passo a passo
 
@@ -91,7 +118,15 @@ seed_on_rebuild = true
 [sleep]
 dev_enabled = true
 idle_minutes = 15
+prod_mode = "pause"        # pause | stop | off (11)
+prod_idle_minutes = 30
 cpu_percent_teto = 5.0
+
+[resources]                # limites INDIVIDUAIS de prod (11)
+http_memory_mb = 512
+http_cpus = 1.0
+worker_memory_mb = 256
+worker_cpus = 0.5
 
 [sync]
 extra_ignore = []           # só ADICIONA ao ignore global

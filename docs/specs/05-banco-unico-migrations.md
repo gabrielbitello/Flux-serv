@@ -19,14 +19,16 @@ regras diferentes para dev (banco descartável) e prod (banco sagrado).
 | Rede | `flux-net` (bridge docker), hostname `flux-db`; porta **não publicada** |
 | Volume | `flux-db-data` (dados) + `/srv/flux/db/init` montado ro em `/docker-entrypoint-initdb.d` (mesmo desenho do atual `/opt/mariadb/init`) |
 | TZ | `America/Sao_Paulo` (paridade com o atual) |
-| Credenciais | root em `/srv/flux/secrets/db-root.env` (600); por projeto: user `{name}` com senha gerada no cadastro, grants só em `{name}_dev` e `{name}_prod` |
+| Credenciais | root em `/srv/flux/secrets/db-root.env` (600); por projeto: user `{name}` com senha gerada no cadastro, grants só nos bancos dele; user read-only `flux_panel_ro` por projeto com **apenas `SELECT` em prod** (R18) |
 | Sono | NUNCA dorme. Healthcheck `mysqladmin ping` a cada 10 s |
-| Admin | phpmyadmin como serviço opcional compartilhado (bind só na IP interna da VM), espelho do que existe hoje |
+| Admin | **Adminer** (container único, ~40 MB, sem dependências) — mais leve que phpmyadmin. Acesso **LAN-only**: o Caddy expõe `db.bitello.xyz` apenas no server block interno (192.168.140.2), nunca pelo tunnel público; painel linka. Credenciais são as dos users de projeto — o que pode ver/editar é o grant do user, não a UI |
 
-Um banco por projeto por ambiente: `{name}_dev` e `{name}_prod`. O app recebe as
-credenciais via `.env` mantido no lado VM (injetado pelo `flux env` no cadastro:
-`DB_HOST=flux-db`, `DB_DATABASE={name}_{env}`, `DB_USERNAME={name}`, senha
-gerada).
+Um banco por projeto por ambiente: `{name}_dev` e `{name}_prod` (worktrees de
+branch: `{name}_{branch-slug}_dev`, 02). O app recebe as credenciais via `.env`
+mantido no lado VM (injetado pelo `flux env` no cadastro: `DB_HOST=flux-db`,
+`DB_DATABASE={name}_{env}`, `DB_USERNAME={name}`, senha gerada). Painel e
+Adminer em prod: **visualizar só** (R18) — nenhum UPDATE/INSERT/DROP chega ao
+banco de prod pela UI; a garantia é o grant SQL, não o botão.
 
 ### Guard de imagens de banco (proibição)
 
@@ -128,3 +130,5 @@ Fluxo a cada `up`/`deploy` (com lock por projeto+ambiente — nunca dois runners
 5. `[db] rebuild_policy = "always"` → todo `flux up` faz fresh+seed no dev.
 6. Dois projetos simultâneos compartilham o `flux-db` sem conflito (users/DBs
    isolados).
+7. Painel conectado como `flux_panel_ro` tenta `UPDATE` em tabela de prod →
+   erro de permissão do MySQL (1144); o mesmo comando em dev funciona.

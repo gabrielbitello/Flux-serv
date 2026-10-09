@@ -70,9 +70,13 @@ Limitações conhecidas documentadas no README do porteiro (o Flux resolve):
   em `/srv/flux/logs/{name}-provision.marker` e log textuais — mesmo desenho do
   `provision-dev.sh` (composer → filament:assets → build Vite em sidecar node
   montando os mesmos volumes, verificação de integridade de fontes).
-- **Dev vs prod**: sono só existe em dev por padrão (`[sleep] dev_enabled`,
-  prod: `enabled = false`). Config por projeto pode ligar sono em prod, mas o
-  default é sempre 24/7.
+- **Dev vs prod (R14)**: sono de `stop` é de dev. **Prod hiberna com `docker
+  pause`** (CPU zero, RAM retida, resume < 1 s, invisível — sem página de
+  espera) após `prod_idle_minutes` (default 30), e **o worker de prod nunca
+  hiberna**: `queue:work` + `schedule:work` rodam 24/7 (tarefa agendada não
+  para). Mecanismo completo, sleep-to-admit e política de pressão de RAM na
+  spec [11](11-recursos-hibernacao.md). Config: `[sleep] prod_mode =
+  "pause"|"stop"|"off"` (default `pause`).
 
 ### Página associada
 
@@ -83,14 +87,16 @@ fluxo: dormir é barato, acordar é invisível para o visitante.
 
 | Decisão | Alternativa descartada | Por quê |
 |---|---|---|
-| `docker stop` (recreate no acordar via `start`) | `docker pause` | Pause congela processo mas retém memória; stop devolve RAM à VM — objetivo é economia real |
+| `docker stop` (recreate no acordar via `start`) | `docker pause` | Pause congela processo mas retém memória; stop devolve RAM à VM — objetivo é economia real (em DEV; em prod a direção se inverte, ver 11) |
 | Lease de CLI com TTL | CPU fake / keep-alive HTTP | Explicito e auditável no painel; não depende de truque de CPU |
 | `docker events` + sweep | só sweep | Reação em segundos a ações externas (o porteiro leva até 60 s; documentado como fonte de colisão) |
 | Beat por `sendBeacon` (mantido) | websocket dedicado | `sendBeacon` sobrevive ao unload da página; websocket vivo mantém o container acordado com aba aberta e macete de "interação" que não existe |
 
 ## O que NUNCA fazer
 
-- **Nunca** dormir `flux-db`, phpmyadmin ou o próprio `fluxd`.
+- **Nunca** dormir `flux-db`, Adminer ou o próprio `fluxd`.
+- **Nunca** pausar o worker de prod (só o HTTP) nem prod com request HTTP em
+  andamento (11).
 - **Nunca** dormir projeto em prod por padrão.
 - **Nunca** dormir enquanto existe lease de CLI/painel ativo.
 - **Nunca** confiar só no estado interno: a verdade é sempre re-sincronizada

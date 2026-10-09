@@ -26,7 +26,9 @@ flux-cli/      binário do Windows
 | **control API** (axum, :7420, bind 127.0.0.1) | REST para o CLI e painel — token obrigatório (09). Endpoints: projetos (register/up/down/status), sync, db, logs (SSE), infra (vm/tunnel/caddy), panel auth |
 | **docker** (bollard) | inspect/stats/events/start/stop/exec; listener de `docker events` alimenta o re-sync do sono (04) e o cache de IPs |
 | **sleep manager** | sinais de interação, leases, sweep 60 s, cooldown, decisões de stop/start (04) |
-| **db manager** | ciclo do `flux-db`, users/DBs por projeto, guard de imagens, runner de migrations com lock e janela de silêncio (05) |
+| **db manager** | ciclo do `flux-db`, users/DBs por projeto (incl. `flux_panel_ro` read-only em prod), guard de imagens, runner de migrations com lock e janela de silêncio (05) |
+| **deploy orchestrator** | recebe deploy do CI (token por projeto), release imutável + blue-green + drain de jobs (10) |
+| **resource manager** | slice `flux-dev.slice` (cota global de dev), limites individuais de prod, sleep-to-admit, política de pressão de RAM (11) |
 | **sync receiver** | inotify em `/srv/flux/projects/*` (observa migrations para a janela de silêncio e arquivos de compose para invalidar render) — a transferência em si é do mutagen |
 | **infra watchers** | systemd (caddy/cloudflared/flux-db) e health; estados expostos na API e no painel |
 | **panel** | UI server-side (08) embutida no binário via `rust-embed` |
@@ -35,11 +37,12 @@ flux-cli/      binário do Windows
 
 ```sql
 projects(name PK, toml TEXT, toml_hash, compose_hash, created_at)
-sleep_state(project, env, last_interaction, sleeping_since, lease_until, cooldown_until)
+sleep_state(project, env, last_interaction, sleeping_since, lease_until, cooldown_until, mode)
 migration_state(project, env, file, sha256, batch, applied_at, PK(project,env,file))
+active_color(project, color, release_sha)                -- blue-green de prod (10)
 deploy_log(id, project, env, kind, detail_json, ok, created_at)   -- up/deploy/migrate/rebuild, com motivo
 events(id, level, scope, message, created_at)                     -- trilha para o painel
-settings(k PK, v)                                                 -- token de API (hash), versão do schema
+settings(k PK, v)                                                 -- tokens de API/deploy (hash), versão do schema
 ```
 
 - WAL mode; backup automático diário para `/srv/flux/backups/` (rotação 7).

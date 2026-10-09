@@ -18,7 +18,12 @@ Ordem de leitura recomendada:
 7. [`06-cli.md`](06-cli.md) — comandos `flux` no Windows, `flux.toml`, fluxo do `flux up`.
 8. [`07-fluxd-daemon.md`](07-fluxd-daemon.md) — daemon na VM: router, API de controle, estado.
 9. [`08-painel-web.md`](08-painel-web.md) — painel web leve.
-10. [`09-seguranca-config.md`](09-seguranca-config.md) — segredos, chaves, config global.
+10. [`09-seguranca-config.md`](09-seguranca-config.md) — segredos, chaves, config global, envs de prod cifrados.
+11. [`10-deploy-prod-github.md`](10-deploy-prod-github.md) — deploy por GitHub Actions, releases imutáveis, blue-green, perfil estático.
+12. [`11-recursos-hibernacao.md`](11-recursos-hibernacao.md) — cota global de dev, limite individual de prod, hibernação invisível, tarefas agendadas.
+
+Template de CI: [`docs/templates/deploy-workflow.yml`](../templates/deploy-workflow.yml)
+(instalado no projeto com `flux init ci`).
 
 ## Gabarito de cada spec
 
@@ -40,5 +45,6 @@ marcada.
 
 | Spec | Estado |
 |---|---|
-| 00–09 | v0 escritas em 08/10/2026, aguardando revisão do Gabriel |
+| 00–09 | v0 escritas em 08/10/2026 |
+| 10, 11 + template CI | v0.1 (08/10/2026, observações do Gabriel: deploy GitHub, zero downtime, recursos, hibernação prod, branch routing, Adminer, tool, envs cifrados) |
 | Implementação | não iniciada (repo contém só o esqueleto Rust) |

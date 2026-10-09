@@ -44,9 +44,15 @@ comprimido.
    - *Logs*: seletor de service + stream SSE com follow, filtro de texto,
      botão copiar; dormir enquanto assiste é bloqueado (lease do painel);
    - *Banco*: DBs do projeto, tamanho, migrations (aplicadas/pendentes/mutadas
-     com hash), botões migrate/fresh (fresh **invisível em prod**);
+     com hash), botões migrate/fresh (fresh **invisível em prod**); consultas
+     em prod rodam com `flux_panel_ro` (SELECT-only, 05) — a UI de escrita
+     some em prod, e o grant barra mesmo se forçado; link para o Adminer
+     (LAN-only, 05);
    - *Sync*: estado da sessão mutagen, latência, pendências, botão reset;
-   - *Domínios*: URLs dev/prod, status DNS/tunnel.
+   - *Domínios*: URLs dev/prod, branches de worktree ativas (02), status
+     DNS/tunnel;
+   - *Deploys* (prod): releases, cor ativa do blue-green, histórico com SHA e
+     autor do push (10).
 3. **Infra** — VM (recursos, checkpoints), containers (todos, com sono), flux-db
    (conexões, tamanho por DB), caddy/cloudflared status, eventos recentes.
 4. **Config** — leitura do config global + secrets com valor oculto (nunca

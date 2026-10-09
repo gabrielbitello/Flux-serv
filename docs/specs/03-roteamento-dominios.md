@@ -68,7 +68,10 @@ de Caddy por deploy, nenhuma config dinâmica para quebrar.
 ### fluxd router (o "porteiro" do Flux)
 
 - Dispatch por `Host` exato: `flux.bitello.xyz` → painel; `{name}-d.bitello.xyz`
-  → ambiente dev; `{name}.bitello.xyz` → prod; resto → desconhecido.
+  → dev na branch atual; `{branch}-{name}-d.bitello.xyz` → dev no worktree da
+  branch (02 — o fluxd tenta os projetos registrados por sufixo mais longo,
+  evita ambiguidade com nomes que contêm hífen); `{name}.bitello.xyz` → prod
+  (cor ativa do blue-green, 10); resto → desconhecido.
 - Proxy para o container: resolve IP na rede `flux-net` via `bollard` (inspect),
   cache com invalidação em erro (mesma lição do porteiro: IP muda em recriação).
 - Proxy HTTP/1.1 completo com `hyper` client: websockets upgrade, SSE, streaming
@@ -102,11 +105,14 @@ JS quando detecta mudança de fase (SSE opcional):
 
 | Situação | Resposta |
 |---|---|
-| Container off | 200 página de espera (acorda sozinho) |
+| Container dev off | 200 página de espera (acorda sozinho) |
+| Prod hibernando (`pause`, 11) | `docker unpause` e proxy — **sem página de espera**, atraso < 1 s |
 | Container subindo | 200 página de espera (fase acordando) |
 | Provisionando | 200 página de espera (fase provisionando) |
 | Crash loop / health falhando | 200 página de estado "falhou" (honesto, com log) |
 | Conexão ao upstream falhou | reavalia estado (porteiro faz isso); se app morto → página "falhou"; nunca 502 |
+| Branch de worktree não existente localmente (02) | 200 página brandiada "branch não encontrada localmente" + instrução de `git worktree add` |
+| Asset fingerprinted de release de prod (10) | servido direto do disco pelo fluxd, `Cache-Control: immutable`, sem tocar o container |
 | Host não registrado | 404 brandiado "host desconhecido" (único 404; não é caso de container off) |
 | VM inteira off / fluxd morto | IMPOSSÍVEL servir página de espera da VM — mitigação: `fluxhost` garante VM de pé no boot e on-demand; queda real da VM aparece como erro do Cloudflare (documentado como limite) |
 

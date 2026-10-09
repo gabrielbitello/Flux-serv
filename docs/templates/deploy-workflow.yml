@@ -1,0 +1,44 @@
+# Template do workflow de deploy Flux.
+# Instalar no projeto com: flux init ci
+# Depois configurar uma vez no GitHub:
+#   gh secret set FLUX_DEPLOY_TOKEN      # saída de `flux project token <nome>`
+#   gh variable set FLUX_PROJECT --body <nome do projeto no Flux>
+# Gatilho padrão: push em main. Para deploy por tag, troque `branches: [main]`
+# por `tags: ["v*"]` no bloco on.push.
+
+name: Deploy (Flux)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: flux-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Notificar Flux
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Disparar deploy na VM
+        env:
+          FLUX_URL: ${{ vars.FLUX_URL }}          # ex.: https://flux.bitello.xyz
+          FLUX_PROJECT: ${{ vars.FLUX_PROJECT }}
+          FLUX_DEPLOY_TOKEN: ${{ secrets.FLUX_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          http=$(curl -sS -o response.json -w '%{http_code}' \
+            -X POST "${FLUX_URL}/api/projects/${FLUX_PROJECT}/deploy" \
+            -H "Authorization: Bearer ${FLUX_DEPLOY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\": \"${GITHUB_SHA}\", \"actor\": \"${GITHUB_ACTOR}\", \"run\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}")
+          cat response.json; echo
+          # 202 = deploy aceito (assíncrono, acompanhe no painel/flux status)
+          # 409 = mutação de migration em prod detectada (05) — deploy bloqueado
+          if [ "$http" != "202" ]; then
+            echo "::error::Flux recusou o deploy (HTTP $http)"
+            exit 1
+          fi

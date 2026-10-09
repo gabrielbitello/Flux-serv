@@ -27,6 +27,15 @@ em Rust + rsync de 4s via devfactory) por uma plataforma única:
 | R7 | Modo dev (`{name}-d.bitello.xyz`) reconstrói banco se migration editada; modo prod (`{name}.bitello.xyz`) nunca reconstrói | 05 |
 | R8 | Comandos tipo docker/compose no Windows (`flux up` num repo), sem prompt de sync | 06 |
 | R9 | Painel web profissional e leve | 08 |
+| R10 | Prod sem arquivos no Windows: mora 100% na VM, publicado por GitHub Actions com template | 10 |
+| R11 | Arquivos de prod imutáveis/estáticos: mais rápido, consumo igual ou menor | 10 |
+| R12 | Troca de versão invisível (estilo k8s) sem perder job de background em andamento | 10 |
+| R13 | Limites de recursos: cota GLOBAL somada para devs, limite INDIVIDUAL para prod | 11 |
+| R14 | Prod hiberna sem o usuário perceber; tarefas agendadas (e-mail, notificação, API) continuam rodando | 11 |
+| R15 | URL de dev abre a branch atual do Windows; `{branch}-{name}-d.bitello.xyz` abre branch específica baixada localmente | 02, 03 |
+| R16 | Gerenciador de banco (phpmyadmin ou mais leve) | 05 |
+| R17 | Toolchain (node, rust, composer…) rodando na VM sob demanda, sem instalar no PC | 06 |
+| R18 | `.env` de produção armazenado cifrado localmente; painel NÃO edita dados de prod, só vê | 09, 05 |
 
 ## Arquitetura
 
@@ -73,8 +82,11 @@ host desconhecido = página brandiada do Flux.
 | `flux` | Windows | Comandos no repo, orquestra sync e chama a VM via SSH |
 | `fluxhost` (serviço Windows) | Windows | `Start-VM`/`Stop-VM` sem UAC a cada comando; garante VM de pé no boot |
 | mutagen | Windows (daemon) + agente injetado na VM via SSH | Sync contínuo unidirecional Windows → VM |
-| `fluxd serve` | VM | Router HTTP, wake/sleep, painel, API de controle, pipeline de migrations, guard de imagens |
+| `fluxd serve` | VM | Router HTTP, wake/sleep, painel, API de controle (inclui endpoint de deploy do CI), pipeline de migrations, guard de imagens, blue-green de prod |
 | `fluxd ctl` | VM (chamado por SSH) | Subcomandos de baixo nível para o CLI |
+| GitHub Actions | infra do GitHub | Dispara deploy de prod por push (template na spec 10) |
+| Adminer | container na VM | Gerenciador do banco único, LAN-only, linkado do painel (05) |
+| sidecar de toolchain | container efêmero na VM | node/php/composer/rust sob demanda via `flux tool` (06) |
 | Caddy | VM (systemd) | TLS local + catch-all → `fluxd`. Configuração estática, nunca editada por projeto |
 | cloudflared | VM (systemd) | Tunnel `*.bitello.xyz` → Caddy |
 | `flux-db` | container na VM | Única MariaDB/MySQL de todos os projetos. Nunca dorme |
@@ -86,11 +98,12 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 
 | | dev | prod |
 |---|---|---|
-| URL | `{name}-d.bitello.xyz` | `{name}.bitello.xyz` |
-| Código | sync contínuo do Windows (o que está no editor) | snapshot no `flux deploy` |
-| Sono | liga após ociosidade (padrão 15 min) | desligado por padrão |
-| Banco | `{name}_dev`, reconstrutível (`migrate:fresh`) | `{name}_prod`, só `migrate`, mutação de migration = erro |
-| Comando principal | `flux up` | `flux deploy` |
+| URL | `{name}-d.bitello.xyz` (branch atual) e `{branch}-{name}-d.bitello.xyz` | `{name}.bitello.xyz` |
+| Código | sync contínuo do Windows (o que está no editor, por worktree/branch) | clone git na VM, 100%; releases imutáveis; entra por GitHub Actions (10) |
+| Sono | `docker stop` após ociosidade (padrão 15 min), acorda com página de espera | `docker pause` após 30 min, acorda em < 1 s, invisível (11); worker/scheduler 24/7 |
+| Banco | `{name}_dev`, reconstrutível (`migrate:fresh`) | `{name}_prod`, só `migrate`, mutação de migration = erro; painel read-only |
+| Recursos | cota GLOBAL somada (slice cgroup `flux-dev.slice`) | limite INDIVIDUAL por container (11) |
+| Comando principal | `flux up` | `git push` (GitHub Actions → 10); rollback: `flux prod rollback` |
 
 ## Stack
 
@@ -119,6 +132,10 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 - **Nunca** sincronizar `.env`, `vendor/`, `node_modules/`, artefatos de build ou
   `storage/` do Windows para a VM.
 - **Nunca** reconstruir banco de prod. Sem exceção, sem flag.
+- **Nunca** editar arquivo de release de prod (imutável — mudança = commit + deploy).
+- **Nunca** pausar/hibernar o worker de prod (só o HTTP); job em andamento nunca morre no deploy.
+- **Nunca** deixar a soma dos devs passar da cota global (kernel garante, não contabilidade do fluxd).
+- **Nunca** deixar o painel ou Adminer escrever em dados de prod (read-only por grant SQL).
 - **Nunca** parar o `flux-db` (sono é só de container de app).
 - **Nunca** colocar segredo em `flux.toml` nem em arquivo sincronizado.
 
@@ -131,10 +148,13 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 | F3 | `fluxd` router + página de espera + wake (03) | container off → URL mostra página de espera 200 e sobe sozinha |
 | F4 | Sono automático (04) | 15 min sem interação → `docker stop`; request → acorda |
 | F5 | Banco único + migrations + guard (05) | projeto novo migra sozinho; edição de migration em dev reconstrói; Dockerfile com imagem de banco é bloqueado |
-| F6 | CLI completa (06) | `flux up/logs/exec/down` de qualquer repo, sem prompt |
+| F6 | CLI completa (06) | `flux up/logs/exec/down` de qualquer repo, sem prompt; `flux tool node -- npm run build` roda na VM |
 | F7 | Tunnel + domínios (03) | `{name}.bitello.xyz` e `{name}-d.bitello.xyz` resolvem pela internet |
-| F8 | Painel web (08) | dashboard com status real, logs ao vivo via SSE |
-| F9 | Modo prod completo (05/06) | `flux deploy` com bloqueio de mutação de migration |
+| F8 | Painel web (08) | dashboard com status real, logs ao vivo via SSE; prod tables read-only |
+| F9 | Prod: GitHub Actions + blue-green + releases imutáveis (10) | deploy por push, 0 request perdido, rollback < 10 s |
+| F10 | Limites de recursos + hibernação de prod (11) | cota dev global via slice; prod hiberna em `pause`, worker 24/7 |
+| F11 | Branch routing (02/03) | `{branch}-{name}-d.bitello.xyz` serve a branch local; branch só no GitHub → aviso |
+| F12 | Envs de prod cifrados + Adminer (09/05) | credencial sem texto claro em disco; gerenciador de DB acessível |
 
 ## Perguntas em aberto (decisão do Gabriel, com recomendação)
 
@@ -150,3 +170,6 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 4. **Suspend da VM inteira.** Sono v1 é por container. Suspender a VM (estado
    "Saved" do Hyper-V) quando 100% dormindo por horas é fase futura, opt-in,
    porque derruba SSH/sync/painel junto.
+5. **Gerenciador de banco.** Recomendação: Adminer (single file, ~40 MB, sem
+   dependências) no lugar do phpmyadmin, restrito à LAN e linkado do painel.
+   phpmyadmin fica como opção se o Gabriel preferir paridade com hoje.
