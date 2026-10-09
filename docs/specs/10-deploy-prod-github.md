@@ -38,7 +38,10 @@ background em andamento. Arquivos de prod são imutáveis e servidos no perfil
    **read-only**; só `storage/` (dados de runtime) é volume rw próprio do
    ambiente. Nada de edição in-place: "corrigir prod" = novo commit + novo
    deploy. `flux exec` em prod é **read-only por padrão** (comando de escrita
-   exige `--writable` e fica auditado no painel).
+   exige `--writable` e fica auditado no painel). No mesmo passo o `fluxd`
+   registra no SQLite `has_robots`/`has_sitemap` (existência de
+   `public/robots.txt` e `public/sitemap.xml` no worktree do release) — o
+   router usa os flags para servir robots/sitemap gerados quando faltam (03).
 5. **Migrations**: pipeline de prod (05) — só `migrate`, mutação bloqueia.
 6. **Blue-green** (abaixo): sobe cor nova, health, troca, drena cor velha.
 7. **Pós**: URL final no log da action; painel registra release no histórico.
@@ -84,7 +87,9 @@ PHP roda pré-compilado. No build do release, o `fluxd` aplica:
 
 Servir estático: o **router do `fluxd`** intercepta prefixos de asset
 (`/build/*`, `/vendor/*`, `favicon`, fonts — lista derivada do release) e
-entrega direto do disco do release, sem tocar o container:
+entrega direto do disco do release, sem tocar o container. `/robots.txt` e
+`/sitemap.xml` entram no mesmo intercept (03): ausentes no release → gerados;
+presentes → proxy normal (preexistente nunca é sobrescrito):
 
 | Arquivo | Cache-Control |
 |---|---|

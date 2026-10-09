@@ -49,4 +49,5 @@ marcada.
 | 00–09 | v0 escritas em 08/10/2026 |
 | 10, 11 + template CI | v0.1 (08/10/2026, observações do Gabriel: deploy GitHub, zero downtime, recursos, hibernação prod, branch routing, Adminer, tool, envs cifrados) |
 | 12 + ajustes 00/01/03/05/09 | v0.2 (09/10/2026: FATO do banco real do vippers, hibernação da VM, porteiro central, wake de API) |
+| ajustes 00/03/07/10/12 | v0.2.1 (09/10/2026: sync = mutagen decidido; R22 homolog escondida de bots; R23 robots/sitemap automáticos p/ prod sem arquivo próprio) |
 | Implementação | não iniciada (repo contém só o esqueleto Rust) |

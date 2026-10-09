@@ -11,6 +11,24 @@ daemon `fluxd` na VM, porteiro como estudo de caso.
 **Resultado**: 13 specs em `docs/specs/` (índice no [README](docs/specs/README.md))
 + template de CI em `docs/templates/deploy-workflow.yml`.
 
+**v0.2.1 (09/10, terceira rodada)**:
+
+- Pergunta 2 do sync FECHADA: **mutagen** ("usa o pronto" — decisão do
+  Gabriel). Reescrever em Rust só se virar dor operacional real.
+- R22 novo: homologação (`*-d.bitello.xyz`) invisível a bots — `robots.txt`
+  gerado `Disallow: /` SEMPRE em dev (robots do projeto ignorado em dev) +
+  header `X-Robots-Tag: noindex, nofollow, noarchive` em toda resposta de dev;
+  painel `flux.` idem.
+- R23 novo: `robots.txt` + `sitemap.xml` gerados automaticamente para prod
+  QUANDO o release não traz `public/robots.txt`/`public/sitemap.xml`;
+  preexistente vence, nunca sobrescrito. Detecção no deploy (flags
+  `has_robots`/`has_sitemap` no SQLite), não por request.
+- Crawler NUNCA acorda a VM em Saved: porteiro central (`fluxhost`) responde
+  robots/sitemap localmente (12).
+- Honesto: robots/noindex são honorários — bot malicioso ignora; esconder de
+  verdade exigiria auth em dev (toggle futuro `[dev] basic_auth`, fora de
+  escopo).
+
 **v0.2 (09/10, segunda rodada de observações)**:
 
 - FATO novo: bancos REAIS do vippers (`vippers`, `vippers_afiliados`,
@@ -55,5 +73,5 @@ projeto ou 3306; servir 500/404 cru para host gerenciado off; sync de
 `vendor/`/`node_modules/`/`storage/`/`.env`; reconstruir banco de prod; dormir
 `flux-db`; segredo em arquivo versionado/sincronizado.
 
-**Próximo**: revisão do Gabriel nas perguntas em aberto da [00-visao-geral](docs/specs/00-visao-geral.md)
-(imagem do banco, Redis no guard, suspend da VM) → F1 (setup host + VM).
+**Próximo**: revisão do Gabriel nas perguntas em aberto restantes da [00-visao-geral](docs/specs/00-visao-geral.md)
+(imagem do banco #1, Redis no guard #3, gerenciador #5) → F1 (setup host + VM).

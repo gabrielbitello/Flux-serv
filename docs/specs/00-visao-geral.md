@@ -39,6 +39,8 @@ em Rust + rsync de 4s via devfactory) por uma plataforma única:
 | R19 | VM principal dorme (Hyper-V Saved) após ociosidade longa (30 dias sem acesso real) | 12 |
 | R20 | Porteiro central acorda a VM e entrega a rota pedida (dev OU prod, API incluída) | 12 |
 | R21 | API acorda sem quebrar app (sem resposta que buga parser, sem timeout) e prod acorda mais rápido que dev | 12 |
+| R22 | Homologação (`-d`) escondida de bots: `robots.txt` `Disallow: /` sempre em dev + `X-Robots-Tag: noindex` em toda resposta de dev | 03 |
+| R23 | `robots.txt`/`sitemap.xml` gerados automaticamente para prod quando o projeto não traz os arquivos; arquivo preexistente NUNCA é sobrescrito | 03, 07, 10 |
 
 ## Arquitetura
 
@@ -141,6 +143,10 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 - **Nunca** deixar o painel ou Adminer escrever em dados de prod (read-only por grant SQL).
 - **Nunca** parar o `flux-db` (sono é só de container de app).
 - **Nunca** colocar segredo em `flux.toml` nem em arquivo sincronizado.
+- **Nunca** deixar host de dev indexável — em dev o `robots.txt` do projeto é
+  IGNORADO, vale sempre `Disallow: /` + `X-Robots-Tag: noindex` (03).
+- **Nunca** sobrescrever `robots.txt`/`sitemap.xml` que o projeto de prod já
+  tem — o gerado existe só na ausência do arquivo preexistente (03/10).
 
 ## Fases de implementação (cada fase fecha com "o que testar e como")
 
@@ -148,13 +154,13 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 |---|---|---|
 | F1 | `flux setup host` + provisionamento da VM Bookworm (01) | `flux vm status` verde; SSH com chave própria; Docker ativo na VM |
 | F2 | Sync mutagen (02) | edição no Windows aparece em `/srv/flux/projects/{name}` em < 5 s; excludes respeitados |
-| F3 | `fluxd` router + página de espera + wake (03) | container off → URL mostra página de espera 200 e sobe sozinha |
+| F3 | `fluxd` router + página de espera + wake + bots em dev (03) | container off → URL mostra página de espera 200 e sobe sozinha; `-d` responde `robots.txt` `Disallow` e header `noindex` |
 | F4 | Sono automático (04) | 15 min sem interação → `docker stop`; request → acorda |
 | F5 | Banco único + migrations + guard (05) | projeto novo migra sozinho; edição de migration em dev reconstrói; Dockerfile com imagem de banco é bloqueado |
 | F6 | CLI completa (06) | `flux up/logs/exec/down` de qualquer repo, sem prompt; `flux tool node -- npm run build` roda na VM |
 | F7 | Tunnel + domínios (03) | `{name}.bitello.xyz` e `{name}-d.bitello.xyz` resolvem pela internet |
 | F8 | Painel web (08) | dashboard com status real, logs ao vivo via SSE; prod tables read-only |
-| F9 | Prod: GitHub Actions + blue-green + releases imutáveis (10) | deploy por push, 0 request perdido, rollback < 10 s |
+| F9 | Prod: GitHub Actions + blue-green + releases imutáveis + robots/sitemap autogen (10) | deploy por push, 0 request perdido, rollback < 10 s; prod sem `robots.txt` próprio recebe gerados |
 | F10 | Limites de recursos + hibernação de prod (11) | cota dev global via slice; prod hiberna em `pause`, worker 24/7 |
 | F11 | Branch routing (02/03) | `{branch}-{name}-d.bitello.xyz` serve a branch local; branch só no GitHub → aviso |
 | F12 | Envs de prod cifrados + Adminer (09/05) | credencial sem texto claro em disco; gerenciador de DB acessível |
@@ -172,12 +178,10 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
    ~20 users/dia somados em todas as prods e ≤ 3 devs, qualquer dos dois motores
    sobra — o gargalo nunca será o motor, será conexões abertas (~50 no pico
    estimado vs `max_connections` 151 do default).
-2. **Sync: engine pronta vs escrita em Rust.** A pergunta é: usar o binário
-   pronto **mutagen** (observa as duas pastas e replica em tempo real) ou
-   escrever um sincronizador próprio em Rust (watcher + diff + transfer). Escrever
-   sync correto (renames simultâneos, escrita pela metade, conflito) é um
-   projeto inteiro e cheio de caso raro. Recomendação: mutagen v1; reescrever
-   só se ele virar dor operacional real.
+2. **Sync: engine pronta vs escrita em Rust.** RESOLVIDO em 09/10/2026: **mutagen**
+   ("usa o pronto", decisão do Gabriel). Escrever sync correto (renames
+   simultâneos, escrita pela metade, conflito) é um projeto inteiro e cheio de
+   caso raro; reescrever em Rust só se ele virar dor operacional real.
 3. **Redis no guard.** O guard barra imagens de banco no Dockerfile/compose do
    projeto. A pergunta é se `redis`/`valkey`/`memcached` (cache/fila em memória)
    também entram na lista de proibidos. Hoje nenhum projeto usa Redis (cache e

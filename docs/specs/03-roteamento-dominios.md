@@ -87,6 +87,35 @@ de Caddy por deploy, nenhuma config dinâmica para quebrar.
   (padrão `/up`, Laravel). Só considero "acordado e saudável" após health OK —
   entre start e health OK, o visitante vê página de espera com a fase real.
 
+### Bots: homologação invisível + robots/sitemap automáticos (R22, R23)
+
+O dispatch do `fluxd` intercepta `GET /robots.txt` e `GET /sitemap.xml` ANTES
+do proxy:
+
+| Host | `/robots.txt` | `/sitemap.xml` |
+|---|---|---|
+| dev (`*-d.bitello.xyz`) | SEMPRE gerado — `User-agent: *` + `Disallow: /`. O `robots.txt` do projeto é IGNORADO em dev: homolog não se indexa, política não é negociável | urlset vazio |
+| prod (`{name}.bitello.xyz`) | release tem `public/robots.txt`? proxy normal : gerado `User-agent: *` + `Allow: /` + `Sitemap: https://{name}.bitello.xyz/sitemap.xml` | release tem `public/sitemap.xml`? proxy normal : urlset gerado com a raiz e `lastmod` do release ativo |
+| painel (`flux.bitello.xyz`) | `Disallow: /` | urlset vazio |
+
+- Toda resposta de host dev — inclusive páginas de espera/estado, 503 de API e
+  proxy do app — leva o header `X-Robots-Tag: noindex, nofollow, noarchive`.
+  As páginas geradas pelo `fluxd` também incluem
+  `<meta name="robots" content="noindex, nofollow">` no HTML.
+- Content-Type: `text/plain; charset=utf-8` (robots) e `application/xml`
+  (sitemap). `Cache-Control: public, max-age=3600` nos gerados.
+- Detecção de arquivo preexistente é no DEPLOY, não por request: o
+  deploy orchestrator registra `has_robots`/`has_sitemap` no SQLite ao montar o
+  release (10) — o router só consulta o flag. Preexistente vence SEMPRE; o
+  gerado existe apenas na ausência.
+- Honestidade: `robots.txt`/`noindex` são honorários — bot de busca sério
+  (Google, Bing) honra; bot malicioso ignora. Esconder homolog de VERDADE
+  exigiria auth — fora de escopo agora; toggle `[dev] basic_auth` é caminho
+  futuro se um dia fizer falta.
+- Com a VM em Saved (12), o porteiro central responde robots/sitemap
+  localmente SEM acordar a VM — crawler jamais acorda a VM (coerente com R19).
+
+
 ### Página de espera / de estado
 
 Uma página, três fases, sempre HTTP 200, auto-refresh a cada 3 s
@@ -122,6 +151,10 @@ JS quando detecta mudança de fase (SSE opcional):
 | Asset fingerprinted de release de prod (10) | servido direto do disco pelo fluxd, `Cache-Control: immutable`, sem tocar o container |
 | Host não registrado | 404 brandiado "host desconhecido" (único 404; não é caso de container off) |
 | VM inteira em Saved (12) | porteiro central (fluxhost) acorda a VM e entrega a rota; browser vê página "acordando a VM" 200 (10–20 s), API vê 503 `Retry-After` |
+| `GET /robots.txt` em host dev | gerado `Disallow: /` (robots do projeto ignorado em dev, R22) |
+| `GET /robots.txt` em prod sem o arquivo no release | gerado `Allow: /` + linha `Sitemap:` (R23) |
+| `GET /sitemap.xml` em prod sem o arquivo no release | urlset gerado com a raiz + `lastmod` do release ativo (R23) |
+| Qualquer rota de host dev | resposta normal + header `X-Robots-Tag: noindex, nofollow, noarchive` (R22) |
 
 ## Decisões
 
@@ -148,6 +181,10 @@ JS quando detecta mudança de fase (SSE opcional):
   mata wake/sono/página de espera).
 - **Nunca** confiar no HTTP 200 da página de espera como sinal de app saudável
   em scripts — usar `flux status`.
+- **Nunca** servir o `robots.txt` do projeto em host de dev — em dev a política
+  é SEMPRE `Disallow: /` (R22).
+- **Nunca** sobrescrever `robots.txt`/`sitemap.xml` preexistentes do projeto em
+  prod — o gerado só existe quando o release NÃO traz o arquivo (R23).
 
 ## Critérios de aceite
 
@@ -159,3 +196,8 @@ JS quando detecta mudança de fase (SSE opcional):
 4. Crash forçado (exit no entrypoint) → página "falhou" com log real após ~3
    restarts, sem nunca um 500 cru.
 5. `flux tunnel status` reflete queda do cloudflared em < 30 s no painel.
+6. `curl https://{name}-d.bitello.xyz/robots.txt` → `Disallow: /`; qualquer
+   resposta de `-d` carrega `X-Robots-Tag: noindex, nofollow, noarchive`.
+7. Prod SEM `public/robots.txt` no release → `/robots.txt` e `/sitemap.xml`
+   gerados; projeto COM os arquivos → eles passam intactos (diff vazio contra
+   o release).

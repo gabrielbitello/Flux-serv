@@ -69,7 +69,10 @@ fazer sentido lá.
 - **O que NÃO acorda a VM**: health checks entre si (fluxdb/fluxd conversam
   internos), revisita de crawler sem request real a host gerenciado, monitor do
   próprio tunnel (heartbeats não contam como interação — lição do beat do
-  porteiro: só interação HUMANA ou de app real).
+  porteiro: só interação HUMANA ou de app real). Crawler pedindo
+  `/robots.txt`/`/sitemap.xml`: o `fluxhost` responde LOCALMENTE sem acordar a
+  VM — dev = `Disallow: /` + urlset vazio + `X-Robots-Tag: noindex` (R22);
+  prod = gerados sem `lastmod` (não conhece o release daqui) (R23, 03).
 
 ### Acordar API sem quebrar o app (R21)
 

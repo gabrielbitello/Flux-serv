@@ -22,7 +22,7 @@ flux-cli/      binário do Windows
 
 | Módulo | Função |
 |---|---|
-| **router** (axum, :8080) | dispatch por `Host`; proxy hyper para o container; injeção do overlay de beat; páginas de espera/estado; catch-all para o painel em `flux.bitello.xyz` |
+| **router** (axum, :8080) | dispatch por `Host`; proxy hyper para o container; injeção do overlay de beat; páginas de espera/estado; intercept de `/robots.txt` + `/sitemap.xml` (gerados na ausência em prod, sempre `Disallow` em dev — R22/R23, 03) + `X-Robots-Tag: noindex` em todo host dev; catch-all para o painel em `flux.bitello.xyz` |
 | **control API** (axum, :7420, bind 127.0.0.1) | REST para o CLI e painel — token obrigatório (09). Endpoints: projetos (register/up/down/status), sync, db, logs (SSE), infra (vm/tunnel/caddy), panel auth |
 | **docker** (bollard) | inspect/stats/events/start/stop/exec; listener de `docker events` alimenta o re-sync do sono (04) e o cache de IPs |
 | **sleep manager** | sinais de interação, leases, sweep 60 s, cooldown, decisões de stop/start (04) |
@@ -39,7 +39,7 @@ flux-cli/      binário do Windows
 projects(name PK, toml TEXT, toml_hash, compose_hash, created_at)
 sleep_state(project, env, last_interaction, sleeping_since, lease_until, cooldown_until, mode)
 migration_state(project, env, file, sha256, batch, applied_at, PK(project,env,file))
-active_color(project, color, release_sha)                -- blue-green de prod (10)
+active_color(project, color, release_sha, has_robots, has_sitemap) -- blue-green (10); flags do release ATIVO p/ robots/sitemap gerados (03)
 deploy_log(id, project, env, kind, detail_json, ok, created_at)   -- up/deploy/migrate/rebuild, com motivo
 events(id, level, scope, message, created_at)                     -- trilha para o painel
 settings(k PK, v)                                                 -- tokens de API/deploy (hash), versão do schema
