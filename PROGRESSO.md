@@ -2,38 +2,43 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
-## 08/10/2026 — Specs v0 escritas
+## 08–09/10/2026 — Specs v0 → v0.2
 
 **Intenção**: definir a arquitetura completa do Flux antes de qualquer código —
 gerenciador de containers Docker em VM Hyper-V Bookworm, CLI `flux` no Windows,
 daemon `fluxd` na VM, porteiro como estudo de caso.
 
-**Resultado**: 12 specs em `docs/specs/` (índice no [README](docs/specs/README.md))
-+ template de CI em `docs/templates/deploy-workflow.yml`, cobrindo: VM Hyper-V,
-sync mutagen, roteamento Cloudflare+Caddy com página de espera (nunca 500/404),
-adormecimento por interação, banco único com migrations dev/prod, CLI, fluxd,
-painel web, segurança/config, deploy de prod por GitHub Actions com blue-green,
-limites de recursos e hibernação de prod.
+**Resultado**: 13 specs em `docs/specs/` (índice no [README](docs/specs/README.md))
++ template de CI em `docs/templates/deploy-workflow.yml`.
 
-**Segunda rodada do dia (observações do Gabriel incorporadas, v0.1)**:
+**v0.2 (09/10, segunda rodada de observações)**:
 
-- Prod 100% na VM: código entra por GitHub Actions (template pronto), nunca do
-  Windows; releases imutáveis + perfil estático (assets pelo fluxd, opcache,
-  caches de config/route/view) = mais rápido com menos PHP vivo.
-- Zero downtime blue-green com drain: job em andamento termina na versão velha;
-  scheduler com lock único; rollback sem build.
-- Recursos: cota GLOBAL de dev via slice cgroup (`flux-dev.slice`, kernel
-  garante a soma) com sleep-to-admit; prod com limite individual; prod hiberna
-  em `docker pause` (< 1 s, invisível) e o worker 24/7 mantém e-mails/
-  notificações; pressão de RAM degrada pause→stop.
-- Branch routing: `{branch}-{name}-d.bitello.xyz` serve worktree local;
-  branch só no GitHub → página brandiada 200.
-- Adminer (LAN-only) no lugar do phpmyadmin; painel e Adminer read-only em prod
-  por grant SQL SELECT-only.
-- `flux tool`: node/php/composer/rust em container efêmero na VM — PC não
-  instala toolchain.
-- Envs de prod cifrados: age + `systemd-creds --tpm2` (vTPM da VM); VHDX
-  roubado não decifra; painel nunca mostra valor.
+- FATO novo: bancos REAIS do vippers (`vippers`, `vippers_afiliados`,
+  `vippers_test_fix_g1..g8`, `base-laravel`) moram no `mariadb` compartilhado
+  (`mysql:8.4`) — conferido por `SHOW DATABASES`. Os `mysql:9.3` por-dev são
+  sobras dokploy Exited, não alimentam nada. WSL segue INTACTO até migração
+  assistida (`flux migrate-from-wsl`).
+- Spec 12 nova: VM inteira dorme em **Save-VM** (Hyper-V) após 30 dias sem
+  acesso REAL (heartbeat/crawler não contam); **porteiro central no host
+  Windows** (cloudflared serviço + `fluxhost :8443`) acorda a VM e entrega a
+  rota — Alpine descartada com trade-offs registrados (guest Hyper-V não liga
+  guest; par nativo custa ~50 MB vs ~256 MB).
+- Wake de API: prod pausado responde o request original em < 1 s; prod parado =
+  `503` JSON + `Retry-After` (padrão HTTP, nunca HTML, nunca 200 falso) com
+  hold opcional até 45 s; fila de wake prioriza prod; concorrência de acordos
+  = 2 (anti-explosão de RAM/CPU); `api_always_warm` opt-in por projeto.
+- `flux.toml` ganha `[api] hold_secs` e `api_always_warm`; tunnel/token movidos
+  da VM para o host (specs 01/09); matriz de respostas da 03 atualizada.
+
+**v0.1 (08/10, observações do Gabriel)**: prod 100% na VM via GitHub Actions
+(template pronto), releases imutáveis + perfil estático, blue-green com drain de
+jobs e scheduler com lock único, rollback sem build; cota GLOBAL de dev via
+slice cgroup com sleep-to-admit, prod com limite individual; prod hiberna em
+`docker pause` (< 1 s, invisível) e o worker 24/7 mantém e-mails/notificações;
+Adminer (LAN-only) no lugar do phpmyadmin; painel read-only em prod por grant
+SQL; `flux tool` (node/php/composer/rust efêmero na VM); envs de prod cifrados
+com age + `systemd-creds --tpm2`; branch routing por worktree
+(`{branch}-{name}-d.bitello.xyz`).
 
 **Decisões centrais (a validar)**:
 

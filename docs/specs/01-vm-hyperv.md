@@ -48,17 +48,23 @@ Pipeline idempotente, cada passo verifica antes de agir:
    `Disabled` em produção do Flux (snapshots manuais via `flux vm checkpoint`).
 5. Boot + espera SSH responder (poll 1s, timeout 10 min, progresso no terminal).
 6. Instala o binário `fluxd` na VM (`/usr/local/bin/fluxd`) e os units systemd:
-   `fluxd.service` (After=docker.service, Restart=always), `caddy.service`,
-   `cloudflared.service` (token lido de `/srv/flux/secrets/tunnel.token`).
+   `fluxd.service` (After=docker.service, Restart=always), `caddy.service`.
+   O `cloudflared` NÃO vai para a VM: `flux setup tunnel` instala o serviço
+   Windows no host (12 — porteiro central precisa dele vivo com a VM dormindo);
+   o token do tunnel fica em `%USERPROFILE%\.flux\tunnel.token` (09).
 
 ### Ciclo de vida
 
 - **Boot do Windows** → serviço `fluxhost` (SYSTEM) executa `Start-VM Flux -IfOff`
   assíncrono. A VM fica de pé mesmo sem ninguém usar (custo em idle: ~0,5–1 GB
   RAM com memória dinâmica; aceitável).
-- **`flux` detecta VM off** (SSH timeout) → pede ao serviço `fluxhost` para subir
-  → espera SSH. Nunca exige UAC no comando do usuário (o serviço é quem chama
-  os cmdlets Hyper-V).
+- **Ociosidade longa (12)**: 30 dias sem acesso real em TODOS os hosts →
+  `fluxhost` executa `Save-VM` (guardas do `fluxd` confirmadas antes: sync sem
+  pendências, sem lease, sem deploy/backup em curso). Resume em 10–20 s, sem
+  re-subida de containers (sem pico). Estado `saved` visível no painel.
+- **`flux` detecta VM off/saved** (SSH timeout) → pede ao serviço `fluxhost`
+  para subir → espera SSH. Nunca exige UAC no comando do usuário (o serviço é
+  quem chama os cmdlets Hyper-V).
 - **Desligamento**: manual apenas (`flux vm stop` → ACPI shutdown com timeout,
   depois off). O CLI avisa quantos projetos estão acordados antes.
 - **Upgrade**: `flux vm upgrade` cria checkpoint `pre-upgrade-<data>`, atualiza

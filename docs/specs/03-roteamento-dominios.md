@@ -15,10 +15,12 @@ página de espera estilo porteiro, com auto-refresh, até o app responder.
 Navegador
   → Cloudflare edge (TLS *.bitello.xyz, proxy ON)
   → CNAME wildcard *.bitello.xyz → <tunnel-id>.cfargotunnel.com
-  → cloudflared (systemd na VM) → https://127.0.0.1 (Caddy)
-  → Caddy: catch-all reverse_proxy → 127.0.0.1:8080 (fluxd)
+  → cloudflared (SERVIÇO WINDOWS, no host — 12: serve mesmo com a VM dormindo)
+  → fluxhost :8443 (porteiro central: VM dormindo? Resume-VM primeiro)
+  → Caddy (VM): catch-all reverse_proxy → 127.0.0.1:8080 (fluxd)
   → fluxd decide por Host:
         host gerenciado + acordado  → proxy HTTP para IP interno do container
+        prod pausado (pause, 11)   → unpause + proxy — invisível (< 1 s)
         host gerenciado + dormindo  → docker start + página de espera (200)
         host gerenciado + acordando → página de espera (200)
         host gerenciado + crash     → página de estado "falhou" (200)
@@ -40,6 +42,9 @@ de Caddy por deploy, nenhuma config dinâmica para quebrar.
    `127.0.0.1:20241/metrics` → conexões ativas) e o systemd.
 4. TLS no origin: certificado interno do Caddy (`tls internal`) — o túnel cifra
    de ponta a edge; cloudflared fala HTTPS com Caddy sem validar CA pública.
+5. `cloudflared` fica no HOST Windows como serviço (12): é quem garante
+   `*.bitello.xyz` respondendo mesmo com a VM em Saved — o porteiro central
+   (`fluxhost :8443`) acorda a VM antes de devolver o request.
 
 ### Caddy (Caddyfile estático)
 
@@ -112,9 +117,11 @@ JS quando detecta mudança de fase (SSE opcional):
 | Crash loop / health falhando | 200 página de estado "falhou" (honesto, com log) |
 | Conexão ao upstream falhou | reavalia estado (porteiro faz isso); se app morto → página "falhou"; nunca 502 |
 | Branch de worktree não existente localmente (02) | 200 página brandiada "branch não encontrada localmente" + instrução de `git worktree add` |
+| API de prod pausada (11) | `unpause` + request original respondido em < 1 s — nunca erro |
+| API de prod/dev PARADA (12) | **HTTP 503 JSON** `{"error":"service_waking","retry_after":30}` + header `Retry-After` — acorda na fila prioritária; alternativa hold até `api.hold_secs`. Nunca HTML em rota de API, nunca 200 com corpo de erro |
 | Asset fingerprinted de release de prod (10) | servido direto do disco pelo fluxd, `Cache-Control: immutable`, sem tocar o container |
 | Host não registrado | 404 brandiado "host desconhecido" (único 404; não é caso de container off) |
-| VM inteira off / fluxd morto | IMPOSSÍVEL servir página de espera da VM — mitigação: `fluxhost` garante VM de pé no boot e on-demand; queda real da VM aparece como erro do Cloudflare (documentado como limite) |
+| VM inteira em Saved (12) | porteiro central (fluxhost) acorda a VM e entrega a rota; browser vê página "acordando a VM" 200 (10–20 s), API vê 503 `Retry-After` |
 
 ## Decisões
 
@@ -128,8 +135,12 @@ JS quando detecta mudança de fase (SSE opcional):
 
 ## O que NUNCA fazer
 
-- **Nunca** devolver 500/502/503/504 cru para host gerenciado off — sempre a
-  página de espera/estado com 200.
+- **Nunca** devolver 500/502/503/504 **cru** (HTML de erro de proxy) para host
+  gerenciado off — sempre página de espera/estado com 200. Única exceção
+  deliberada: API parada recebe `503` **JSON com `Retry-After`** (12) —
+  semântica HTTP padrão, corpo JSON, nunca cru.
+- **Nunca** responder HTML em rota detectada como API; nunca 200 com corpo de
+  erro (200 falso é o que buga parser).
 - **Nunca** publicar `ports:` no container para "testar direto" (fura TLS, fura
   sono, expõe app sem auth na rede interna).
 - **Nunca** colocar o painel sem auth atrás do wildcard público.

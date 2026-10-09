@@ -36,6 +36,9 @@ em Rust + rsync de 4s via devfactory) por uma plataforma única:
 | R16 | Gerenciador de banco (phpmyadmin ou mais leve) | 05 |
 | R17 | Toolchain (node, rust, composer…) rodando na VM sob demanda, sem instalar no PC | 06 |
 | R18 | `.env` de produção armazenado cifrado localmente; painel NÃO edita dados de prod, só vê | 09, 05 |
+| R19 | VM principal dorme (Hyper-V Saved) após ociosidade longa (30 dias sem acesso real) | 12 |
+| R20 | Porteiro central acorda a VM e entrega a rota pedida (dev OU prod, API incluída) | 12 |
+| R21 | API acorda sem quebrar app (sem resposta que buga parser, sem timeout) e prod acorda mais rápido que dev | 12 |
 
 ## Arquitetura
 
@@ -80,7 +83,7 @@ host desconhecido = página brandiada do Flux.
 | Componente | Onde roda | Faz |
 |---|---|---|
 | `flux` | Windows | Comandos no repo, orquestra sync e chama a VM via SSH |
-| `fluxhost` (serviço Windows) | Windows | `Start-VM`/`Stop-VM` sem UAC a cada comando; garante VM de pé no boot |
+| `fluxhost` (serviço Windows) | Windows | **Porteiro central** (12): gerencia Start/Save da VM sem UAC + listener `:8443` que segura o tunnel quando a VM dorme e a acorda sob demanda |
 | mutagen | Windows (daemon) + agente injetado na VM via SSH | Sync contínuo unidirecional Windows → VM |
 | `fluxd serve` | VM | Router HTTP, wake/sleep, painel, API de controle (inclui endpoint de deploy do CI), pipeline de migrations, guard de imagens, blue-green de prod |
 | `fluxd ctl` | VM (chamado por SSH) | Subcomandos de baixo nível para o CLI |
@@ -88,7 +91,7 @@ host desconhecido = página brandiada do Flux.
 | Adminer | container na VM | Gerenciador do banco único, LAN-only, linkado do painel (05) |
 | sidecar de toolchain | container efêmero na VM | node/php/composer/rust sob demanda via `flux tool` (06) |
 | Caddy | VM (systemd) | TLS local + catch-all → `fluxd`. Configuração estática, nunca editada por projeto |
-| cloudflared | VM (systemd) | Tunnel `*.bitello.xyz` → Caddy |
+| `cloudflared` | Windows (serviço, 12) | Tunnel `*.bitello.xyz` → `fluxhost :8443` — fica no HOST para servir mesmo com a VM dormindo |
 | `flux-db` | container na VM | Única MariaDB/MySQL de todos os projetos. Nunca dorme |
 | Docker Engine | VM | Roda os containers dos projetos |
 
@@ -155,21 +158,36 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 | F10 | Limites de recursos + hibernação de prod (11) | cota dev global via slice; prod hiberna em `pause`, worker 24/7 |
 | F11 | Branch routing (02/03) | `{branch}-{name}-d.bitello.xyz` serve a branch local; branch só no GitHub → aviso |
 | F12 | Envs de prod cifrados + Adminer (09/05) | credencial sem texto claro em disco; gerenciador de DB acessível |
+| F13 | Hibernação da VM + porteiro central + wake de API (12) | VM Save/Resume sob demanda; API 503 `Retry-After` sem quebrar app; fila de wake sem explosão |
 
 ## Perguntas em aberto (decisão do Gabriel, com recomendação)
 
-1. **Imagem do banco única.** FATO: o container atual no WSL se chama `mariadb`
-   mas roda a imagem `mysql:8.4` (`MYSQL_VERSION=8.4.11`). Recomendação: manter
-   `mysql:8.4` por paridade (zero surpresa de collation/auth_plugin em projetos
-   Laravel existentes); `mariadb:11` fica como opção em config.
-2. **Sync nativo em Rust no futuro?** Recomendação: mutagen v1; reavaliar engine
-   nativa só se mutagen virar dor operacional.
-3. **Redis.** O guard bloqueia qualquer banco de dados. Redis/cache em memória
-   também fica bloqueado por padrão (lista configurável em `flux.toml` global).
-   Recomendação: manter bloqueado até existir demanda real.
-4. **Suspend da VM inteira.** Sono v1 é por container. Suspender a VM (estado
-   "Saved" do Hyper-V) quando 100% dormindo por horas é fase futura, opt-in,
-   porque derruba SSH/sync/painel junto.
+1. **Imagem do banco único.** FATO: o container atual no WSL se chama `mariadb`
+   e roda a imagem `mysql:8.4` (`MYSQL_VERSION=8.4.11`) — e é NELE que moram os
+   bancos reais do vippers (`vippers`, `vippers_afiliados`, `base-laravel`,
+   `vippers_test_fix_g1..g8`, conferido por `SHOW DATABASES` em 09/10/2026). Os
+   `vippers-dev-mysql`/`pedi-dev-mysql` (`mysql:9.3`, Exited) são sobras dokploy
+   que NÃO alimentam nada hoje. Recomendação: `mysql:8.4` (paridade com o que
+   realmente roda); `mariadb:11` fica como opção em config. Capacidade: com
+   ~20 users/dia somados em todas as prods e ≤ 3 devs, qualquer dos dois motores
+   sobra — o gargalo nunca será o motor, será conexões abertas (~50 no pico
+   estimado vs `max_connections` 151 do default).
+2. **Sync: engine pronta vs escrita em Rust.** A pergunta é: usar o binário
+   pronto **mutagen** (observa as duas pastas e replica em tempo real) ou
+   escrever um sincronizador próprio em Rust (watcher + diff + transfer). Escrever
+   sync correto (renames simultâneos, escrita pela metade, conflito) é um
+   projeto inteiro e cheio de caso raro. Recomendação: mutagen v1; reescrever
+   só se ele virar dor operacional real.
+3. **Redis no guard.** O guard barra imagens de banco no Dockerfile/compose do
+   projeto. A pergunta é se `redis`/`valkey`/`memcached` (cache/fila em memória)
+   também entram na lista de proibidos. Hoje nenhum projeto usa Redis (cache e
+   fila Laravel rodam no driver `database`, no próprio `flux-db`); permitir
+   Redis por projeto recriaria a era dokploy de N bancos. Recomendação:
+   bloqueado por padrão; se um projeto precisar de verdade, avalia-se um Redis
+   compartilhado único no estilo do `flux-db`.
+4. **Suspend da VM inteira.** RESOLVIDO nesta versão: virou a spec
+   [12](12-vm-hibernacao-porteiro-central.md) — Save-VM após 30 dias sem acesso
+   real, com porteiro central no host acordando sob demanda.
 5. **Gerenciador de banco.** Recomendação: Adminer (single file, ~40 MB, sem
    dependências) no lugar do phpmyadmin, restrito à LAN e linkado do painel.
    phpmyadmin fica como opção se o Gabriel preferir paridade com hoje.

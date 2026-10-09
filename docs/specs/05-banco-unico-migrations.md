@@ -33,6 +33,14 @@ O guard + `flux-db` encerram essa era: um motor só. Migração dos dados dos
 legados: `flux migrate-from-wsl` (09), descarte dos containers/imagens só com
 ok explícito do Gabriel.
 
+FATO (09/10/2026, `SHOW DATABASES` no `mariadb` compartilhado): os bancos REAIS
+do vippers moram NELE — `vippers`, `vippers_afiliados`, `base-laravel` e as
+DBs de teste `vippers_test_fix_g1..g8` (PHPUnit paralelo). Os `mysql:9.3`
+legados NÃO alimentam nada hoje. Banco correto do vippers = `mysql:8.4`
+compartilhado; `flux migrate-from-wsl` traz exatamente esses schemas para o
+`flux-db`. DBs `*_test_*` viram `{name}_test` gerenciado (criadas/destruídas
+por rodada de teste, fora do pipeline de migrations).
+
 Um banco por projeto por ambiente: `{name}_dev` e `{name}_prod` (worktrees de
 branch: `{name}_{branch-slug}_dev`, 02). O app recebe as credenciais via `.env`
 mantido no lado VM (injetado pelo `flux env` no cadastro: `DB_HOST=flux-db`,

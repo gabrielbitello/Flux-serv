@@ -72,6 +72,10 @@ Estado atual da política visível no painel.
 retomaria prods parados com RAM em disco; não entra na v1 (fragilidade
 conhecida do CRIU com sockets/state não trivial).
 
+A camada ACIMA desta (VM inteira dormindo em Saved após 30 dias sem acesso,
+porteiro central no host acordando sob demanda, wake de API com prioridade e
+anti-explosão) é a spec [12](12-vm-hibernacao-porteiro-central.md).
+
 ### Tarefas agendadas e background na hibernação
 
 - **Worker nunca hiberna.** O container de worker/queue/scheduler de prod

@@ -12,7 +12,7 @@ do Flux — para nenhum token vazar por git, sync ou painel.
 | Segredo | Onde vive | Permissão | Quem lê |
 |---|---|---|---|
 | Chave SSH da VM | `%USERPROFILE%\.flux\id_ed25519` (Windows) + `authorized_keys` do user `flux` (VM) | 600 / Windows ACL só do usuário | CLI (Windows); `fluxd` nunca |
-| Token do tunnel Cloudflare | `/srv/flux/secrets/tunnel.token` (VM) | 600 `root:flux` | systemd do cloudflared |
+| Token do tunnel Cloudflare | `%USERPROFILE%\.flux\tunnel.token` (HOST Windows — o cloudflared é serviço do host, 12) | ACL do usuário | serviço Windows do cloudflared |
 | Senha root do banco | `/srv/flux/secrets/db-root.env` (VM) | 600 | compose do `flux-db` |
 | `.env` de produção | **cifrado** em `/var/lib/flux-creds/{name}.cred` (VM) — mecanismo abaixo | 600 `root:root` | `fluxd` (decifra em runtime, injeta no container) |
 | Chave age de prod | sealed pelo vTPM da VM (`systemd-creds`); backup cifrado no Windows | 600 | `fluxd` |

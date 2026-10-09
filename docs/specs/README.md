@@ -21,6 +21,7 @@ Ordem de leitura recomendada:
 10. [`09-seguranca-config.md`](09-seguranca-config.md) — segredos, chaves, config global, envs de prod cifrados.
 11. [`10-deploy-prod-github.md`](10-deploy-prod-github.md) — deploy por GitHub Actions, releases imutáveis, blue-green, perfil estático.
 12. [`11-recursos-hibernacao.md`](11-recursos-hibernacao.md) — cota global de dev, limite individual de prod, hibernação invisível, tarefas agendadas.
+13. [`12-vm-hibernacao-porteiro-central.md`](12-vm-hibernacao-porteiro-central.md) — VM em Saved após ociosidade longa, porteiro central no host, wake de API com prioridade e anti-explosão.
 
 Template de CI: [`docs/templates/deploy-workflow.yml`](../templates/deploy-workflow.yml)
 (instalado no projeto com `flux init ci`).
@@ -47,4 +48,5 @@ marcada.
 |---|---|
 | 00–09 | v0 escritas em 08/10/2026 |
 | 10, 11 + template CI | v0.1 (08/10/2026, observações do Gabriel: deploy GitHub, zero downtime, recursos, hibernação prod, branch routing, Adminer, tool, envs cifrados) |
+| 12 + ajustes 00/01/03/05/09 | v0.2 (09/10/2026: FATO do banco real do vippers, hibernação da VM, porteiro central, wake de API) |
 | Implementação | não iniciada (repo contém só o esqueleto Rust) |
