@@ -23,7 +23,10 @@ Ordem de leitura recomendada:
 12. [`11-recursos-hibernacao.md`](11-recursos-hibernacao.md) — cota global de dev, limite individual de prod, hibernação invisível, tarefas agendadas.
 13. [`12-vm-hibernacao-porteiro-central.md`](12-vm-hibernacao-porteiro-central.md) — VM em Saved após ociosidade longa, porteiro central no host, wake de API com prioridade e anti-explosão.
 14. [`13-observabilidade-alertas.md`](13-observabilidade-alertas.md) — métricas + histórico no painel, alertas outbound, dead-man's switch, uptime externo, logs com rotação.
-15. [`14-ciclo-vida-recuperacao.md`](14-ciclo-vida-recuperacao.md) — snapshot pré-migrate de prod, DR com `flux export/import`, upgrade do fluxd/flux com rollback.
+15. [`14-ciclo-vida-recuperacao.md`](14-ciclo-vida-recuperacao.md) — snapshot pré-migrate de prod, backup agendado 48 h/7 d, DR com `flux export/import`, upgrade do fluxd/flux com rollback.
+16. [`15-paginas-erro-manutencao.md`](15-paginas-erro-manutencao.md) — fora de dev nunca página de erro padrão; página própria de prod vence; modo manutenção com bypass.
+17. [`16-seguranca-propria.md`](16-seguranca-propria.md) — security headers em tudo + WAF próprio no fluxd (OWASP básico, bad bots, brute-force, reputação de IP), sem terceiros.
+18. [`17-status-publico.md`](17-status-publico.md) — status público por site (página + JSON), uptime 7/30 dias, causa classificada: site / plataforma / internet.
 
 Template de CI: [`docs/templates/deploy-workflow.yml`](../templates/deploy-workflow.yml)
 (instalado no projeto com `flux init ci`).
@@ -53,4 +56,5 @@ marcada.
 | 12 + ajustes 00/01/03/05/09 | v0.2 (09/10/2026: FATO do banco real do vippers, hibernação da VM, porteiro central, wake de API) |
 | ajustes 00/03/07/10/12 | v0.2.1 (09/10/2026: sync = mutagen decidido; R22 homolog escondida de bots; R23 robots/sitemap automáticos p/ prod sem arquivo próprio) |
 | 13, 14 + ajustes 00/01/03/05/06/07/09/10/11 | v0.3 (09/10/2026: R24–R30 — observabilidade/alertas, DR + snapshot pré-migrate + upgrade, multi-stack PHP/Node/Rust, host manda (fila), isolamento de rede, guard runtime, rate limit/borda) |
+| 15, 16, 17 + ajustes 00/03/06/09/14 | v0.4 (10/10/2026: R31–R34 — erros fora de dev + manutenção, segurança própria sem terceiros, status público com causa, backup 48 h/7 d; edge cache e e-mail em estudo) |
 | Implementação | não iniciada (repo contém só o esqueleto Rust) |

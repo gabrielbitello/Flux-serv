@@ -8,7 +8,8 @@ VM nova de pé e prods servindo em ≤ 30 min (dados: ≤ 60 min). E o próprio 
 tem procedimento de upgrade sem derrubar nada, com rollback.
 
 Requisitos desta spec: R25 (recuperável: snapshot pré-migrate, DR medido,
-upgrade seguro com rollback). Boot do host e queda de energia: [01](01-vm-hyperv.md).
+upgrade seguro com rollback) e R34 (backup agendado de banco de prod: 48 h,
+retenção 7 dias). Boot do host e queda de energia: [01](01-vm-hyperv.md).
 
 ## Mecanismo
 
@@ -36,6 +37,20 @@ docker exec flux-db sh -c \
 - **Restore** (manual, nunca automático): `flux db restore {name} {arquivo} --yes`
   — pausa o HTTP da cor ativa (`pause`, < 1 s sem request em voo), importa o
   dump, retoma. Sem `--yes`, o comando só mostra o que faria.
+
+### Backup agendado dos bancos de prod (R34)
+
+Além do pré-migrate (event-driven), roda um agendado de rotina:
+
+- **A cada 48 h** o `fluxd` dumpa TODAS as `{name}_prod` — mesmo comando do
+  pré-migrate (`mysqldump --single-transaction --routines --triggers`, sem
+  lock), destino `/srv/flux/backups/scheduled/{name}/{ts}.sql.gz`.
+- **Retenção 7 dias**: prune diário apaga dump com mais de 7 dias (~3–4 dumps
+  por projeto no disco).
+- Integridade: `gzip -t` pós-dump; falhou ou não rodou no prazo → **alerta**
+  (13). Dump de backup sem verificação é papel.
+- Resto de backup (storage/uploads de mídia, VM inteira, offsite): FORA de
+  escopo por decisão do Gabriel (10/10/2026) — só banco de prod, 48 h/7 d.
 
 ### Disaster recovery: `flux export` / `flux import` (R25)
 
@@ -129,3 +144,5 @@ para outro dispositivo ou nuvem — hoje todo backup mora no mesmo disco físico
 5. `flux self-update` troca o binário durante um comando em andamento sem
    matar o comando.
 6. `flux export` aberto sem a passphrase do `secrets.age` → nada legível.
+7. Dump agendado de 48 h roda sozinho em todas as prods; `gzip -t` passa;
+   falha simulada → alerta (13); dump com 8 dias some do disco (prune).

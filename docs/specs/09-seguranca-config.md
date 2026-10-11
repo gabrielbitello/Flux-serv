@@ -105,6 +105,14 @@ retention_days = 14         # /srv/flux/logs + prune diário (13)
 [alerts]
 channel = "telegram"        # telegram | discord | email (13)
 cooldown_minutes = 60       # críticos repetem a cada 15 min
+
+[shield]                    # WAF próprio (16)
+shadow_days = 7             # site novo em modo log antes de enforce
+allowlist = ["192.168.140.1"]  # nunca bloqueados (IP do host, do Gabriel)
+brute_force = "10 falhas / 10 min -> 15 min de ban"
+
+[status]
+external_witness = "uptimerobot"  # testemunha externa do healthz (17); alternativa: sonda no notebook
 ```
 
 - Diretório `%USERPROFILE%\.flux\` com ACL do usuário apenas; log do CLI em

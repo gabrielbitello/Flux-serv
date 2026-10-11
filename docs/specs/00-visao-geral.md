@@ -48,6 +48,10 @@ em Rust + rsync de 4s via devfactory) por uma plataforma única:
 | R28 | Isolamento de rede entre projetos (rede por projeto + `flux-db-net`); projeto A não alcança banco do projeto B | 05 |
 | R29 | Guard de runtime: `privileged`, namespaces host, `cap_add` crítica, devices, docker.sock bloqueados (ou `--ack` auditado) | 05 |
 | R30 | Borda com rate limit por host, teto de conexões e teto de body (`429`/`413`, nunca 500 cru) | 03, 07 |
+| R31 | Fora de dev, NUNCA página de erro padrão — família Flux; erro gerado pelo app passa (página própria de prod vence); modo manutenção com bypass | 15, 03 |
+| R32 | Segurança PRÓPRIA de plataforma, sem terceiros: security headers em tudo + WAF local (OWASP básico, bad bots, brute-force, reputação de IP) com shadow mode | 16 |
+| R33 | Status público por site: página p/ navegador, JSON p/ API, uptime 7/30 dias, causa classificada (site / plataforma / internet) | 17 |
+| R34 | Backup agendado de banco de prod: a cada 48 h, retenção 7 dias | 14 |
 
 ## Arquitetura
 
@@ -174,8 +178,11 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 | F13 | Hibernação da VM + porteiro central + wake de API (12) | VM Save/Resume sob demanda; API 503 `Retry-After` sem quebrar app; fila de wake sem explosão |
 | F14 | Segurança de plataforma: redes por projeto, guard runtime, rate limit/borda (05/07/03) | projeto A não alcança banco do B; `privileged` bloqueado; 429/413 na borda |
 | F15 | Observabilidade: métricas + histórico + alertas + logs (13) | painel com curva 24h; crash loop → alerta no canal < 2 min; dead-man provado |
-| F16 | Ciclo de vida: snapshot pré-migrate, DR export/import, upgrade fluxd/flux (14) | deploy com pendência gera dump registrado; ensaio DR ≤ 30 min medido; upgrade com 0 request perdido |
+| F16 | Ciclo de vida: snapshot pré-migrate, backup 48 h/7 d, DR export/import, upgrade fluxd (14) | deploy com pendência gera dump registrado; dump agendado roda e poda; ensaio DR ≤ 30 min medido; upgrade com 0 request perdido |
 | F17 | Multi-stack: node e rust de primeira classe (06) | projeto node com `migrate_cmd` + health própria sobe igual a laravel |
+| F18 | Páginas de erro fora de dev + modo manutenção (15/03) | `zzz.bitello.xyz` 404 brandiado; app com 404 própria passa intocado; manutenção 503 + bypass |
+| F19 | Segurança própria: headers + WAF local (16) | headers em toda prod; SQLi/path scan 403; brute-force bane IP; shadow → enforce sem falso positivo |
+| F20 | Status público (17) | página + JSON por site; causa site/plataforma/internet classificada; testemunha externa do healthz |
 
 ## Perguntas em aberto (decisão do Gabriel, com recomendação)
 
@@ -206,3 +213,14 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 5. **Gerenciador de banco.** Recomendação: Adminer (single file, ~40 MB, sem
    dependências) no lugar do phpmyadmin, restrito à LAN e linkado do painel.
    phpmyadmin fica como opção se o Gabriel preferir paridade com hoje.
+6. **Cache de HTML na edge.** EM ESTUDO (10/10/2026): a maioria dos sites é
+   Livewire (CSRF + wire snapshots a cada interação — cache de HTML quebra o
+   framework) e o rádio serve MP3 mudando com frequência (pediria TTL curto +
+   purge no upload). Assets estáticos JÁ são servidos pelo fluxd com
+   `immutable` (10). Sem decisão; retomar só se aparecer site 100% server-
+   rendered sem Livewire.
+7. **E-mail transacional.** EM DÚVIDA (10/10/2026): SMTP próprio saindo de IP
+   residencial não entrega no Gmail (sem PTR, IP dinâmico, blocklists — FATO
+   operacional, não opinião). Caminho realista: relay gratuito (Resend/
+   Mailgun/SES free tier) + receitas SPF/DKIM/DMARC por domínio — mas é
+   terceiro. Decidir quando um cliente precisar de verdade.

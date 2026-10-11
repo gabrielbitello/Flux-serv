@@ -8,8 +8,40 @@ Diário de status do projeto. Entradas acumuladas por sessão, mais recente no t
 gerenciador de containers Docker em VM Hyper-V Bookworm, CLI `flux` no Windows,
 daemon `fluxd` na VM, porteiro como estudo de caso.
 
-**Resultado**: 15 specs em `docs/specs/` (índice no [README](docs/specs/README.md))
+**Resultado**: 18 specs em `docs/specs/` (índice no [README](docs/specs/README.md))
 + template de CI em `docs/templates/deploy-workflow.yml`.
+
+**v0.4 (10/10, quinta rodada — produto "site profissional")**: Gabriel escolheu
+itens da lista de recursos de provedor; viraram R31–R34, fases F18–F20 e 3
+specs novas.
+
+- Spec 15 nova (R31): FORA de dev nunca página de erro padrão — família visual
+  Flux (404 de host, 429, 413, "falhou", manutenção); erro gerado PELO APP
+  passa intocado (página própria de prod vence por definição — quem gera o
+  erro o desenha); em dev, erros crus. Modo manutenção: `flux maintenance
+  on|off` → 503 + `Retry-After` (SEO correto), página com marca do cliente,
+  bypass por URL com token 24 h, API recebe JSON, worker segue de pé,
+  manutenção e deploy se bloqueiam mutuamente.
+- Spec 16 nova (R32, decisão "segurança própria, sem terceiros"): security
+  headers em TODA prod por padrão (HSTS, nosniff, Referrer-Policy,
+  SAMEORIGIN, Permissions-Policy; server/X-Powered-By removidos); WAF próprio
+  no router: padrões OWASP básicos (SQLi/XSS/traversal/cmd injection, corpo
+  inspecionado só até 64 KB), paths sensíveis (`/.env`, `/wp-admin`…), bad
+  bots por lista curada no repo, anti-brute-force (10 falhas/10 min → ban
+  15 min), reputação de IP com pontos e decaimento (ban progressivo 1 h/24 h/
+  7 d), tarpit opcional; **shadow mode 7 dias antes de enforce** — falso
+  positivo nunca derruba cliente; `flux shield unban`.
+- Spec 17 nova (R33): status público `flux.bitello.xyz/status/{name}` —
+  navegador vê página (uptime 7/30 d, gráfico SVG do rollup 13, incidentes),
+  API vê JSON; causa classificada: só o site caiu (fluxd sabe) / plataforma
+  caiu (fluxhost serve status estático quando heartbeat quebra) / internet do
+  servidor caiu (impossível ver por dentro — testemunha externa: 1 monitor
+  gratuito no `healthz`, ou sonda no notebook; nunca usada para acordar nada).
+- Backup (R34): banco de prod dumpado a cada 48 h, retenção 7 dias, `gzip -t`
+  + alerta em falha (14). Backup de storage/uploads/VM: FORA por decisão dele.
+- Em estudo / em dúvida (00 perguntas 6–7): cache de HTML na edge (Livewire +
+  MP3 de rádio mudando quebram a premissa) e e-mail transacional (IP
+  residencial não entrega no Gmail; relay free tier é terceiro).
 
 **v0.3 (09/10, quarta rodada — maturidade operacional)**: Gabriel escolheu 13
 itens da lista de lacunas; viraram R24–R30, fases F14–F17 e 2 specs novas.
@@ -109,8 +141,9 @@ projeto ou 3306; servir 500/404 cru para host gerenciado off; sync de
 `flux-db`; segredo em arquivo versionado/sincronizado.
 
 **Próximo**: revisão do Gabriel nas perguntas em aberto restantes da [00-visao-geral](docs/specs/00-visao-geral.md)
-(imagem do banco #1, Redis no guard #3, gerenciador #5) → F1 (setup host + VM).
-Itens da lista de maturidade NÃO escolhidos em 09/10 (ficam de fora da v0.3,
-retomar quando doer): backup de bancos agendado além do pré-migrate, restore
-testado de rotina, rotação de segredos, lock de operações gerais, clock/chrony,
-CI do próprio repo Flux, testes automatizados das specs, doctor/runbook.
+(imagem do banco #1, Redis no guard #3, gerenciador #5; cache edge #6 e e-mail
+#7 em estudo) → F1 (setup host + VM). Itens oferecidos e NÃO escolhidos:
+domínio próprio do cliente (Cloudflare for SaaS), redirects na borda,
+edge cache, e-mail transacional, domínio do cliente, analytics/heatmap
+próprios (factíveis — analytics server-side é fácil, heatmap pede JS injetado),
+kit LGPD, domínio de e-mail do cliente (fronteira: nunca).

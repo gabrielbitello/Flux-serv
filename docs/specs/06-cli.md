@@ -35,6 +35,8 @@ de docker. Os comandos básicos do docker/compose existem com prefixo `flux`.
 | `flux shell [env]` | `flux exec bash` |
 | `flux build [env]` | build das imagens (sem subir) |
 | `flux prod rollback {name}` | reativa release anterior em prod (10), sem build |
+| `flux maintenance on\|off {name} [--bypass]` | modo manutenção: 503 brandiado + `Retry-After`, bypass por URL com token 24 h (15) |
+| `flux shield unban {ip}` | desbloqueia IP na lista do WAF próprio (16) |
 | `flux init ci` | escreve `.github/workflows/deploy.yml` no projeto a partir do template (10) |
 | `flux project token {name}` | gera/rotaciona token de deploy do projeto (vai para GitHub Secrets) |
 | `flux tool <runtime> [args…]` | roda comando em container efêmero na VM — toolchain sob demanda (abaixo) |
@@ -157,6 +159,13 @@ extra_ignore = []           # só ADICIONA ao ignore global
 
 [provision]
 on_wake = ""                # comando dentro do container, ex.: "bash /provision.sh"
+
+[branding]                  # páginas da plataforma em nome do projeto (15)
+# logo_url = ""             # logo na página de manutenção
+
+[shield]                    # WAF próprio (16)
+# auth_paths = ["/login"]   # default: detecta login padrão
+# tarpit = false            # atrasar scanner reincidente
 
 [health]
 path = "/up"                # path de health do app

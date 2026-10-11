@@ -136,6 +136,10 @@ JS quando detecta mudança de fase (SSE opcional):
   subiu**; diagnóstico real é `flux status` / painel.
 - Assets do app pedidos durante o sono também recebem a página (HTML) — mesmo
   comportamento do porteiro, aceito: o browser só carrega assets depois do HTML.
+- FORA de dev, TODA página de erro gerada pela plataforma usa a família visual
+  Flux (15): 404 de host, 429, 413, estado "falhou", manutenção. Erro gerado
+  PELO APP passa intocado (a página própria de prod vence — 15). Em dev, erros
+  crus.
 
 ### Regra "nunca 500/404" — matriz completa
 
@@ -185,6 +189,8 @@ JS quando detecta mudança de fase (SSE opcional):
   mata wake/sono/página de espera).
 - **Nunca** confiar no HTTP 200 da página de espera como sinal de app saudável
   em scripts — usar `flux status`.
+- **Nunca** servir página de erro padrão (cinza do browser, HTML de proxy) fora
+  de dev — família Flux ou página do app (R31, 15).
 - **Nunca** servir o `robots.txt` do projeto em host de dev — em dev a política
   é SEMPRE `Disallow: /` (R22).
 - **Nunca** sobrescrever `robots.txt`/`sitemap.xml` preexistentes do projeto em
