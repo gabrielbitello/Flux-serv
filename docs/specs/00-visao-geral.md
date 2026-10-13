@@ -5,7 +5,10 @@
 Flux substitui o arranjo atual da fábrica de dev servers (Docker no WSL2 + porteiro
 em Rust + rsync de 4s via devfactory) por uma plataforma única:
 
-- **VM Hyper-V Debian 12 (Bookworm)** como host dos containers, em vez de WSL2.
+- **VM Debian 12 (Bookworm) no hypervisor do host** como host dos containers, em
+  vez de WSL2. FATO (13/10/2026): o host é **Windows 11 Home** — Hyper-V não
+  existe no Home; hypervisor escolhido: **VirtualBox** (detalhes e trade-offs na
+  [01](01-vm-hyperv.md); Hyper-V volta a ser opção se o host virar Pro).
 - **Um binário Rust na VM (`fluxd`)** que faz o papel do porteiro e vai além: roteamento
   por domínio, sono automático por interação, página de espera, gestão de banco única
   e migrations automáticas.
@@ -67,7 +70,7 @@ flowchart LR
         FLUX --- FHOST
     end
 
-    subgraph "Hyper-V VM (Debian 12 Bookworm)"
+    subgraph "VM Debian 12 Bookworm (VirtualBox)"
         CF[cloudflared] --> CADDY[Caddy :443/:80]
         CADDY -- catch-all proxy --> FLUXD[fluxd :8080<br/>router + wake + painel :7420]
         FLUXD --> APP["container do projeto<br/>({name}-dev / {name}-prod)"]
@@ -134,7 +137,8 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 - Sync: **mutagen** (binário externo OSS, MPL-3.0), controlado pelo CLI. Justificativa
   completa em [02-sync-arquivos.md](02-sync-arquivos.md).
 - VM: Debian 12 genericcloud + cloud-init, Docker CE, Caddy e cloudflared via
-  apt/repos oficiais.
+  apt/repos oficiais. Hypervisor: VirtualBox 7.2 no host Windows 11 Home
+  (FATO 13/10/2026 — Home não tem Hyper-V; ver [01](01-vm-hyperv.md)).
 
 ## O que NUNCA fazer
 
@@ -186,33 +190,33 @@ Todo projeto tem no máximo dois ambientes, com containers, bancos e URLs separa
 
 ## Perguntas em aberto (decisão do Gabriel, com recomendação)
 
-1. **Imagem do banco único.** FATO: o container atual no WSL se chama `mariadb`
-   e roda a imagem `mysql:8.4` (`MYSQL_VERSION=8.4.11`) — e é NELE que moram os
-   bancos reais do vippers (`vippers`, `vippers_afiliados`, `base-laravel`,
-   `vippers_test_fix_g1..g8`, conferido por `SHOW DATABASES` em 09/10/2026). Os
-   `vippers-dev-mysql`/`pedi-dev-mysql` (`mysql:9.3`, Exited) são sobras dokploy
-   que NÃO alimentam nada hoje. Recomendação: `mysql:8.4` (paridade com o que
-   realmente roda); `mariadb:11` fica como opção em config. Capacidade: com
-   ~20 users/dia somados em todas as prods e ≤ 3 devs, qualquer dos dois motores
-   sobra — o gargalo nunca será o motor, será conexões abertas (~50 no pico
-   estimado vs `max_connections` 151 do default).
+1. **Imagem do banco único.** RESOLVIDA em 13/10/2026: **`mariadb:11`**, e
+   **nada do WSL precisa ser mantido** (decisão do Gabriel) — a migração
+   `flux migrate-from-wsl` foi cancelada e o WSL segue intacto só até o
+   Gabriel desligá-lo à mão. Contexto original: o container atual no WSL se
+   chama `mariadb` e roda `mysql:8.4` (`MYSQL_VERSION=8.4.11`), onde moravam
+   os bancos reais do vippers (conferido por `SHOW DATABASES` em 09/10/2026);
+   os `mysql:9.3` por-dev eram sobras dokploy. Capacidade segue válida: com
+   ~20 users/dia somados em todas as prods e ≤ 3 devs, qualquer motor sobra —
+   o gargalo nunca será o motor, será conexões abertas (~50 no pico estimado
+   vs `max_connections` 151 do default).
 2. **Sync: engine pronta vs escrita em Rust.** RESOLVIDO em 09/10/2026: **mutagen**
    ("usa o pronto", decisão do Gabriel). Escrever sync correto (renames
    simultâneos, escrita pela metade, conflito) é um projeto inteiro e cheio de
    caso raro; reescrever em Rust só se ele virar dor operacional real.
-3. **Redis no guard.** O guard barra imagens de banco no Dockerfile/compose do
-   projeto. A pergunta é se `redis`/`valkey`/`memcached` (cache/fila em memória)
-   também entram na lista de proibidos. Hoje nenhum projeto usa Redis (cache e
-   fila Laravel rodam no driver `database`, no próprio `flux-db`); permitir
-   Redis por projeto recriaria a era dokploy de N bancos. Recomendação:
-   bloqueado por padrão; se um projeto precisar de verdade, avalia-se um Redis
-   compartilhado único no estilo do `flux-db`.
+3. **Redis no guard.** RESOLVIDA em 13/10/2026: **bloqueado por padrão** —
+   `redis`/`valkey`/`memcached` entraram no default do `[image_guard].block`
+   (materializado no `flux-common`). Nenhum projeto usa Redis hoje (cache e
+   fila Laravel rodam no driver `database`, no próprio `flux-db`); se um
+   projeto precisar de verdade, avalia-se um Redis compartilhado único no
+   estilo do `flux-db`.
 4. **Suspend da VM inteira.** RESOLVIDO nesta versão: virou a spec
    [12](12-vm-hibernacao-porteiro-central.md) — Save-VM após 30 dias sem acesso
-   real, com porteiro central no host acordando sob demanda.
-5. **Gerenciador de banco.** Recomendação: Adminer (single file, ~40 MB, sem
-   dependências) no lugar do phpmyadmin, restrito à LAN e linkado do painel.
-   phpmyadmin fica como opção se o Gabriel preferir paridade com hoje.
+   real, com porteiro central no host acordando sob demanda. No VirtualBox o
+   equivalente é `VBoxManage controlvm savestate` (mesma semântica).
+5. **Gerenciador de banco.** RESOLVIDA em 13/10/2026: **Adminer** (single file,
+   ~40 MB, sem dependências) no lugar do phpmyadmin, restrito à LAN e linkado
+   do painel.
 6. **Cache de HTML na edge.** EM ESTUDO (10/10/2026): a maioria dos sites é
    Livewire (CSRF + wire snapshots a cada interação — cache de HTML quebra o
    framework) e o rádio serve MP3 mudando com frequência (pediria TTL curto +

@@ -2,11 +2,15 @@
 
 ## Objetivo
 
-**Um único servidor de banco** na VM alimenta todos os serviços docker — paridade
-com o WSL atual, onde o container `mariadb` (imagem `mysql:8.4`) serve tudo.
-Projetos **não podem** baixar imagem de banco própria (bloqueio automático de
+**Um único servidor de banco** na VM alimenta todos os serviços docker. Projetos
+**não podem** baixar imagem de banco própria (bloqueio automático de
 Dockerfile/compose). Migrations são detectadas e aplicadas automaticamente, com
 regras diferentes para dev (banco descartável) e prod (banco sagrado).
+
+DECISÃO (13/10/2026, pergunta 1 da 00): imagem **`mariadb:11`** — sem paridade
+com o WSL, porque **não há nada a manter do WSL** (decisão do Gabriel no mesmo
+dia): a migração `flux migrate-from-wsl` foi cancelada e o WSL segue intacto só
+até o Gabriel desligá-lo à mão quando quiser.
 
 ## Mecanismo
 
@@ -15,7 +19,7 @@ regras diferentes para dev (banco descartável) e prod (banco sagrado).
 | Aspecto | Valor |
 |---|---|
 | Container | `flux-db`, gerido pelo `fluxd` (compose próprio, não é de projeto) |
-| Imagem | `mysql:8.4` — FATO: paridade com o WSL atual (`MYSQL_VERSION=8.4.11`) |
+| Imagem | `mariadb:11` — decisão 13/10/2026 (pergunta 1 da 00); sem paridade com o WSL: nada a manter dele |
 | Rede | `flux-db-net` (bridge docker, ver isolamento abaixo), hostname `flux-db`; porta **não publicada** |
 | Volume | `flux-db-data` (dados) + `/srv/flux/db/init` montado ro em `/docker-entrypoint-initdb.d` (mesmo desenho do atual `/opt/mariadb/init`) |
 | TZ | `America/Sao_Paulo` (paridade com o atual) |
@@ -29,17 +33,20 @@ estado atual NUNCA foi "um banco só". Além do `mariadb` compartilhado
 `pedi-dev-mysql` (ambos `mysql:9.3`), e 5 imagens de banco mortas em disco
 (`mysql:8.0`, `mysql:9.3`, `mariadb:11.4`, `mariadb:11.8` + a 8.4 em uso) —
 sobras da era dokploy (`vippers-dev` com imagem local `vippers-vippers-dev`).
-O guard + `flux-db` encerram essa era: um motor só. Migração dos dados dos
-legados: `flux migrate-from-wsl` (09), descarte dos containers/imagens só com
-ok explícito do Gabriel.
+O guard + `flux-db` encerram essa era: um motor só. ATUALIZAÇÃO (13/10/2026):
+decisão do Gabriel — **nada do WSL precisa ser mantido**, a migração
+`flux migrate-from-wsl` foi cancelada (removida da 09); descarte dos
+containers/imagens do WSL é manual do Gabriel, quando ele quiser. Os projetos
+do vippers entram no Flux por re-deploy do git (prod) e sync fresca (dev).
 
 FATO (09/10/2026, `SHOW DATABASES` no `mariadb` compartilhado): os bancos REAIS
 do vippers moram NELE — `vippers`, `vippers_afiliados`, `base-laravel` e as
 DBs de teste `vippers_test_fix_g1..g8` (PHPUnit paralelo). Os `mysql:9.3`
-legados NÃO alimentam nada hoje. Banco correto do vippers = `mysql:8.4`
-compartilhado; `flux migrate-from-wsl` traz exatamente esses schemas para o
-`flux-db`. DBs `*_test_*` viram `{name}_test` gerenciado (criadas/destruídas
-por rodada de teste, fora do pipeline de migrations).
+legados NÃO alimentam nada hoje. Com a decisão de 13/10 (nada do WSL), esses
+dados NÃO migram: quem precisar de dado do WSL exporta à mão ANTES de
+desligá-lo; o Flux nasce com bancos novos criados pelas migrations. DBs
+`*_test_*` viram `{name}_test` gerenciado (criadas/destruídas por rodada de
+teste, fora do pipeline de migrations).
 
 Um banco por projeto por ambiente: `{name}_dev` e `{name}_prod` (worktrees de
 branch: `{name}_{branch-slug}_dev`, 02). O app recebe as credenciais via `.env`

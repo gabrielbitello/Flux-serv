@@ -120,12 +120,13 @@ external_witness = "uptimerobot"  # testemunha externa do healthz (17); alternat
 - O CLI nunca edita o config sozinho — `flux setup` escreve com `--set k=v`
   explícito e mostra diff.
 
-### Migração do WSL → Flux (uma vez, assistida)
+### Migração do WSL → Flux
 
-`flux migrate-from-wsl` (fase pós-F9): dump dos bancos do container `mariadb`
-atual (`mysqldump` por database → import no `flux-db` com users equivalentes),
-re-cadastro dos projetos do `registry.json` da devfactory. O WSL segue de pé
-até o Gabriel validar e desligar manualmente — nunca é desligado pelo Flux.
+CANCELADA (13/10/2026, decisão do Gabriel): **não há nada a manter do WSL**.
+O `flux migrate-from-wsl` saiu do escopo; o WSL segue intacto até o Gabriel
+desligá-lo manualmente quando quiser — nunca é desligado pelo Flux. Projetos
+entram no Flux por re-deploy do git (prod) e sync fresca (dev); quem quiser
+dado do WSL exporta à mão ANTES de desligá-lo.
 
 ## O que NUNCA fazer
 
@@ -147,8 +148,6 @@ até o Gabriel validar e desligar manualmente — nunca é desligado pelo Flux.
 3. Token da API errado → 401 com mensagem clara, logado no `events`.
 4. Backup diário do SQLite existe e é restaurável (teste de restauração
    documentado).
-5. `flux migrate-from-wsl` reproduz users/DBs do WSL no `flux-db` com checksum
-   de dump conferido.
-6. Copiar o VHDX da VM para outro host → `.env` de prod não decifra (TPM
+5. Copiar o disco da VM para outro host → `.env` de prod não decifra (TPM
    diferente); na VM original, container sobe com env correto.
-7. Painel mostra env de prod: só nomes de chave e datas — valor nunca sai.
+6. Painel mostra env de prod: só nomes de chave e datas — valor nunca sai.
