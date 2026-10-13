@@ -2,6 +2,56 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 13/10/2026 (parte 5) — F2, F6, F8 e borda R30 por workflow assíncrono (6 agentes)
+
+**Intenção**: "implemente mais 4 fases de forma assíncrona usando /workflow com o
+máximo de agentes possível, foco operacional" — com proibição dura de tocar
+WSL/Docker/Ubuntu (outras coisas usando; desinstalação é decisão do Gabriel pós-
+reboot). Fases escolhidas por serem 100% código e testarem SEM engine: F2, F6,
+F8, R30.
+
+**Como rodou**: workflow `dwfrun-aa90c392` — 4 construtores paralelos com
+ARQUIVOS DISJUNTOS (nada de conflito), integrador que liga os módulos e caça
+compile, portões determinísticos (`cargo clippy -D warnings` + `cargo test
+--workspace`, 3 rodadas de correção), revisor de olhos frescos no diff, correção
+dos achados, portões de novo. 3 escaladas resolvidas ao vivo (ligação de deps do
+workspace nos Cargo.toml, ponte de testes #[path] do sync, 1 linha de `pub mod
+edge;` no lib.rs).
+
+**Entregado** (commits `e959857`, `9ab1b0b`, `24b9775`, `795459e`, `d6c4412`):
+
+- **F2** — `crates/flux-cli/src/sync.rs`: orquestração mutagen completa
+  (one-way-replica, 10 ignores globais da spec 02, sessão por projeto +
+  worktree slug, status via JSON Lines do template nativo, create idempotente
+  com aviso de reuso, reset = terminate+create com full rescan). 23 testes.
+- **F6** — `crates/fluxd/src/api.rs` reescrito: register/status/lease/schema
+  com validação estrita e auth da 09 (token sha256 fail-closed, 401 logado no
+  events, sem hash configurado = 503 em tudo exceto /healthz; comparação
+  constant-time); CLI real conversando com a API (ciclo dev com lease do sleep
+  manager). 
+- **F8** — `crates/fluxd/src/panel.rs`: dashboard/detalhe/eventos server-side,
+  zero lib JS, curva 24h SVG, X-Robots-Tag, aviso de SEM AUTENTICAÇÃO visível
+  (painel real com auth substitui antes de qualquer exposição).
+- **R30** — `crates/fluxd/src/edge.rs`: borda tower montada NA FRENTE do
+  router — 300 req/min burst 100 por host, 100 conexões, 413 cedo, 429/413
+  família Flux vs JSON.
+- **Integração**: edge na frente do router, painel na :7421 (porta própria por
+  falta de auth), módulos declarados.
+
+**Revisão independente**: 8 achados (1 high "borda não montada", 1 high
+"primeiro create de sync quebraria", fallback da API sem gate, panel fora da
+build, IPv6 no host_key, reuso silencioso de sessão, unwrap_or(0) do relógio,
+comparação de token early-exit) — TODOS corrigidos pelo integrador antes dos
+portões fecharem; conferidos um a um no código final por mim. Portões: clippy
+`-D warnings` limpo + **127 testes** verdes.
+
+**Estado**: sem WSL/Docker/VM tocados — testes de engine pulam por design.
+`fluxd` Linux do E: NÃO inclui F2/F6/F8/R30 ainda — recompilar pós-reboot.
+
+**Próximo**: pós-reboot → VM boot validado → recompilar `fluxd` Linux completo
+→ instalar na VM → host-only → primeiro router ponta a ponta (acordar/dormir de
+verdade + painel na 7421 + CLI `flux up` de um repo real).
+
 ## 13/10/2026 (parte 4) — F4 e F5: sono automático + guard/migrations, tudo provado em engine real
 
 **Intenção**: "implemente os próximos 2" — as duas fases seguintes da ordem das
