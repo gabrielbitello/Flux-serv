@@ -19,6 +19,7 @@ tokio = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 rusqlite = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -26,6 +27,13 @@ clap = { workspace = true }
 bollard = "0.21.1"
 futures-util = "0.3.34"
 sha2.workspace = true
+# Borda R30 (edge.rs): traits Layer/Service do tower para a layer na frente
+# do router; "util" cobre ServiceExt (tests via oneshot/ServiceExt). Não está
+# no workspace deps — axum 0.8 já resolve tower 0.5, aqui só se declara.
+tower = { version = "0.5", features = ["util"] }
+# Wrapping do body chunked com teto (http_body_util::Limited) — já existia
+# como dev-dependency; promovida para dependência principal do edge.rs.
+http-body-util = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
