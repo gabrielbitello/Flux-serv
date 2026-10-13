@@ -2,6 +2,51 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 13/10/2026 (parte 6) — FLUXD OPERACIONAL NA VM: router ponta a ponta provado
+
+**Intenção**: pós-reboot do host (HVCI off + WSL/Docker desinstalados), subir a
+plataforma de verdade.
+
+**O que a investigação provou** (workflow dwfrun-b92ae519, 3 investigadores
+read-only, 26 achados): a stack de rede do VirtualBox estava MEIO-INSTALADA —
+driver `VBoxNetLwf` dava "erro interno" 5× e o serviço sumiu; host-only attach
+falhava com `VERR_INTNET_FLT_IF_NOT_FOUND`; adapters recriados 3× no dia
+(renumeraram para "Ethernet 5"); Flux.vbox divergiu (NIC1 virou e1000 sem
+driver no guest, NIC2 NATNetwork). **Resquícios devfactory descartados como
+causa** (caddy/coredns/cloudflared não estão no caminho host↔VM) — e foram
+REMOVIDOS a pedido do Gabriel (serviço Cloudflared deletado, processos
+mortos, tarefas desregistradas, pool UDP revertido, CrossDeviceService sob
+demanda, 4 arquivos da sessão fdcd6fea apagados).
+
+**Correção aplicada** (em ordem): `netcfg` registrou `oracle_VBoxNetLwf`
+(rodando, bound na host-only), `pnputil` + `netcfg` registraram
+`oracle_VBoxNetAdp6`, host-only recriada ("adapter #4", 192.168.140.1/24),
+NICs da VM reescritas (virtio NAT + pf 2222/7420; virtio host-only).
+
+**Resultado — plataforma viva**:
+
+- SSH DIRETO `flux@192.168.140.2` em ~20 s pós-boot (nativamente; snail morto
+  confirmado).
+- `fluxd` compilado DENTRO da VM (rustup 1.99, build-essential, 6 vCPUs) com
+  TODAS as fases: F2 sync, F3 router/docker, F4 sono, F5 guard/migrations,
+  F6 API+CLI, F8 painel, R30 borda.
+- Instalado via systemd (`scripts/host/install-fluxd.sh`, corrigido para criar
+  config mínima idempotente): `fluxd.service` active, healthz
+  `{"status":"ok","version":"0.1.0"}`.
+- **Router ponta a ponta provado com container real** (nginx:alpine com labels
+  da convenção): proxy 200 + `x-robots-tag: noindex` (dev), container parado →
+  página de espera 200, host fantasma → 404 brandiado, `/robots.txt` →
+  `Disallow: /` (R22).
+
+**Estado**: fluxd-linux no E: OBSOLETO (compilação agora é dentro da VM).
+`flux.toml` token da API: settings `api_token_hash` no SQLite (sha256), setado
+na VM. Pending list honesta: Caddy reverso + tunnel (F7), worker de build no
+CI para não depender de rustup na VM, painel na 7421 sem auth (F8 real antes
+de expor).
+
+**Próximo**: Caddy na VM servindo `*.bitello.xyz` → fluxd (F7), primeiro
+projeto real sincronizado (F2 com mutagen binário), painel com auth.
+
 ## 13/10/2026 (parte 5) — F2, F6, F8 e borda R30 por workflow assíncrono (6 agentes)
 
 **Intenção**: "implemente mais 4 fases de forma assíncrona usando /workflow com o
