@@ -1,0 +1,13 @@
+[package]
+name = "flux-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "flux"
+path = "src/main.rs"
+
+[dependencies]
+flux-common = { workspace = true }
+clap = { workspace = true }
