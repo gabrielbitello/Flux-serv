@@ -2,6 +2,61 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 13/10/2026 (parte 4) — F4 e F5: sono automático + guard/migrations, tudo provado em engine real
+
+**Intenção**: "implemente os próximos 2" — as duas fases seguintes da ordem das
+specs, ambas testáveis contra o docker do WSL enquanto a VM espera o reboot.
+
+**F4 — sono automático** (commit `3212b52`):
+
+- `sleep.rs`: sweep de 60 s ligado no `fluxd serve` (spawn tokio). Decisão
+  PURA `should_sleep` (tabela testada): só dorme container `Awake`, ocioso
+  além do limite, sem lease e sem cooldown.
+- Sinais que zeram o timer: request proxyado (o router toca
+  `touch_interaction`), lease de sessão (`set_lease` com TTL — canal do
+  `flux logs -f` da F6), CPU acima do teto (snapshot de stats no sweep;
+  `[sleep] cpu_percent_teto`).
+- Cooldown anti-flapping de 5 min pós-acordar — `wake`/`ensure_awake`
+  reportam se EXECUTARAM transição.
+- Dev dorme com `stop` (`[sleep] idle_minutes`, default 15), prod hiberna
+  com `pause`/`stop`/`off` (`prod_mode`, default pause 30 min) — direção da
+  spec 11. `flux-db`/Adminer/`fluxd` nunca entram (sweep itera SÓ projetos).
+- Verdade = Docker: sweep re-sincroniza `mode` divergente e grava evento.
+- Teste gated em engine real: cooldown segura o recém-acordado; com sinal
+  antigo + `idle_minutes = 0`, dorme (`stop`) e registra `sleeping_since`
+  (12,5 s).
+
+**F5 — guard + migrations** (commit `20ba7c4`):
+
+- `guard.rs` PURO: varre compose (`image:`) e Dockerfile (`FROM`, multistage,
+  `--platform`, `scratch` fora), pulando comentários. Match por BASENAME do
+  repo — `bitnami/mariadb` cai em `mariadb`, `library/postgres` em `postgres`;
+  coringas `mysql-*`/`postgresql*`; violação carrega arquivo + linha + imagem
+  + padrão. Limitação honesta: varredura por linha (parse de YAML estruturado
+  entra na F6, quando o fluxd já renderiza overrides). 8 testes.
+- `[image_guard].block` default do config global agora é a lista COMPLETA da
+  spec 05 (17 padrões).
+- `db.rs`: `plan_migrations` diff por hash (novas/mutadas/apagadas) +
+  `ensure_schema`:
+  - laravel: novas → `php artisan migrate --force`; dev com mutação →
+    `migrate:fresh` (+`--seed` conforme `[db] seed_on_rebuild`) + regravação
+    do estado; **prod com mutação → ERRO e bloqueio SEM executar nada** (05).
+  - node/rust: `[db] migrate_cmd` via `docker exec` a cada ciclo
+    (idempotência é do comando); sem cmd → aviso explícito, nunca silêncio.
+  - Execução SEMPRE dentro do container (`docker exec` — único shell da
+    plataforma, 07). Hashes aplicados em `migration_state`.
+- Teste gated: `migrate_cmd` roda dentro do container (marker criado no FS
+  dele) e prod mutado bloqueia sem tocar no Docker.
+
+**Estado**: 63 testes na suíte (20 commons + 38 fluxd lib + 5 integração) +
+3 gated de engine. `fluxd` Linux recompilado com F4+F5:
+`E:\flux\fluxd-linux` (11 MB). Faltam do F4/F5 para "SIM" no STATUS: janela
+de silêncio do sync (F2), `flux-db` real, ciclo do `flux up` (F6).
+
+**Próximo**: pós-reboot do host — VM boot validado → `fluxd` com F3+F4+F5
+dentro da VM → host-only → router ponta a ponta. Depois F2 (sync mutagen) e
+F6 (CLI real: `up/logs/exec/down` com lease de sono).
+
 ## 13/10/2026 (parte 3) — F3 adiantado: módulo Docker do fluxd com teste em engine real
 
 **Intenção**: usar a janela em que o VM work está travado no reboot do host

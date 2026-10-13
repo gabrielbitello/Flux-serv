@@ -5,9 +5,9 @@ Matriz viva do Flux: cada funcionalidade em escopo com status de implementação
 integração falta. **NÃO** = só na spec.
 
 Atualizar no fim de CADA sessão que mexer em código (mesma cadência do
-[PROGRESSO](../PROGRESSO.md)). Última atualização: **13/10/2026**.
+[PROGRESSO](../PROGRESSO.md)). Última atualização: **13/10/2026** (F4 + F5 núcleo).
 
-Placar atual: **8 SIM · 16 PARCIAL · 21 NÃO** (45 itens).
+Placar atual: **8 SIM · 20 PARCIAL · 17 NÃO** (45 itens).
 
 ## Base de plataforma
 
@@ -30,18 +30,18 @@ Placar atual: **8 SIM · 16 PARCIAL · 21 NÃO** (45 itens).
 |---|---|---|
 | R1 | Rust | **SIM** |
 | R2 | Docker em VM Debian | **PARCIAL** — VM + Docker instalados; boot não validado |
-| R3 | Sono automático por interação | **NÃO** — F4 |
+| R3 | Sono automático por interação | **PARCIAL** — sweep 60 s + guardas (lease/cooldown/CPU) testados em engine real; sem janela do sync nem painel |
 | R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — decisão e páginas prontas; Caddy/tunnel não instalados |
 | R5 | Sync Windows↔VM (mutagen) | **NÃO** — F2 |
-| R6 | Banco único + migrations + guard | **PARCIAL** — lista de guard no config default; runner na F5 |
-| R7 | Dev reconstrói / prod nunca | **NÃO** — F5 |
+| R6 | Banco único + migrations + guard | **PARCIAL** — guard de imagens completo + runner via docker exec testado; ciclo do `flux up` e `flux-db` real na F5/F6 |
+| R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
 | R8 | `flux up/logs/exec/down` no Windows | **PARCIAL** — stubs com fase + exit 2 |
 | R9 | Painel web | **PARCIAL** — placeholder + healthz; real na F8 |
 | R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
 | R12 | Troca de versão invisível + drain de jobs | **NÃO** — F10 |
 | R13 | Cota global dev / limite individual prod | **NÃO** — F10 |
-| R14 | Prod hiberna, worker 24/7 | **NÃO** — F10; ações pause/unpause existem |
+| R14 | Prod hiberna, worker 24/7 | **PARCIAL** — pause/unpause no sleep manager (`prod_mode`); worker 24/7 e pressão RAM na F10 |
 | R15 | Branch routing `{branch}-{name}-d` | **PARCIAL** — parse implementado/testado; worktrees/watch na F11 |
 | R16 | Gerenciador de banco (Adminer) | **NÃO** — decidido; F12 |
 | R17 | Toolchain sob demanda (`flux tool`) | **NÃO** — stub |
@@ -67,4 +67,5 @@ Placar atual: **8 SIM · 16 PARCIAL · 21 NÃO** (45 itens).
 
 - **13/10/2026** — fundação de código (workspace, router, estado, páginas,
   proxy, CLI stubs), specs das decisões #1/#3/#5 + VirtualBox, VM provisionada,
-  módulo Docker testado em engine real.
+  módulo Docker testado em engine real; F4 (sleep manager) e F5 núcleo (guard
+  de imagens + pipeline de migrations) com testes em engine real.
