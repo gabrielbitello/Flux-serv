@@ -215,11 +215,7 @@ impl State {
     /// Linha de `sleep_state` de um projeto/ambiente — `(last_interaction,
     /// lease_until, cooldown_until, mode)`, tudo como epoch segundos
     /// (`NULL` quando nunca houve sinal).
-    pub fn sleep_row(
-        &self,
-        name: &str,
-        env: Env,
-    ) -> Result<SleepRow, StateError> {
+    pub fn sleep_row(&self, name: &str, env: Env) -> Result<SleepRow, StateError> {
         self.with(|c| {
             c.query_row(
                 "SELECT
@@ -302,6 +298,58 @@ impl State {
                  ON CONFLICT(project, env) DO UPDATE SET
                     lease_until = datetime('now', '+' || ?3 || ' seconds')",
                 params![name, env.to_string(), ttl_secs],
+            )?;
+            Ok(())
+        })
+    }
+
+    // --------------------------------------------- migrations (spec 05, F5)
+
+    /// `(arquivo, sha256)` já aplicados para o projeto/ambiente.
+    pub fn migration_rows(
+        &self,
+        name: &str,
+        env: Env,
+    ) -> Result<Vec<(String, String)>, StateError> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT file, sha256 FROM migration_state
+                 WHERE project = ?1 AND env = ?2 ORDER BY file",
+            )?;
+            let rows = stmt.query_map(params![name, env.to_string()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Grava hash aplicado de uma migration (após sucesso do runner).
+    pub fn record_migration(
+        &self,
+        name: &str,
+        env: Env,
+        file: &str,
+        sha256: &str,
+    ) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO migration_state(project, env, file, sha256, applied_at)
+                 VALUES (?1, ?2, ?3, ?4, datetime('now'))
+                 ON CONFLICT(project, env, file) DO UPDATE SET
+                    sha256 = excluded.sha256, applied_at = excluded.applied_at",
+                params![name, env.to_string(), file, sha256],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Limpa o estado de migrations do projeto/ambiente — só no rebuild de dev
+    /// (`migrate:fresh` reaplica tudo e o estado é regravado em seguida).
+    pub fn clear_migrations(&self, name: &str, env: Env) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM migration_state WHERE project = ?1 AND env = ?2",
+                params![name, env.to_string()],
             )?;
             Ok(())
         })

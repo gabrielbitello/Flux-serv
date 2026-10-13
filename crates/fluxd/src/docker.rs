@@ -25,7 +25,7 @@ pub fn compose_project(name: &str, env: Env) -> String {
     format!("flux-{name}-{env}")
 }
 
-pub(crate) async fn find_app_container(
+pub async fn find_app_container(
     docker: &Docker,
     project: &str,
 ) -> Option<ContainerInspectResponse> {

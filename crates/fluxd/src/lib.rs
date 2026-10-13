@@ -2,9 +2,11 @@
 //! (`main.rs`) só parseia argumentos; tudo testável vive aqui.
 
 pub mod api;
+pub mod db;
 pub mod decision;
 pub mod docker;
 pub mod events;
+pub mod guard;
 pub mod pages;
 pub mod proxy;
 pub mod router;
