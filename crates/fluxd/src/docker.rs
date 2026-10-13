@@ -25,7 +25,10 @@ pub fn compose_project(name: &str, env: Env) -> String {
     format!("flux-{name}-{env}")
 }
 
-async fn find_app_container(docker: &Docker, project: &str) -> Option<ContainerInspectResponse> {
+pub(crate) async fn find_app_container(
+    docker: &Docker,
+    project: &str,
+) -> Option<ContainerInspectResponse> {
     let mut filters = HashMap::new();
     filters.insert(
         "label".to_owned(),
@@ -125,36 +128,50 @@ impl<'a> DockerSource<'a> {
     /// Garante acordado antes do proxy: pausado → `unpause` (< 1 s, invisível,
     /// matriz 03); parado → `start`. Best-effort — erro é logado, o forward
     /// segue e reavalia (upstream falho vira página de estado, nunca 502).
-    pub async fn ensure_awake(&self, name: &str, env: Env) {
+    /// Devolve `true` quando EXECUTOU uma transição para acordar.
+    pub async fn ensure_awake(&self, name: &str, env: Env) -> bool {
         let project = compose_project(name, env);
         let Some(c) = find_app_container(&self.docker, &project).await else {
-            return;
+            return false;
         };
-        let Some(st) = c.state.as_ref() else { return };
+        let Some(st) = c.state.as_ref() else {
+            return false;
+        };
         let id = c.id.clone().unwrap_or_default();
-        let r = match st.status {
+        let (acao, r) = match st.status {
             Some(ContainerStateStatusEnum::RUNNING) if st.paused.unwrap_or(false) => {
-                self.docker.unpause_container(&id).await
+                (true, self.docker.unpause_container(&id).await)
             }
-            Some(ContainerStateStatusEnum::PAUSED) => self.docker.unpause_container(&id).await,
+            Some(ContainerStateStatusEnum::PAUSED) => {
+                (true, self.docker.unpause_container(&id).await)
+            }
             Some(ContainerStateStatusEnum::EXITED) | Some(ContainerStateStatusEnum::DEAD) => {
-                self.docker.start_container(&id, None).await
+                (true, self.docker.start_container(&id, None).await)
             }
-            _ => Ok(()),
+            _ => (false, Ok(())),
         };
         if let Err(e) = r {
             tracing::warn!("ensure_awake {project} falhou: {e}");
+            return false;
         }
+        acao
     }
 
     /// `docker start` — o wake da página de espera (03) e do sleep manager (F4).
-    pub async fn wake(&self, name: &str, env: Env) -> Result<(), bollard::errors::Error> {
+    /// Devolve `true` quando o container estava parado e foi acordado.
+    pub async fn wake(&self, name: &str, env: Env) -> Result<bool, bollard::errors::Error> {
         let project = compose_project(name, env);
         if let Some(c) = find_app_container(&self.docker, &project).await {
+            let parado = c
+                .state
+                .as_ref()
+                .map(|st| !matches!(st.status, Some(ContainerStateStatusEnum::RUNNING)))
+                .unwrap_or(false);
             let id = c.id.clone().unwrap_or_default();
             self.docker.start_container(&id, None).await?;
+            return Ok(parado);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// `docker pause` — hibernação de prod (< 1 s, invisível, 11).

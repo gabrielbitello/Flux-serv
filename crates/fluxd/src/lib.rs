@@ -8,6 +8,7 @@ pub mod events;
 pub mod pages;
 pub mod proxy;
 pub mod router;
+pub mod sleep;
 pub mod sqlite_source;
 pub mod state;
 
@@ -66,7 +67,29 @@ pub async fn serve(
 
     let shared = std::sync::Arc::new(AppState::new(st, &global, docker));
     let app = router::build_router(std::sync::Arc::clone(&shared));
-    let api_app = api::build_api(shared);
+    let api_app = api::build_api(std::sync::Arc::clone(&shared));
+
+    // Sweep do sleep manager (04): a cada 60 s, re-sincroniza com o Docker e
+    // dorme quem estourou ociosidade (com lease/cooldown/CPU como guardas).
+    let shared_for_sweep = std::sync::Arc::clone(&shared);
+    if let Some(d) = &shared.docker {
+        let d = d.clone();
+        let global = global.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.tick().await; // primeiro tick dispara já — pula
+            loop {
+                tick.tick().await;
+                let acoes =
+                    sleep::SleepManager::new(d.clone(), &shared_for_sweep.state, global.clone())
+                        .sweep()
+                        .await;
+                for a in acoes {
+                    tracing::info!("{a}");
+                }
+            }
+        });
+    }
 
     let router_listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     let api_listener = tokio::net::TcpListener::bind(("127.0.0.1", api_port)).await?;

@@ -197,6 +197,112 @@ impl State {
             Ok(())
         })
     }
+
+    // ------------------------------------------------- sinais de sono (spec 04)
+
+    /// Lista de projetos registrados (o sweep itera sobre estes).
+    pub fn list_projects(&self) -> Result<Vec<String>, StateError> {
+        self.with(|c| {
+            let mut stmt = c.prepare("SELECT name FROM projects ORDER BY name")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Linha de `sleep_state` de um projeto/ambiente — `(last_interaction,
+    /// lease_until, cooldown_until, mode)`, tudo como epoch segundos
+    /// (`NULL` quando nunca houve sinal).
+    pub fn sleep_row(
+        &self,
+        name: &str,
+        env: Env,
+    ) -> Result<(Option<i64>, Option<i64>, Option<i64>, Option<String>), StateError> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT
+                    CAST(strftime('%s', last_interaction) AS INTEGER),
+                    CAST(strftime('%s', lease_until) AS INTEGER),
+                    CAST(strftime('%s', cooldown_until) AS INTEGER),
+                    mode
+                 FROM sleep_state WHERE project = ?1 AND env = ?2",
+                params![name, env.to_string()],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map(|o| o.unwrap_or((None, None, None, None)))
+        })
+    }
+
+    /// Sinal de interação (request proxyado, lease, CPU alta): zera o timer e
+    /// garante a linha existente.
+    pub fn touch_interaction(&self, name: &str, env: Env) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO sleep_state(project, env, last_interaction, mode)
+                 VALUES (?1, ?2, datetime('now'), 'awake')
+                 ON CONFLICT(project, env) DO UPDATE
+                 SET last_interaction = datetime('now')",
+                params![name, env.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Grava o estado observado no Docker + `sleeping_since` quando dorme.
+    pub fn record_mode(
+        &self,
+        name: &str,
+        env: Env,
+        mode: ContainerState,
+    ) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO sleep_state(project, env, mode, sleeping_since)
+                 VALUES (?1, ?2, ?3, CASE WHEN ?3 IN ('sleeping','paused')
+                     THEN datetime('now') ELSE NULL END)
+                 ON CONFLICT(project, env) DO UPDATE SET
+                    mode = excluded.mode,
+                    sleeping_since = excluded.sleeping_since",
+                params![name, env.to_string(), mode.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Cooldown anti-flapping (04): imune a dormir por N segundos após acordar.
+    pub fn set_cooldown(&self, name: &str, env: Env, secs: i64) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO sleep_state(project, env, cooldown_until, mode)
+                 VALUES (?1, ?2, datetime('now', '+' || ?3 || ' seconds'), 'awake')
+                 ON CONFLICT(project, env) DO UPDATE SET
+                    cooldown_until = datetime('now', '+' || ?3 || ' seconds')",
+                params![name, env.to_string(), secs],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Lease de sessão (CLI/painel): mantém acordado enquanto renova o TTL.
+    pub fn set_lease(&self, name: &str, env: Env, ttl_secs: i64) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO sleep_state(project, env, lease_until, mode)
+                 VALUES (?1, ?2, datetime('now', '+' || ?3 || ' seconds'), 'awake')
+                 ON CONFLICT(project, env) DO UPDATE SET
+                    lease_until = datetime('now', '+' || ?3 || ' seconds')",
+                params![name, env.to_string(), ttl_secs],
+            )?;
+            Ok(())
+        })
+    }
 }
 
 /// Corrupção de arquivo vira `StateCorrupt` (com o backup no erro) em QUALQUER

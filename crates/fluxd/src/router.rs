@@ -95,12 +95,19 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
 
     let mut resp = match action {
         Action::Proxy { name, target, .. } => {
+            let env = host_env(&host);
+            // Request proxyado É sinal de interação (04): zera o timer.
+            let _ = app.state.touch_interaction(&name, env);
             // Paused/parado acorda ANTES do forward (prod pausado é invisível,
             // < 1 s — 11; erros são logados e o forward reavalia).
             if let Some(d) = &app.docker {
-                DockerSource::new(d.clone(), &app.state)
-                    .ensure_awake(&name, host_env(&host))
-                    .await;
+                let src = DockerSource::new(d.clone(), &app.state);
+                if src.ensure_awake(&name, env).await {
+                    // Acabou de acordar: cooldown anti-flapping (04).
+                    let _ = app
+                        .state
+                        .set_cooldown(&name, env, crate::sleep::WAKE_COOLDOWN_SECS);
+                }
             }
             match proxy::forward(&app.http, parts, body, &target).await {
                 Ok(r) => r,
@@ -117,6 +124,8 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
             }
         }
         Action::Wait { name, phase } => {
+            let env = host_env(&host);
+            let _ = app.state.touch_interaction(&name, env);
             // Página de espera dispara o wake (03: "docker start + página de
             // espera") — em background, o refresh do navegador colhe o resultado.
             if let Some(d) = &app.docker {
@@ -125,8 +134,18 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
                 let env = host_env(&host);
                 let nome = name.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = DockerSource::new(d, &st.state).wake(&nome, env).await {
-                        tracing::warn!("wake de {nome} falhou: {e}");
+                    let src = DockerSource::new(d, &st.state);
+                    match src.wake(&nome, env).await {
+                        Ok(acordou) => {
+                            if acordou {
+                                let _ = st.state.set_cooldown(
+                                    &nome,
+                                    env,
+                                    crate::sleep::WAKE_COOLDOWN_SECS,
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!("wake de {nome} falhou: {e}"),
                     }
                 });
             }
