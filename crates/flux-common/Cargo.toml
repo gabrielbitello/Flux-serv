@@ -1,0 +1,11 @@
+[package]
+name = "flux-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
