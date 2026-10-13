@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod decision;
+pub mod docker;
 pub mod events;
 pub mod pages;
 pub mod proxy;
@@ -10,6 +11,7 @@ pub mod router;
 pub mod sqlite_source;
 pub mod state;
 
+use bollard::Docker;
 use flux_common::config::{DomainConfig, GlobalConfig};
 
 use crate::proxy::ProxyClient;
@@ -20,14 +22,18 @@ pub struct AppState {
     pub state: State,
     pub domain: DomainConfig,
     pub http: ProxyClient,
+    /// Cliente Docker quando disponível (na VM sempre; em dev/testes via
+    /// `FLUX_DOCKER_URL`). `None` = degrada para estado do SQLite.
+    pub docker: Option<Docker>,
 }
 
 impl AppState {
-    pub fn new(state: State, config: &GlobalConfig) -> Self {
+    pub fn new(state: State, config: &GlobalConfig, docker: Option<Docker>) -> Self {
         Self {
             state,
             domain: config.domain.clone(),
             http: proxy::new_client(),
+            docker,
         }
     }
 }
@@ -53,7 +59,12 @@ pub async fn serve(
     let st = state::State::open(&db).map_err(std::io::Error::other)?;
     tracing::info!(db = %db.display(), "estado aberto");
 
-    let shared = std::sync::Arc::new(AppState::new(st, &global));
+    let docker = docker::DockerSource::connect();
+    if docker.is_some() {
+        tracing::info!("Docker conectado — estado dos containers vem do engine");
+    }
+
+    let shared = std::sync::Arc::new(AppState::new(st, &global, docker));
     let app = router::build_router(std::sync::Arc::clone(&shared));
     let api_app = api::build_api(shared);
 

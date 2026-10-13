@@ -11,6 +11,7 @@ use axum::response::Response;
 
 use crate::AppState;
 use crate::decision::{self, Action, Decision};
+use crate::docker::DockerSource;
 use crate::events;
 use crate::pages;
 use crate::proxy;
@@ -25,6 +26,50 @@ fn x_robots_tag() -> HeaderName {
 }
 
 const NOINDEX: &str = "noindex, nofollow, noarchive";
+
+/// Fonte da decisão: Docker quando existe (estado/alto do engine — verdade,
+/// 07), SQLite como fallback (dev/testes sem engine).
+enum Source<'a> {
+    Docker(DockerSource<'a>),
+    Sqlite(SqliteSource<'a>),
+}
+
+impl decision::HostSource for Source<'_> {
+    fn project_exists(&self, name: &str) -> bool {
+        match self {
+            Self::Docker(s) => s.project_exists(name),
+            Self::Sqlite(s) => s.project_exists(name),
+        }
+    }
+    fn env_state(
+        &self,
+        name: &str,
+        env: flux_common::protocol::Env,
+    ) -> flux_common::protocol::ContainerState {
+        match self {
+            Self::Docker(s) => s.env_state(name, env),
+            Self::Sqlite(s) => s.env_state(name, env),
+        }
+    }
+    fn branch_exists(&self, name: &str, branch: &str) -> bool {
+        match self {
+            Self::Docker(s) => s.branch_exists(name, branch),
+            Self::Sqlite(s) => s.branch_exists(name, branch),
+        }
+    }
+    fn proxy_target(&self, name: &str, env: flux_common::protocol::Env) -> Option<String> {
+        match self {
+            Self::Docker(s) => s.proxy_target(name, env),
+            Self::Sqlite(s) => s.proxy_target(name, env),
+        }
+    }
+    fn release_flags(&self, name: &str) -> (bool, bool) {
+        match self {
+            Self::Docker(s) => s.release_flags(name),
+            Self::Sqlite(s) => s.release_flags(name),
+        }
+    }
+}
 
 async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
     let started = std::time::Instant::now();
@@ -41,12 +86,22 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
     let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
     let method = parts.method.clone();
 
-    let src = SqliteSource::new(&app.state);
+    let src = match &app.docker {
+        Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
+        None => Source::Sqlite(SqliteSource::new(&app.state)),
+    };
     let Decision { host, action } =
         decision::decide(&host_raw, &path, wants_json, &app.domain, &src);
 
     let mut resp = match action {
         Action::Proxy { name, target, .. } => {
+            // Paused/parado acorda ANTES do forward (prod pausado é invisível,
+            // < 1 s — 11; erros são logados e o forward reavalia).
+            if let Some(d) = &app.docker {
+                DockerSource::new(d.clone(), &app.state)
+                    .ensure_awake(&name, host_env(&host))
+                    .await;
+            }
             match proxy::forward(&app.http, parts, body, &target).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -61,7 +116,22 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
                 }
             }
         }
-        Action::Wait { name, phase } => pages::wait(&name, phase, host.is_dev()),
+        Action::Wait { name, phase } => {
+            // Página de espera dispara o wake (03: "docker start + página de
+            // espera") — em background, o refresh do navegador colhe o resultado.
+            if let Some(d) = &app.docker {
+                let d = d.clone();
+                let st = Arc::clone(&app);
+                let env = host_env(&host);
+                let nome = name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = DockerSource::new(d, &st.state).wake(&nome, env).await {
+                        tracing::warn!("wake de {nome} falhou: {e}");
+                    }
+                });
+            }
+            pages::wait(&name, phase, host.is_dev())
+        }
         Action::Failed { name } => pages::failed(&name, host.is_dev()),
         Action::BranchMissing { name, branch } => {
             pages::branch_missing(&name, &branch, host.is_dev())
@@ -88,4 +158,13 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
         started.elapsed().as_millis(),
     );
     resp
+}
+
+/// Ambiente da ação corrente — só chega aqui para hosts gerenciados
+/// (Prod/Dev); painel e desconhecido não tomam caminho de proxy/wake.
+fn host_env(host: &flux_common::host::ManagedHost) -> flux_common::protocol::Env {
+    match host {
+        flux_common::host::ManagedHost::Dev { .. } => flux_common::protocol::Env::Dev,
+        _ => flux_common::protocol::Env::Prod,
+    }
 }

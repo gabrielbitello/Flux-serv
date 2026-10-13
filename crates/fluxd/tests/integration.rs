@@ -32,7 +32,7 @@ async fn spawn_upstream() -> u16 {
 }
 
 async fn spawn_router(st: State) -> u16 {
-    let app = Arc::new(AppState::new(st, &GlobalConfig::default()));
+    let app = Arc::new(AppState::new(st, &GlobalConfig::default(), None));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -184,7 +184,7 @@ async fn proxy_em_prod_passa_sem_noindex() {
 #[tokio::test]
 async fn healthz_da_api_de_controle_responde() {
     let st = State::in_memory().unwrap();
-    let app = Arc::new(AppState::new(st, &GlobalConfig::default()));
+    let app = Arc::new(AppState::new(st, &GlobalConfig::default(), None));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
