@@ -1,0 +1,29 @@
+[package]
+name = "fluxd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fluxd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluxd"
+path = "src/main.rs"
+
+[dependencies]
+flux-common = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+http-body-util = { workspace = true }
