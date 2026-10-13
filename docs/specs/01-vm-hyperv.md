@@ -31,6 +31,15 @@ GUI do VirtualBox no dia a dia — quem fala com o hypervisor é o serviço
 
 ## Mecanismo
 
+### Localização dos dados no host (decisão do Gabriel, 13/10)
+
+BULK vai para o **disco de dados `E:\flux\`** (não para C:): disco da VM
+(`E:\flux\cache\*.vdi`), pasta da VM (`E:\flux\vms\Flux\`), seed ISO
+(`E:\flux\seed\seed.iso`) e log serial. Ficam em `%USERPROFILE%\.flux\`
+só os arquivos pequenos de identidade/config: chave SSH, seed-fonte
+(`meta-data`/`user-data`), logs do provisionamento e o config global (09).
+Motivo: VHDX/VDI de 80 GB não é coisa para o disco do sistema.
+
 ### Recursos do host (pré-requisitos verificados pelo `flux setup host`)
 
 - VirtualBox ≥ 7.2 instalado (`VBoxManage` acessível).

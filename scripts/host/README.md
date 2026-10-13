@@ -60,6 +60,19 @@ $VB = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
    NEM Snail: boot de 10+ min, watchdog de clock no serial, VM morre sozinha.
    Toggle + reboot obrigatórios antes de provisionar de novo.
 
+## Localização (decisão do Gabriel: bulk no E:)
+
+Migrado em 13/10 para o disco de dados — VM desligada, `unregistervm`,
+`closemedium`, mover arquivos, `registervm`, `storageattach` com os novos
+caminhos (UUID do VDI preservado, {beeec3d8-617f-4c61-b545-27da69bd441b}):
+
+- Disco: `E:\flux\cache\debian-12.vdi` (80 GB dinâmico)
+- Pasta da VM: `E:\flux\vms\Flux\Flux.vbox` + serial.log
+- Seed ISO: `E:\flux\seed\seed.iso`
+
+Continuam em `%USERPROFILE%\.flux\` (pequenos, spec 09): chave SSH, seed-fonte
+(`seed\meta-data`, `seed\user-data`), logs dos scripts, config global.
+
 ## Pendente (após o reboot do host)
 
 1. Boot da VM + validar SSH (`ssh -i %USERPROFILE%\.flux\id_ed25519 -p 2222 flux@127.0.0.1`),
