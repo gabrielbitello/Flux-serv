@@ -5,9 +5,9 @@ Matriz viva do Flux: cada funcionalidade em escopo com status de implementação
 integração falta. **NÃO** = só na spec.
 
 Atualizar no fim de CADA sessão que mexer em código (mesma cadência do
-[PROGRESSO](../PROGRESSO.md)). Última atualização: **13/10/2026** (F4+F5 + F2/F6/F8/borda R30).
+[PROGRESSO](../PROGRESSO.md)). Última atualização: **13/10/2026** (fluxd OPERACIONAL na VM, router ponta a ponta).
 
-Placar atual: **8 SIM · 24 PARCIAL · 13 NÃO** (45 itens).
+Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 
 ## Base de plataforma
 
@@ -22,16 +22,16 @@ Placar atual: **8 SIM · 24 PARCIAL · 13 NÃO** (45 itens).
 | API de controle `:7420` (register/status/lease/schema, token sha256 fail-closed) | **SIM** (endpoints reais + auth testados; SSE de logs na F6+) |
 | Módulo Docker (bollard): estado/alvo/wake/pause/stop por labels `flux-{name}-{env}` | **PARCIAL** — testado em engine real; sem fluxo end-to-end na VM |
 | CLI `flux`: árvore completa da spec 06 | **PARCIAL** — ciclo dev (up/down/status/logs/exec…) real via API com lease; vm/tunnel/panel/shield etc. continuam stubs |
-| VM VirtualBox provisionada (Debian 12, Docker CE + Caddy via cloud-init) | **PARCIAL** — provisionada; boot válido pendente do reboot do host (HVCI) |
+| VM VirtualBox operacional (Debian 12 + Docker CE + Caddy + fluxd systemd) | **SIM** — boot validado, host-only 192.168.140.1/2, router proxyando container real |
 
 ## Requisitos R1–R34
 
 | R | Funcionalidade | Status |
 |---|---|---|
 | R1 | Rust | **SIM** |
-| R2 | Docker em VM Debian | **PARCIAL** — VM + Docker instalados; boot não validado |
+| R2 | Docker em VM Debian | **SIM** — VM VirtualBox operacional, Docker 29.9, router do fluxd proxyando container real |
 | R3 | Sono automático por interação | **PARCIAL** — sweep 60 s + guardas (lease/cooldown/CPU) testados em engine real; sem janela do sync nem painel |
-| R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — decisão e páginas prontas; Caddy/tunnel não instalados |
+| R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — validado na VM real (proxy 200, espera 200, 404 brandiado, robots); falta Caddy TLS + tunnel público |
 | R5 | Sync Windows↔VM (mutagen) | **PARCIAL** — orquestração completa testada (gated MUTAGEN_BIN); binário e sessão real na VM pós-reboot |
 | R6 | Banco único + migrations + guard | **PARCIAL** — guard de imagens completo + runner via docker exec testado; ciclo do `flux up` e `flux-db` real na F5/F6 |
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |

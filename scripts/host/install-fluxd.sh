@@ -13,6 +13,19 @@ mkdir -p /srv/flux/state /srv/flux/projects /srv/flux/secrets /srv/flux/logs /et
 chown -R flux:flux /srv/flux
 chmod 700 /srv/flux/secrets
 
+# Config mínima (defaults da spec 09) — só se ainda não existe (idempotente).
+if [ ! -f /etc/fluxd/config.toml ]; then
+    cat > /etc/fluxd/config.toml <<'CFG'
+# Config mínima - defaults da spec 09 (zona bitello.xyz)
+[domain]
+zone = "bitello.xyz"
+dev_suffix = "-d"
+panel_host = "flux.bitello.xyz"
+CFG
+    chown root:flux /etc/fluxd/config.toml
+    chmod 640 /etc/fluxd/config.toml
+fi
+
 cat > /etc/systemd/system/fluxd.service <<'UNIT'
 [Unit]
 Description=Flux daemon (router :8080 + API de controle :7420)
