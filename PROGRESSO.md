@@ -2,6 +2,52 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 13/10/2026 (parte 2) — Specs das decisões + VM VirtualBox provisionada até o limiar do host-only
+
+**Intenção**: aplicar as decisões #1/#3/#5 nas specs, reescrever a 01 para o
+hypervisor real, e provisionar a VM Debian de verdade no VirtualBox.
+
+**Descoberta central (FATO)**: o host é **Windows 11 Home** — Hyper-V nem
+existe nele (`Microsoft-Hyper-V-All` desconhecido). Spec 01 reescrita para
+**VirtualBox 7.2.20** (GPL, checksum `a81777d2…` conferido). E o Windows tem
+**Memória de Integridade (HVCI) ligada**, que mantém o hypervisor carregado e
+empurra o VBox para o modo **NEM Snail** (lento/instável): primeira tentativa
+com controlador SATA nem achava a raiz (genericcloud não tem driver AHCI —
+`PARTUUID does not exist`), e com VirtIO a VM chegou a **desligar sozinha**.
+
+**Feito**:
+
+- Specs: [00](docs/specs/00-visao-geral.md) perguntas #1/#3/#5 RESOLVIDAS;
+  [05](docs/specs/05-banco-unico-migrations.md) imagem `mariadb:11` + WSL sem
+  nada a manter; [09](docs/specs/09-seguranca-config.md) migração do WSL
+  cancelada; [01](docs/specs/01-vm-hyperv.md) reescrita para VirtualBox com
+  equivalências `VBoxManage` e as duas lições duras (VirtIO SCSI, hypervisor
+  off). Commit `a379390`.
+- VM **Flux** criada e provisionada por cloud-init: EFI, 6 vCPUs, 4 GB fixos,
+  VDI 80 GB (Debian 12 genericcloud pinado, SHA512 verificado), **VirtIO
+  SCSI**, NIC NAT com pf `ssh→2222` e `healthz→7420`, seed NoCloud instalando
+  Docker CE 29.9.0 + Caddy. Serial em `.flux\vms\serial.log`.
+- cloud-init concluiu ("FLUX PROVISION COMPLETE after 84 s"), SSH respondeu,
+  `fluxd` Linux compilado no WSL (rustc 1.99, 7,2 MB, release).
+- Toggles do hypervisor aplicados e confirmados no log
+  (`HVCI Enabled=0` + `bcdedit hypervisorlaunchtype off`) — **pendem o reboot
+  do host** (decisão do Gabriel: ele reinicia quando quiser).
+- Referência canônica dos passos + lições: [scripts/host/README.md](scripts/host/README.md).
+
+**Pausado aguardando reboot do host** (aplicar nesta ordem):
+
+1. `VBoxManage startvm Flux --type headless` → SSH `2222` → validar `docker
+   version`, `caddy version`, `/var/log/flux-provision-done`.
+2. `fluxd` da WSL para a VM (`scp -P 2222`), unit `fluxd.service`
+   (After=docker.service), `curl 127.0.0.1:7420/healthz` via pf.
+3. Host-only `192.168.140.1/24` + netplan estático `192.168.140.2` + SSH direto.
+4. Netplan dentro do seed para os próximos provisionamentos.
+
+**O que NUNCA fazer** (novas lições duras): provisionar genericcloud fora de
+VirtIO; provisionar com o hypervisor do Windows carregado (NEM Snail); usar
+`--natpf1`/`--nat-dnsproxy1` (sintaxe certa é `--nat-pf1`); `qemu-img resize`
+em VDI (resize é do VBox).
+
 ## 13/10/2026 — Fundação de código: workspace Rust + núcleo do fluxd + CLI stub
 
 **Intenção**: parar de escrever spec e começar a base de código que comporta
