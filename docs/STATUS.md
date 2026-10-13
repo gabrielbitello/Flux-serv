@@ -5,9 +5,9 @@ Matriz viva do Flux: cada funcionalidade em escopo com status de implementação
 integração falta. **NÃO** = só na spec.
 
 Atualizar no fim de CADA sessão que mexer em código (mesma cadência do
-[PROGRESSO](../PROGRESSO.md)). Última atualização: **13/10/2026** (F4 + F5 núcleo).
+[PROGRESSO](../PROGRESSO.md)). Última atualização: **13/10/2026** (F4+F5 + F2/F6/F8/borda R30).
 
-Placar atual: **8 SIM · 20 PARCIAL · 17 NÃO** (45 itens).
+Placar atual: **8 SIM · 24 PARCIAL · 13 NÃO** (45 itens).
 
 ## Base de plataforma
 
@@ -19,9 +19,9 @@ Placar atual: **8 SIM · 20 PARCIAL · 17 NÃO** (45 itens).
 | Proxy L7 streaming (sem buffering, hop-by-hop fora) | **SIM** |
 | Páginas família Flux (espera 200, "falhou", 404 brandiado, 503 JSON) | **SIM** |
 | Intercept de robots/sitemap (R22/R23) | **SIM** |
-| API de controle `:7420` (`/healthz`; resto 501 com causa) | **PARCIAL** — token + endpoints reais na F6 |
+| API de controle `:7420` (register/status/lease/schema, token sha256 fail-closed) | **SIM** (endpoints reais + auth testados; SSE de logs na F6+) |
 | Módulo Docker (bollard): estado/alvo/wake/pause/stop por labels `flux-{name}-{env}` | **PARCIAL** — testado em engine real; sem fluxo end-to-end na VM |
-| CLI `flux`: árvore completa da spec 06 | **PARCIAL** — toda declarada, 100% stubs com fase e exit 2 |
+| CLI `flux`: árvore completa da spec 06 | **PARCIAL** — ciclo dev (up/down/status/logs/exec…) real via API com lease; vm/tunnel/panel/shield etc. continuam stubs |
 | VM VirtualBox provisionada (Debian 12, Docker CE + Caddy via cloud-init) | **PARCIAL** — provisionada; boot válido pendente do reboot do host (HVCI) |
 
 ## Requisitos R1–R34
@@ -32,11 +32,11 @@ Placar atual: **8 SIM · 20 PARCIAL · 17 NÃO** (45 itens).
 | R2 | Docker em VM Debian | **PARCIAL** — VM + Docker instalados; boot não validado |
 | R3 | Sono automático por interação | **PARCIAL** — sweep 60 s + guardas (lease/cooldown/CPU) testados em engine real; sem janela do sync nem painel |
 | R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — decisão e páginas prontas; Caddy/tunnel não instalados |
-| R5 | Sync Windows↔VM (mutagen) | **NÃO** — F2 |
+| R5 | Sync Windows↔VM (mutagen) | **PARCIAL** — orquestração completa testada (gated MUTAGEN_BIN); binário e sessão real na VM pós-reboot |
 | R6 | Banco único + migrations + guard | **PARCIAL** — guard de imagens completo + runner via docker exec testado; ciclo do `flux up` e `flux-db` real na F5/F6 |
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
-| R8 | `flux up/logs/exec/down` no Windows | **PARCIAL** — stubs com fase + exit 2 |
-| R9 | Painel web | **PARCIAL** — placeholder + healthz; real na F8 |
+| R8 | `flux up/logs/exec/down` no Windows | **PARCIAL** — ciclo dev real via API `:7420` com lease de sono; precisa fluxd rodando (VM) |
+| R9 | Painel web | **PARCIAL** — dashboard/detalhe/eventos/SVG server-side prontos; SEM auth (F8 real substitui antes de expor) |
 | R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
 | R12 | Troca de versão invisível + drain de jobs | **NÃO** — F10 |
@@ -57,7 +57,7 @@ Placar atual: **8 SIM · 20 PARCIAL · 17 NÃO** (45 itens).
 | R27 | Fila de builds priorizando prod | **NÃO** — config existe; F10 |
 | R28 | Redes por projeto (isolamento) | **NÃO** — F14 |
 | R29 | Guard de runtime | **NÃO** — F14 |
-| R30 | Borda: rate limit + teto de body | **NÃO** — F14 |
+| R30 | Borda: rate limit + teto de body | **SIM** — 300/min burst 100 por host, 100 conexões, 413 cedo, 429/413 brandiados; montada no router (testes unitários; sem tráfego real até a VM) |
 | R31 | Páginas de erro fora de dev + manutenção | **PARCIAL** — família Flux pronta; 429/413/manutenção na F18 |
 | R32 | Headers + WAF próprio com shadow mode | **NÃO** — F19 |
 | R33 | Status público com causa classificada | **NÃO** — enum `Causa` existe no código; F20 |
@@ -68,4 +68,7 @@ Placar atual: **8 SIM · 20 PARCIAL · 17 NÃO** (45 itens).
 - **13/10/2026** — fundação de código (workspace, router, estado, páginas,
   proxy, CLI stubs), specs das decisões #1/#3/#5 + VirtualBox, VM provisionada,
   módulo Docker testado em engine real; F4 (sleep manager) e F5 núcleo (guard
-  de imagens + pipeline de migrations) com testes em engine real.
+  de imagens + pipeline de migrations) com testes em engine real; F2 (sync
+  mutagen), F6 (API de controle + CLI real), F8 (painel server-side) e borda
+  R30 construídos por workflow de 6 agentes, integrados e revisados
+  (127 testes; commits `e959857`→`d6c4412`).
