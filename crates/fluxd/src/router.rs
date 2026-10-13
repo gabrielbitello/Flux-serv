@@ -8,17 +8,28 @@ use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, header};
 use axum::response::Response;
+use flux_common::config::GlobalConfig;
 
 use crate::AppState;
 use crate::decision::{self, Action, Decision};
 use crate::docker::DockerSource;
+use crate::edge::{EdgeLayer, EdgeLimits};
 use crate::events;
 use crate::pages;
 use crate::proxy;
 use crate::sqlite_source::SqliteSource;
 
-pub fn build_router(app: Arc<AppState>) -> Router {
-    Router::new().fallback(handle).with_state(app)
+/// `global` alimenta a borda R30 (teto de body vem do config, 09; o resto é
+/// default da 07). Config ausente JÁ chega aqui como `GlobalConfig::default()`
+/// — o warn de "usando defaults" é do `serve`, não se repete por request.
+pub fn build_router(app: Arc<AppState>, global: &GlobalConfig) -> Router {
+    Router::new()
+        .fallback(handle)
+        // A borda envolve o router inteiro: `layer` aplicado DEPOIS das rotas
+        // roda ANTES do fallback — 413/429 morrem aqui, na admissão, antes da
+        // decisão (03: camadas de borda como layers tower; 07/R30).
+        .layer(EdgeLayer::new(EdgeLimits::from_global(global)))
+        .with_state(app)
 }
 
 fn x_robots_tag() -> HeaderName {
