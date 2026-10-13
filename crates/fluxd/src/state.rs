@@ -13,6 +13,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 /// Versão do schema guardada em `settings.schema_version`.
 pub const SCHEMA_VERSION: i64 = 1;
 
+/// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
+pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS projects(
     name TEXT PRIMARY KEY,
@@ -216,7 +219,7 @@ impl State {
         &self,
         name: &str,
         env: Env,
-    ) -> Result<(Option<i64>, Option<i64>, Option<i64>, Option<String>), StateError> {
+    ) -> Result<SleepRow, StateError> {
         self.with(|c| {
             c.query_row(
                 "SELECT
