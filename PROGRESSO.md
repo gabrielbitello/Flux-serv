@@ -2,6 +2,44 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 13/10/2026 (parte 3) — F3 adiantado: módulo Docker do fluxd com teste em engine real
+
+**Intenção**: usar a janela em que o VM work está travado no reboot do host
+(HVCI) para adiantar o F3 — o módulo Docker do `fluxd` — testando contra um
+engine REAL (docker do WSL exposto em `tcp://127.0.0.1:2375`, temporário).
+
+**Feito** (commits `c7947a2`, `f00a15c`):
+
+- **`docker.rs` no fluxd** (bollard 0.21): `DockerSource` implementa o mesmo
+  `HostSource` da decisão — estado do container via inspect (`Running`/`Paused`
+  /`Starting`/`Sleeping`), alvo de proxy via IP na rede do compose + porta TCP
+  exposta (default 80). Convenção de procura por LABELS (`com.docker.compose.
+  project=flux-{name}-{env}` + service `app`), nunca por nome de container.
+- **Ações**: `ensure_awake` (unpause/start antes do proxy — prod pausado
+  invisível < 1 s, 11), `wake` (página de espera dispara em background, 03),
+  `pause`/`unpause`/`sleep` (para o sleep manager F4).
+- **Degrad honesto**: sem Docker (`FLUX_DOCKER_URL` ausente + socket ausente),
+  router cai no `SqliteSource` com warn — o Windows de dev continua rodando a
+  suíte inteira sem engine.
+- **Teste gated com Docker real**: ciclo `Unknown→Starting→Awake→Paused→
+  Awake→Sleeping` + alvo de proxy, validado contra o engine do WSL em 13 s.
+  Roda sempre no CI que tiver engine; sem a env `FLUX_DOCKER_URL`, pula.
+- **Pós-reboot pronto**: `scripts/host/install-fluxd.sh` (unit systemd
+  `After=docker.service`, user `flux` + grupo `docker`, layout `/srv/flux` da
+  spec 01) e seed v2 com `network-config` (hostonly `192.168.140.2` estático —
+  nomes `enp0s3`/`enp0s8` A VALIDAR no primeiro boot). Binário `fluxd` Linux
+  (bollard incluso, 9,1 MB release) já compilado e esperando em
+  `E:\flux\fluxd-linux`.
+- Trapaças aprendidas do bollard 0.21: options em `query_parameters` com
+  builders (`ListContainersOptionsBuilder.filters(&HashMap)`), corpo de create
+  é `models::ContainerCreateBody`, `start_container` sem turbofish, pull de
+  imagem é stream (`futures_util`).
+
+**FATO do WSL**: distro hiberna em segundos sem processo ativo — docker no
+`tcp://2375` morre junto. Para testes longos, manter um `wsl sleep` vivo.
+O tcp 2375 é DEV/TESTE temporário: pós-reboot o WSL nem sobe (toggle HVCI);
+remover o override quando o fluxd passar a rodar dentro da VM.
+
 ## 13/10/2026 (parte 2) — Specs das decisões + VM VirtualBox provisionada até o limiar do host-only
 
 **Intenção**: aplicar as decisões #1/#3/#5 nas specs, reescrever a 01 para o
