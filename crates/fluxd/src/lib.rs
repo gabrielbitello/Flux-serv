@@ -5,9 +5,11 @@ pub mod api;
 pub mod db;
 pub mod decision;
 pub mod docker;
+pub mod edge;
 pub mod events;
 pub mod guard;
 pub mod pages;
+pub mod panel;
 pub mod proxy;
 pub mod router;
 pub mod sleep;
@@ -41,8 +43,15 @@ impl AppState {
     }
 }
 
+/// Porta do painel web (08). Porta PRÓPRIA de propósito: o painel desta fase
+/// não tem auth — o aviso de "SEM AUTENTICAÇÃO" fica em toda página e o
+/// isolamento de porta é o cercado (nunca entra no wildcard público :8080,
+/// 03). O painel real com auth (Argon2id + sessão) substitui a montagem.
+pub const PANEL_PORT: u16 = 7421;
+
 /// Ciclo do `fluxd serve`: router catch-all :8080 (Caddy aponta pra cá, 03) +
-/// API de controle :7420 (bind 127.0.0.1, NUNCA sai do localhost, 07).
+/// API de controle :7420 (bind 127.0.0.1, NUNCA sai do localhost, 07) +
+/// painel web :7421 (porta própria, sem auth — ver `PANEL_PORT`).
 pub async fn serve(
     db: std::path::PathBuf,
     config: Option<GlobalConfig>,
@@ -68,8 +77,11 @@ pub async fn serve(
     }
 
     let shared = std::sync::Arc::new(AppState::new(st, &global, docker));
-    let app = router::build_router(std::sync::Arc::clone(&shared));
+    // O config global (mesmo default) alimenta a borda R30 no router.
+    let app = router::build_router(std::sync::Arc::clone(&shared), &global);
     let api_app = api::build_api(std::sync::Arc::clone(&shared));
+    // Painel (08) montado em porta própria — sem auth, então NUNCA no :8080.
+    let painel = panel::build_panel(std::sync::Arc::clone(&shared));
 
     // Sweep do sleep manager (04): a cada 60 s, re-sincroniza com o Docker e
     // dorme quem estourou ociosidade (com lease/cooldown/CPU como guardas).
@@ -95,10 +107,13 @@ pub async fn serve(
 
     let router_listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     let api_listener = tokio::net::TcpListener::bind(("127.0.0.1", api_port)).await?;
-    tracing::info!(port, api_port, "fluxd no ar");
+    let panel_listener = tokio::net::TcpListener::bind(("0.0.0.0", PANEL_PORT)).await?;
+    tracing::info!(port, api_port, panel_port = PANEL_PORT, "fluxd no ar");
 
-    tokio::try_join!(async { axum::serve(router_listener, app).await }, async {
-        axum::serve(api_listener, api_app).await
-    })?;
+    tokio::try_join!(
+        async { axum::serve(router_listener, app).await },
+        async { axum::serve(api_listener, api_app).await },
+        async { axum::serve(panel_listener, painel).await }
+    )?;
     Ok(())
 }

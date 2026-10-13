@@ -36,7 +36,9 @@ async fn spawn_router(st: State) -> u16 {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
-        axum::serve(l, build_router(app)).await.unwrap();
+        axum::serve(l, build_router(app, &GlobalConfig::default()))
+            .await
+            .unwrap();
     });
     port
 }
