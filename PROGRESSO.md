@@ -2,6 +2,81 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 13/10/2026 — Fundação de código: workspace Rust + núcleo do fluxd + CLI stub
+
+**Intenção**: parar de escrever spec e começar a base de código que comporta
+TUDO o que as specs pedem — R22/R23/R24/R30/R31/R32/R33 são todas camadas ou
+variantes do MESMO pipeline de requisição do `fluxd`, então a fundação é esse
+pipeline (dispatch por `Host` em máquina de estados) + o estado SQLite + os
+schemas de configuração.
+
+**Decisões do Gabriel nesta sessão** (fecham 3 das 5 perguntas da
+[00-visao-geral](docs/specs/00-visao-geral.md)):
+
+- **#1 banco único = MariaDB**, e **não precisa manter NADA do WSL** — a
+  migração `flux migrate-from-wsl` (dump/import dos bancos do vippers) MORREU.
+  O Flux nasce do zero; o WSL segue intacto até ele desligar na mão.
+- **#3 Redis/valkey/memcached bloqueados por padrão** no guard de imagens —
+  materializado no default de `[image_guard].block` do `flux-common`
+  (`crates/flux-common/src/config.rs`).
+- **#5 gerenciador de banco = Adminer** (LAN-only, linkado do painel, F12).
+- Fundação de código (itens 1–4 da proposta) **aprovada e entregue**.
+
+**Entregue** (commits `e9372a2`, `61a07ae`, `3939bb9`, sem push):
+
+- **Workspace de 3 crates** (`crates/flux-common`, `crates/fluxd`,
+  `crates/flux-cli`) + CI em `.github/workflows/ci.yml` (fmt + clippy
+  `-D warnings` + test). Gates: 53 testes verdes, fmt limpo, clippy limpo.
+- **flux-common**: `flux.toml` de projeto e config global com validação
+  ESTRITA (`deny_unknown_fields` — chave desconhecida = erro, spec 06); todas
+  as seções de fases futuras já declaradas (`[limits]`, `[queue]`, `[shield]`,
+  `[status]`, `[tools]`, `[alerts]`…); `ManagedHost` com parse de
+  `{name}`/`{name}-d`/`{branch}-{name}-d` por sufixo mais longo (hífen no nome
+  do projeto coberto por teste); enum `framework`; `FluxError` com causa
+  classificada (R33); tipos do protocolo CLI↔API.
+- **fluxd núcleo**: SQLite WAL com o schema exato da spec 07 +
+  `schema_version` em `settings` (recusa banco de fluxd mais novo — abre
+  caminho para o upgrade com rollback da R25; corrompido → erro apontando
+  `/srv/flux/backups/`, nunca recria silencioso); `decision.rs` PURA com o
+  enum `Action` cobrindo a matriz completa da spec 03 (proxy / página de
+  espera 200 / 503 JSON `service_waking` + `Retry-After` / "falhou" /
+  404 brandiado / branch ausente / intercept de robots+sitemap R22-R23);
+  páginas da família Flux (meta refresh 3 s, `no-store`, noindex em dev);
+  proxy hyper STREAMING (hop-by-hop fora, sem buffering); falha de upstream
+  vira página de estado — nunca 502 cru; `X-Robots-Tag: noindex` em TODA
+  resposta de dev, inclusive proxy; API de controle :7420 bind 127.0.0.1 com
+  `/healthz`, resto 501 com causa.
+- **flux-cli**: árvore clap COMPLETA da tabela da spec 06 como stubs que
+  recusam com fase de destino e exit 2 (a superfície de comandos é design de
+  API). `flux db restore` já exige `--yes` antes de existir. `flux up
+  homolog` → `ambiente inválido` (validação via `flux-common`).
+
+**O que NUNCA fazer** (acumulado até aqui): ver lista da
+[00-visao-geral](docs/specs/00-visao-geral.md) — segue tudo valendo.
+
+**Limitações honestas da fundação** (não são bugs, são fases):
+
+- proxy_target vem de `settings` (`proxy_target/{name}/{env}`) — resolução
+  real de IP via bollard é F3.
+- websocket upgrade e timeouts de borda (connect 5 s/health 90 s/idle 300 s)
+  entram na F3; rate limit/WAF entram como tower layers na frente do
+  `decision::decide` (R30/R32).
+- token da API de controle nasce junto do primeiro endpoint real (F6).
+- `branch_exists` responde sempre true até o `flux watch` existir (F11).
+- Painel é placeholder — o real com auth é F8 (painel nunca fica público sem
+  auth, spec 03).
+
+**Como testar**: `cargo test --workspace` (53 testes, sem VM e sem Docker —
+integração usa upstream dummy na loopback). Smoke do CLI:
+`./target/debug/flux --version`, `./target/debug/flux up` (stub exit 2),
+`./target/debug/flux db restore x y` (exige `--yes`).
+
+**Próximo**: revisão do Gabriel nas edições propostas das specs (abaixo) →
+F1 (`flux setup host` + VM Bookworm, PowerShell/cloud-init) e/ou F3
+(resolução de IP via bollard + wake real + timeouts). Specs 00/05/09 ainda
+descrevem o estado pré-decisão (#1/#3/#5) — edição proposta e aguardando ok,
+não aplicada.
+
 ## 08–09/10/2026 — Specs v0 → v0.2
 
 **Intenção**: definir a arquitetura completa do Flux antes de qualquer código —
