@@ -745,22 +745,39 @@ async fn ps(env: &str) {
         (!do_ctx, r.compose_project.clone(), r.service.clone())
     });
 
-    println!(
-        "{:<32} {:<10} {:<10} {}",
-        "COMPOSE PROJECT",
-        "SERVICE",
-        "ESTADO",
-        "status".to_uppercase()
-    );
+    // Agrupado por projeto ("pastas", pedido do Gabriel 14/10) — estado
+    // agregado no header: DORMINDO = nada rodando; PARCIAL = misto (não
+    // deveria existir: sono de dev para o projeto INTEIRO); ACORDADO = tudo up.
+    let mut grupos: Vec<(String, Vec<&api::ContainerRowOut>)> = Vec::new();
     for r in &visiveis {
-        println!(
-            "{:<32} {:<10} {:<10} {}",
-            r.compose_project, r.service, r.state, r.status
-        );
+        match grupos.last_mut() {
+            Some((p, v)) if *p == r.compose_project => v.push(r),
+            _ => grupos.push((r.compose_project.clone(), vec![r])),
+        }
+    }
+    for (projeto, containers) in &grupos {
+        let rodando = containers.iter().filter(|c| c.state == "running").count();
+        let estado_projeto = if rodando == 0 {
+            "DORMINDO"
+        } else if rodando == containers.len() {
+            "ACORDADO"
+        } else {
+            "PARCIAL"
+        };
+        // flux-{name}-{env} → o nome que o Gabriel conhece (a pasta).
+        let nome = projeto
+            .strip_prefix("flux-")
+            .unwrap_or(projeto)
+            .trim_end_matches("-dev")
+            .trim_end_matches("-prod");
+        println!("{nome}  [{estado_projeto}]  ({projeto})");
+        for c in containers {
+            println!("    {:<12} {:<9} {}", c.service, c.state, c.status);
+        }
+        println!();
     }
     let total = rows.len();
     if projeto_ctx.is_some() && visiveis.len() < total {
-        println!();
         println!(
             "+ {} container(ns) de outros projetos (flux ps fora do projeto lista todos)",
             total - visiveis.len()

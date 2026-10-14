@@ -13,7 +13,10 @@
 use std::collections::HashMap;
 
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum};
+use bollard::models::{
+    ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, ContainerSummary,
+    ContainerSummaryStateEnum,
+};
 use bollard::query_parameters::{CreateContainerOptionsBuilder, ListContainersOptionsBuilder};
 use flux_common::protocol::{ContainerState, Env};
 
@@ -23,6 +26,25 @@ use crate::state::State;
 /// Containers alvo: `{name}-{env}` vira projeto de compose `flux-{name}-{env}`.
 pub fn compose_project(name: &str, env: Env) -> String {
     format!("flux-{name}-{env}")
+}
+
+/// TODOS os containers do compose project (sono de dev é do PROJETO inteiro:
+/// só o app parado deixava worker/reverb rodando à toa — salada que o
+/// Gabriel apontou). Flux-db e cia NUNCA entram: não têm o label.
+async fn containers_do_projeto(docker: &Docker, project: &str) -> Vec<ContainerSummary> {
+    let mut filters = HashMap::new();
+    filters.insert(
+        "label".to_owned(),
+        vec![format!("com.docker.compose.project={project}")],
+    );
+    let options = ListContainersOptionsBuilder::default()
+        .all(true)
+        .filters(&filters)
+        .build();
+    docker
+        .list_containers(Some(options))
+        .await
+        .unwrap_or_default()
 }
 
 pub async fn find_app_container(
@@ -161,17 +183,20 @@ impl<'a> DockerSource<'a> {
     /// Devolve `true` quando o container estava parado e foi acordado.
     pub async fn wake(&self, name: &str, env: Env) -> Result<bool, bollard::errors::Error> {
         let project = compose_project(name, env);
-        if let Some(c) = find_app_container(&self.docker, &project).await {
+        let mut acordou_algum = false;
+        for c in containers_do_projeto(&self.docker, &project).await {
             let parado = c
                 .state
                 .as_ref()
-                .map(|st| !matches!(st.status, Some(ContainerStateStatusEnum::RUNNING)))
-                .unwrap_or(false);
+                .is_some_and(|st| !matches!(st, ContainerSummaryStateEnum::RUNNING));
+            if !parado {
+                continue;
+            }
             let id = c.id.clone().unwrap_or_default();
             self.docker.start_container(&id, None).await?;
-            return Ok(parado);
+            acordou_algum = true;
         }
-        Ok(false)
+        Ok(acordou_algum)
     }
 
     /// `docker pause` — hibernação de prod (< 1 s, invisível, 11).
@@ -199,7 +224,16 @@ impl<'a> DockerSource<'a> {
     /// `docker stop` — sono de dev (04).
     pub async fn sleep(&self, name: &str, env: Env) -> Result<(), bollard::errors::Error> {
         let project = compose_project(name, env);
-        if let Some(c) = find_app_container(&self.docker, &project).await {
+        for c in containers_do_projeto(&self.docker, &project).await {
+            let rodando = c.state.as_ref().is_some_and(|st| {
+                matches!(
+                    st,
+                    ContainerSummaryStateEnum::RUNNING | ContainerSummaryStateEnum::RESTARTING
+                )
+            });
+            if !rodando {
+                continue;
+            }
             self.docker
                 .stop_container(c.id.as_deref().unwrap_or_default(), None)
                 .await?;
