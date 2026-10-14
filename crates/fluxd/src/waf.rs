@@ -160,11 +160,23 @@ pub fn na_allowlist(ip: Option<IpAddr>) -> bool {
     }
 }
 
-/// IP real do cliente: primeiro valor de `x-forwarded-for` (o Caddy da
-/// própria VM seta — confiável, 09), senão o IP do `ConnectInfo`. XFF sem IP
-/// parseável cai para o `ConnectInfo` com log em debug — sem fallback
-/// silencioso.
+/// IP real do cliente, por precedência:
+/// 1. `cf-connecting-ip` — chegou PELO TÚNEL (cloudflared seta com o IP real
+///    do visitante na internet e SOBRESCREVE o do cliente; não dá para
+///    forjar pela cadeia). Sem isso, request via túnel chegaria com o IP do
+///    cloudflared (LAN) e a allowlist desligaria o WAF para a internet
+///    inteira — o furo que a prova ao vivo achou (14/10).
+/// 2. primeiro valor de `x-forwarded-for` (o Caddy da própria VM seta no
+///    acesso LAN direto — confiável, 09).
+/// 3. `ConnectInfo`. XFF sem IP parseável cai para o de baixo com log em
+///    debug — sem fallback silencioso.
 pub fn ip_real(headers: &axum::http::HeaderMap, connect: Option<IpAddr>) -> Option<IpAddr> {
+    if let Some(v) = headers.get("cf-connecting-ip")
+        && let Ok(s) = v.to_str()
+        && let Ok(ip) = s.trim().parse::<IpAddr>()
+    {
+        return Some(ip);
+    }
     if let Some(v) = headers.get("x-forwarded-for")
         && let Ok(s) = v.to_str()
     {
@@ -852,5 +864,41 @@ mod tests {
             "corpo chega intocado (streaming intocado)"
         );
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod precedencia_ip {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("ip de teste válido")
+    }
+
+    #[test]
+    fn cf_connecting_ip_vence_tudo_quando_parseia() {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("cf-connecting-ip", "203.0.113.7".parse().unwrap());
+        h.insert("x-forwarded-for", "192.168.140.1".parse().unwrap());
+        assert_eq!(
+            ip_real(&h, Some(ip("127.0.0.1"))),
+            Some(ip("203.0.113.7")),
+            "túnel: IP real do visitante, não o do cloudflared"
+        );
+    }
+
+    #[test]
+    fn sem_cf_usa_xff_lan() {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("x-forwarded-for", "192.168.140.1".parse().unwrap());
+        assert_eq!(ip_real(&h, None), Some(ip("192.168.140.1")));
+    }
+
+    #[test]
+    fn cf_lixo_cai_para_xff() {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("cf-connecting-ip", "não-sou-ip".parse().unwrap());
+        h.insert("x-forwarded-for", "10.0.0.9".parse().unwrap());
+        assert_eq!(ip_real(&h, None), Some(ip("10.0.0.9")));
     }
 }
