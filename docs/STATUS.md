@@ -5,7 +5,7 @@ Matriz viva do Flux: cada funcionalidade em escopo com status de implementação
 integração falta. **NÃO** = só na spec.
 
 Atualizar no fim de CADA sessão que mexer em código (mesma cadência do
-[PROGRESSO](../PROGRESSO.md)). Última atualização: **13/10/2026** (fluxd OPERACIONAL na VM, router ponta a ponta).
+[PROGRESSO](../PROGRESSO.md)). Última atualização: **14/10/2026** (F7: Caddy TLS + auth do painel + mutagen real).
 
 Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 
@@ -22,7 +22,7 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | API de controle `:7420` (register/status/lease/schema, token sha256 fail-closed) | **SIM** (endpoints reais + auth testados; SSE de logs na F6+) |
 | Módulo Docker (bollard): estado/alvo/wake/pause/stop por labels `flux-{name}-{env}` | **PARCIAL** — testado em engine real; sem fluxo end-to-end na VM |
 | CLI `flux`: árvore completa da spec 06 | **PARCIAL** — ciclo dev (up/down/status/logs/exec…) real via API com lease; vm/tunnel/panel/shield etc. continuam stubs |
-| VM VirtualBox operacional (Debian 12 + Docker CE + Caddy + fluxd systemd) | **SIM** — boot validado, host-only 192.168.140.1/2, router proxyando container real |
+| Docker + Caddy na VM operacionais (Debian 12, fluxd systemd, TLS catch-all) | **SIM** — boot validado, host-only 192.168.140.1/2, router proxyando container real PELO TLS do Caddy (64 ms) |
 
 ## Requisitos R1–R34
 
@@ -31,12 +31,12 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | R1 | Rust | **SIM** |
 | R2 | Docker em VM Debian | **SIM** — VM VirtualBox operacional, Docker 29.9, router do fluxd proxyando container real |
 | R3 | Sono automático por interação | **PARCIAL** — sweep 60 s + guardas (lease/cooldown/CPU) testados em engine real; sem janela do sync nem painel |
-| R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — validado na VM real (proxy 200, espera 200, 404 brandiado, robots); falta Caddy TLS + tunnel público |
-| R5 | Sync Windows↔VM (mutagen) | **PARCIAL** — orquestração completa testada (gated MUTAGEN_BIN); binário e sessão real na VM pós-reboot |
+| R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — validado na VM real PELO TLS (proxy 200, espera 200, 404 brandiado, robots, painel 303); falta o tunnel público (cloudflared pendendo do token do Gabriel) |
+| R5 | Sync Windows↔VM (mutagen) | **PARCIAL** — binário 0.18.1 + agent bundle instalados, sessão real provada (374 ms, aceite < 5 s); falta primeiro projeto real via `flux sync` |
 | R6 | Banco único + migrations + guard | **PARCIAL** — guard de imagens completo + runner via docker exec testado; ciclo do `flux up` e `flux-db` real na F5/F6 |
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
 | R8 | `flux up/logs/exec/down` no Windows | **PARCIAL** — ciclo dev real via API `:7420` com lease de sono; precisa fluxd rodando (VM) |
-| R9 | Painel web | **PARCIAL** — dashboard/detalhe/eventos/SVG server-side prontos; SEM auth (F8 real substitui antes de expor) |
+| R9 | Painel web | **PARCIAL** — dashboard/detalhe/eventos/SVG server-side + AUTH REAL (Argon2id, sessão 12 h, rate limit 5/min, guard) montado no router público; falta SSE de logs e abas de projeto (banco/sync/domínios/deploys) |
 | R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
 | R12 | Troca de versão invisível + drain de jobs | **NÃO** — F10 |
@@ -65,6 +65,11 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 
 ## Histórico de atualização
 
+- **14/10/2026** — F7: auth real do painel (Argon2id + sessão + rate limit,
+  painel montado no router público, binds 127.0.0.1), Caddy estático com
+  `default_sni` provado por TLS do host, mutagen 0.18.1 real (sessão a
+  374 ms), cloudflared + script prontos pendendo do token do tunnel,
+  `passwd -d flux`. Commit `74c8c1e`.
 - **13/10/2026** — fundação de código (workspace, router, estado, páginas,
   proxy, CLI stubs), specs das decisões #1/#3/#5 + VirtualBox, VM provisionada,
   módulo Docker testado em engine real; F4 (sleep manager) e F5 núcleo (guard

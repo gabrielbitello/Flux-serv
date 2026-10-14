@@ -339,9 +339,23 @@ impl SyncSpec {
 // ------------------------------------------------------------------- execução
 
 /// Binário do mutagen: env `MUTAGEN_BIN` vence (testes e instalações fora do
-/// PATH), senão o nome no PATH.
+/// PATH); senão a instalação padrão do Flux em `%USERPROFILE%\.flux\bin\`
+/// (`install-fluxd.sh` não toca no host — o download é manual/setup); por
+/// último o nome no PATH.
 pub fn mutagen_bin() -> String {
-    std::env::var(ENV_BIN).unwrap_or_else(|_| "mutagen".into())
+    if let Ok(b) = std::env::var(ENV_BIN) {
+        return b;
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let padrao = std::path::PathBuf::from(home)
+            .join(".flux")
+            .join("bin")
+            .join("mutagen.exe");
+        if padrao.is_file() {
+            return padrao.display().to_string();
+        }
+    }
+    "mutagen".into()
 }
 
 /// Roda o mutagen e devolve stdout podado. Exit != 0 carrega o stderr — erro

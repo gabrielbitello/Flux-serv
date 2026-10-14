@@ -51,23 +51,24 @@ de Caddy por deploy, nenhuma config dinâmica para quebrar.
 ```caddy
 {
     admin off
+    default_sni *.bitello.xyz
 }
 
 *.bitello.xyz {
     tls internal
     reverse_proxy 127.0.0.1:8080
 }
-
-# Acesso LAN direto (sem passar pela edge), opcional:
-:443 {
-    tls internal
-    reverse_proxy 127.0.0.1:8080
-}
 ```
 
+- `default_sni` (incluído em 14/10/2026 após prova real na VM): conexões SEM
+  SNI (cloudflared apontando para o IP do origin, acesso LAN por
+  `https://192.168.140.2`) usam o cert curinga do `*.bitello.xyz` em vez de
+  morrer com `tlsv1 alert internal error`. O bloco separado `:443` da versão
+  anterior da spec saiu — sem `default_sni` ele não consegue cert pré-emitido
+  e quebra o handshake; com ele, o site curinga cobre tudo sozinho.
 - Acesso LAN: opcionalmente o Gabriel aponta `*.bitello.xyz` para
-  `192.168.140.2` no DNS local (CoreDNS já existente no PC) e sai sem passar
-  pela internet; o server block `:443` cobre esse caso.
+  `192.168.140.2` no DNS local e sai sem passar pela internet; quem decide o
+  host continua sendo o `fluxd` pelo header `Host`.
 - Caddy roda como systemd com capacidades de bind 443 (pacote oficial já trata).
 
 ### fluxd router (o "porteiro" do Flux)

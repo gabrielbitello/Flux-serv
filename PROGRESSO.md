@@ -2,6 +2,57 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 14/10/2026 (parte 7) — F7: Caddy TLS + auth do painel + mutagen REAL
+
+**Intenção**: fechar a cadeia de tráfego da 03 dentro da VM (Caddy → fluxd),
+destravar o painel para o wildcard público com auth real (o NUNCA da 03/08) e
+provar a sync mutagen com binário de verdade (F2).
+
+**Auth real do painel (F8 núcleo, commit `74c8c1e`)**: `panel_auth.rs` —
+Argon2id puro-Rust contra `/srv/flux/secrets/panel.argon2` (re-lido a cada
+login; ausente = 503 honesto com a instrução de geração, fail-closed), sessão
+por cookie `HttpOnly; SameSite=Lax` de 12 h em memória, rate limit 5 logins/min
+por IP (antes de tocar no hash), guard em toda rota exceto `/login`. O painel
+ENTROU no router público via `Action::Panel` (host `flux.bitello.xyz`) — o
+cerco da porta 7421 virou atalho de debug, agora em `127.0.0.1`. Os três
+binds do fluxd colaram no critério da 09 (só 22/80/443 respondem de fora).
+78 testes no crate; e2e provado pelo TLS: sem sessão → 303 `/login`,
+`/login` renderiza, login sem hash → 503 com instrução.
+
+**Caddy estático (03)**: Caddyfile catch-all `*.bitello.xyz` → `tls internal`
+→ `127.0.0.1:8080`. Achado real: bloco `:443` nu morria com
+`tlsv1 alert internal error` (sem SNI não há cert pré-emitido) — corrigido com
+`default_sni *.bitello.xyz` global, spec 03 atualizada. Prova do HOST via TLS
+(host-only): proxy 200 nginx em 64 ms, ghost → 404 brandiado, painel → 303,
+robots dev → `Disallow: /`.
+
+**Mutagen real (F2 fechado na mecânica)**: `mutagen.exe` 0.18.1 +
+`mutagen-agents.tar.gz` (bundle é arquivo SEPARADO no zip — sem ele o agente
+não instala na VM) em `%USERPROFILE%\.flux\bin\`. Sessão real one-way-replica
+Windows→VM: arquivo apareceu no `/srv/flux/projects/` em **374 ms** (aceite da
+02: < 5 s). `~/.ssh/config` ganhou entrada `192.168.140.2` com a chave do Flux
+(`IdentitiesOnly yes` — a chave nunca vai para outra máquina, 09).
+`mutagen_bin()` do CLI resolve `MUTAGEN_BIN` → `%USERPROFILE%\.flux\bin\` → PATH.
+
+**cloudflared no host (pende do Gabriel)**: binário 2026.10.0 baixado,
+`scripts/host/install-cloudflared.ps1` pronto (idempotente, valida token
+`eyJ...`), placeholder em `%USERPROFILE%\.flux\tunnel.token`. Faltam os passos
+dele: criar tunnel no dashboard Zero Trust, public hostname `*.bitello.xyz` →
+`HTTPS://192.168.140.2:443` + No TLS Verify, colar o token, rodar o script
+como admin.
+
+**Higiene**: `passwd -d flux` — senha temporária do serial removida
+(`passwd -S` = NP); SSH sem chave = `Permission denied (publickey)`.
+
+**O que NUNCA fazer** (novo desta fase): nunca montar painel sem o guard de
+sessão; nunca apontar o tunnel direto a container (sempre Caddy → fluxd); nunca
+deletar `mutagen-agents.tar.gz` do diretório de binários.
+
+**Próximo**: token do tunnel (Gabriel) → fluxhost :8423→8443 (F13) na frente
+do cloudflared; primeiro projeto real com `flux up` + sync; hash da senha do
+painel (`printf '%s' 'SUA-SENHA' | argon2 "$(openssl rand -hex 16)" -id -e
+> /srv/flux/secrets/panel.argon2` dentro da VM).
+
 ## 13/10/2026 (parte 6) — FLUXD OPERACIONAL NA VM: router ponta a ponta provado
 
 **Intenção**: pós-reboot do host (HVCI off + WSL/Docker desinstalados), subir a
