@@ -23,7 +23,7 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 | Módulo Docker (bollard): estado/alvo/wake/pause/stop por labels `flux-{name}-{env}` | **PARCIAL** — testado em engine real; sem fluxo end-to-end na VM |
 | CLI `flux`: árvore completa da spec 06 | **PARCIAL** — ciclo dev (up/down/status/logs/exec…) real via API com lease + forward SSH automático + token do config; `flux token generate` real (hash na VM + config local); vm/tunnel/panel/shield etc. continuam stubs |
 | Docker + Caddy na VM operacionais (Debian 12, fluxd systemd, TLS catch-all) | **SIM** — boot validado, host-only 192.168.140.1/2, router proxyando container real PELO TLS do Caddy (64 ms) |
-| Adminer (R16) LAN-only + painel com senha | **SIM** — 192.168.140.2:8081 na flux-net, link no nav do painel; hash Argon2id do painel setado (login provado) |
+| Adminer (R16) LAN-only + painel com senha | **SIM** — 192.168.140.2:8081 na flux-net, link no nav do painel; hash Argon2id do painel setado (login provado); user global `viewer` SELECT-only (prova: lê os 2 projetos, CREATE denied 1142) |
 | flux-db (mariadb:11) + endpoint `/up` com override + fila de sync no `flux up` | **SIM** — banco healthy em flux-net, DBs por projeto; compose com guard re-varrido, `ports !reset`, `DB_HOST=flux-db` |
 | Modo dev temporário (14): teardown após TTL sem interação | **PARCIAL** — implementado (sweep 60 s, relógio interação→created_at, purga compose+dirs+SQLite, 7 testes); expiração REAL ainda não presenciada (primeiros TTLs correm) |
 
