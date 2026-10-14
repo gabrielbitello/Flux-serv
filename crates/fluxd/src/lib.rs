@@ -2,6 +2,8 @@
 //! (`main.rs`) só parseia argumentos; tudo testável vive aqui.
 
 pub mod api;
+pub mod beat;
+pub mod ciclo;
 pub mod compose;
 pub mod db;
 pub mod decision;
@@ -9,6 +11,9 @@ pub mod docker;
 pub mod edge;
 pub mod events;
 pub mod guard;
+pub mod observe;
+pub mod observe_page;
+pub mod waf;
 pub mod pages;
 pub mod panel;
 pub mod panel_auth;
