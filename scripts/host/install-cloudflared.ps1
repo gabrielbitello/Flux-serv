@@ -32,6 +32,15 @@ if (-not $token -or $token -notmatch "^eyJ") {
     throw "token invalido em $tokenFile - esperado o valor eyJ... do dashboard do tunnel"
 }
 
+# Resquicio do install ANTIGO (era devfactory): chave de EventLog orfa no
+# registry, sem servico atras. Com ela presente, o service install do
+# cloudflared falha no event logger e ROLA BACK do servico em silencio.
+$chaveLog = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\Cloudflared"
+if (Test-Path $chaveLog) {
+    Write-Host "chave de EventLog orfa encontrada - removendo: $chaveLog"
+    Remove-Item $chaveLog -Recurse -Force
+}
+
 # Servico idempotente: se ja existe, remove antes (troca de token).
 $existe = Get-Service -Name cloudflared -ErrorAction SilentlyContinue
 if ($existe) {
@@ -41,6 +50,9 @@ if ($existe) {
 }
 
 & $bin service install $token
+if ($LASTEXITCODE -ne 0) {
+    throw "cloudflared service install falhou (exit $LASTEXITCODE) - erro acima e real"
+}
 Start-Sleep -Seconds 2
 Start-Service cloudflared
 Start-Sleep -Seconds 3
