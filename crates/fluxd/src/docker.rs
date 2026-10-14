@@ -261,7 +261,7 @@ impl HostSource for DockerSource<'_> {
     }
 
     fn env_state(&self, name: &str, env: Env) -> ContainerState {
-        let project = compose_project(name, env);
+        let project = self.compose_project_cor(name, env);
         match tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(find_app_container(&self.docker, &project))
         }) {
@@ -276,7 +276,7 @@ impl HostSource for DockerSource<'_> {
     }
 
     fn proxy_target(&self, name: &str, env: Env) -> Option<String> {
-        let project = compose_project(name, env);
+        let project = self.compose_project_cor(name, env);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(find_app_container(&self.docker, &project))
         })

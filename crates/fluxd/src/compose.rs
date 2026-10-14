@@ -545,7 +545,6 @@ pub async fn trocar_cor(
 
     // A cor nova tem que estar de pé (o deploy sobe a INATIVA antes da troca).
     let docker = app.docker.clone().ok_or("fluxd sem Docker conectado")?;
-    let src = crate::docker::DockerSource::new(docker.clone(), st);
     let projeto_novo = format!("flux-{name}-prod-{color}");
     let containers = lista_do_projeto(&docker, &projeto_novo).await?;
     if containers.is_empty() {
@@ -574,12 +573,9 @@ pub async fn trocar_cor(
         }
     }
 
-    // TROCA ATÔMICA: ponteiro novo (requests novos nascem na cor nova).
-    let target = src
-        .proxy_target(name, flux_common::protocol::Env::Prod)
-        .ok_or("cor nova sem proxy_target (container app sem rede/IP?)")?;
-    let _ = target; // proxy_target do DockerSource resolve pela COR ATIVA —
-    // por isso a ordem é: set_active_color PRIMEIRO.
+    // TROCA ATÔMICA: ponteiro novo (requests novos nascem na cor nova). O
+    // proxy_target do DockerSource resolve SEMPRE pela cor ativa do SQLite
+    // (compose_project_cor) — o ponteiro É a troca.
     st.set_active_color(name, color)
         .map_err(|e| e.to_string())?;
     events::event(
