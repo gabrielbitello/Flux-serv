@@ -23,6 +23,7 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 | Módulo Docker (bollard): estado/alvo/wake/pause/stop por labels `flux-{name}-{env}` | **PARCIAL** — testado em engine real; sem fluxo end-to-end na VM |
 | CLI `flux`: árvore completa da spec 06 | **PARCIAL** — ciclo dev (up/down/status/logs/exec…) real via API com lease + forward SSH automático + token do config; `flux token generate` real (hash na VM + config local); vm/tunnel/panel/shield etc. continuam stubs |
 | Docker + Caddy na VM operacionais (Debian 12, fluxd systemd, TLS catch-all) | **SIM** — boot validado, host-only 192.168.140.1/2, router proxyando container real PELO TLS do Caddy (64 ms) |
+| Adminer (R16) LAN-only + painel com senha | **SIM** — 192.168.140.2:8081 na flux-net, link no nav do painel; hash Argon2id do painel setado (login provado) |
 | flux-db (mariadb:11) + endpoint `/up` com override + fila de sync no `flux up` | **SIM** — banco healthy em flux-net, DBs por projeto; compose com guard re-varrido, `ports !reset`, `DB_HOST=flux-db` |
 | Modo dev temporário (14): teardown após TTL sem interação | **PARCIAL** — implementado (sweep 60 s, relógio interação→created_at, purga compose+dirs+SQLite, 7 testes); expiração REAL ainda não presenciada (primeiros TTLs correm) |
 
@@ -41,11 +42,11 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 | R9 | Painel web | **PARCIAL** — auth real + dashboard/detalhe/eventos + **/observe (24 h, filtros geral→projeto→container, peaks com snapshot)**; falta SSE de logs e abas (banco/sync/domínios/deploys) |
 | R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
-| R12 | Troca de versão invisível + drain de jobs | **NÃO** — F10 |
+| R12 | Troca de versão invisível + drain | **PARCIAL** — MECANISMO completo e provado ao vivo (bg-test: switch blue→green pelo mesmo domínio, drain `stop -t` da velha, rollback = switch de volta); falta o deploy que SOBE a cor inativa (F9/F10, CI) e a semântica `queue:restart` do worker |
 | R13 | Cota global dev / limite individual prod | **NÃO** — F10 |
 | R14 | Prod hiberna, worker 24/7 | **PARCIAL** — pause/unpause no sleep manager (`prod_mode`); worker 24/7 e pressão RAM na F10 |
 | R15 | Branch routing `{branch}-{name}-d` | **PARCIAL** — parse implementado/testado; worktrees/watch na F11 |
-| R16 | Gerenciador de banco (Adminer) | **NÃO** — decidido; F12 (flux-db real já no ar) |
+| R16 | Gerenciador de banco (Adminer) | **SIM** — container LAN-only (192.168.140.2:8081, inacessível da internet), ADMINER_DEFAULT_SERVER=flux-db, link no painel |
 | R17 | Toolchain sob demanda (`flux tool`) | **NÃO** — stub |
 | R18 | `.env` cifrado + painel read-only | **NÃO** — F12 |
 | R19 | VM Save após 30 dias | **NÃO** — `savestate` mapeado; F13 |
