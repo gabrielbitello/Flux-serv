@@ -31,7 +31,7 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | R1 | Rust | **SIM** |
 | R2 | Docker em VM Debian | **SIM** — VM VirtualBox operacional, Docker 29.9, router do fluxd proxyando container real |
 | R3 | Sono automático por interação | **PARCIAL** — sweep 60 s + guardas (lease/cooldown/CPU) testados em engine real; sem janela do sync nem painel |
-| R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — validado na VM real PELO TLS (proxy 200, espera 200, 404 brandiado, robots, painel 303); falta o tunnel público (cloudflared pendendo do token do Gabriel) |
+| R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — CADEIA PÚBLICA COMPLETA pela internet (tunnel + Caddy TLS + fluxd): ghost → 404 brandiado 99 ms, painel → 303 guard, TLS válido; página de espera pela internet falta projeto real |
 | R5 | Sync Windows↔VM (mutagen) | **PARCIAL** — binário 0.18.1 + agent bundle instalados, sessão real provada (374 ms, aceite < 5 s); falta primeiro projeto real via `flux sync` |
 | R6 | Banco único + migrations + guard | **PARCIAL** — guard de imagens completo + runner via docker exec testado; ciclo do `flux up` e `flux-db` real na F5/F6 |
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
@@ -65,6 +65,13 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 
 ## Histórico de atualização
 
+- **14/10/2026 (noite)** — TUNNEL PÚBLICO VIVO: cloudflared serviço Windows
+  Running (fixes: .ps1 ASCII-only para PS 5.1; chave de EventLog órfã da era
+  devfactory derrubava o service install em silencio; CNAME curinga `*`
+  apontava pro tunnel velho — dashboard não cria DNS de wildcard, apontado à
+  mão pro tunnel novo `c0a19fdd…`). Prova da internet: `zzz.bitello.xyz` →
+  404 brandiado (99 ms), `flux.bitello.xyz` → 303 guard + login render +
+  robots Disallow, TLS real válido. **F7 FECHADO.**
 - **14/10/2026** — F7: auth real do painel (Argon2id + sessão + rate limit,
   painel montado no router público, binds 127.0.0.1), Caddy estático com
   `default_sni` provado por TLS do host, mutagen 0.18.1 real (sessão a

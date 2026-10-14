@@ -34,24 +34,30 @@ Windows→VM: arquivo apareceu no `/srv/flux/projects/` em **374 ms** (aceite da
 (`IdentitiesOnly yes` — a chave nunca vai para outra máquina, 09).
 `mutagen_bin()` do CLI resolve `MUTAGEN_BIN` → `%USERPROFILE%\.flux\bin\` → PATH.
 
-**cloudflared no host (pende do Gabriel)**: binário 2026.10.0 baixado,
-`scripts/host/install-cloudflared.ps1` pronto (idempotente, valida token
-`eyJ...`), placeholder em `%USERPROFILE%\.flux\tunnel.token`. Faltam os passos
-dele: criar tunnel no dashboard Zero Trust, public hostname `*.bitello.xyz` →
-`HTTPS://192.168.140.2:443` + No TLS Verify, colar o token, rodar o script
-como admin.
+**cloudflared no host (FECHADO à noite)**: binário 2026.10.0, serviço Windows
+Running. Três tropeços registrados: (1) `.ps1` UTF-8 sem BOM — PS 5.1 lê como
+ANSI e em-dash vira aspa curva (0x94) quebrando strings no parse → scripts
+do repo saem ASCII-only; (2) chave de EventLog órfã da era devfactory fazia o
+`service install` rolar back em silencio (serviço "installed", nada no SCM) →
+script remove a chave e faz throw em exit ≠ 0; (3) o aviso do dashboard que
+quase passa batido: **hostname curinga `*` não cria registro DNS** — o CNAME
+`*` antigo apontava pro tunnel velho (1033 na internet); apontado à mão pro
+tunnel novo. Prova final pela internet: `zzz.bitello.xyz` → 404 brandiado em
+99 ms, `flux.bitello.xyz` → 303 guard, login renderiza, robots `Disallow`,
+TLS real válido sem `-k`. **F7 FECHADO.**
 
 **Higiene**: `passwd -d flux` — senha temporária do serial removida
 (`passwd -S` = NP); SSH sem chave = `Permission denied (publickey)`.
 
 **O que NUNCA fazer** (novo desta fase): nunca montar painel sem o guard de
 sessão; nunca apontar o tunnel direto a container (sempre Caddy → fluxd); nunca
-deletar `mutagen-agents.tar.gz` do diretório de binários.
+deletar `mutagen-agents.tar.gz` do diretório de binários; nunca confiar no
+"installed" do cloudflared sem checar o SCM (`Get-Service`).
 
-**Próximo**: token do tunnel (Gabriel) → fluxhost :8423→8443 (F13) na frente
-do cloudflared; primeiro projeto real com `flux up` + sync; hash da senha do
-painel (`printf '%s' 'SUA-SENHA' | argon2 "$(openssl rand -hex 16)" -id -e
-> /srv/flux/secrets/panel.argon2` dentro da VM).
+**Próximo**: primeiro projeto real com `flux up` + sync (página de espera
+pela internet); hash da senha do painel (`printf '%s' 'SUA-SENHA' | argon2
+"$(openssl rand -hex 16)" -id -e > /srv/flux/secrets/panel.argon2` dentro da
+VM); F13 porteiro central (`fluxhost :8443`) na frente do cloudflared.
 
 ## 13/10/2026 (parte 6) — FLUXD OPERACIONAL NA VM: router ponta a ponta provado
 
