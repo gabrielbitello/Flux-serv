@@ -11,7 +11,7 @@ use flux_common::protocol::{ContainerState, Env};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Versão do schema guardada em `settings.schema_version`.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
 pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -69,6 +69,18 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS settings(
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
+);
+"#;
+
+/// v2 (10, F4): token de deploy POR PROJETO. Guarda SÓ o sha256 (lowercase
+/// hex, 64 chars) — o valor claro vive no GitHub Secrets e é impresso uma
+/// vez pelo `flux project token`; regenerar = INSERT OR REPLACE = hash
+/// anterior revogado, um hash por projeto.
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS deploy_tokens(
+    project TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 "#;
 
@@ -432,6 +444,39 @@ impl State {
             Ok(())
         })
     }
+
+    // ------------------------------------- token de deploy por projeto (10, F4)
+
+    /// Grava o sha256 (lowercase hex, 64 chars) do token de deploy do
+    /// projeto. INSERT OR REPLACE = regenerar revoga o hash anterior (um
+    /// hash por projeto) sem tocar os tokens dos outros projetos.
+    pub fn set_deploy_token_hash(
+        &self,
+        name: &str,
+        token_hash_hex: &str,
+    ) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO deploy_tokens(project, token_hash) VALUES (?1, ?2)",
+                params![name, token_hash_hex],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Hash do token de deploy do projeto; `None` = sem token configurado.
+    /// Qualquer OUTRA falha de leitura propaga `Err` — fail-closed: o
+    /// handler recusa (503) em vez de deixar a rota abrir sem token.
+    pub fn deploy_token_hash(&self, name: &str) -> Result<Option<String>, StateError> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT token_hash FROM deploy_tokens WHERE project = ?1",
+                params![name],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+    }
 }
 
 /// Corrupção de arquivo vira `StateCorrupt` (com o backup no erro) em QUALQUER
@@ -471,8 +516,18 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
     match v {
         None => {
             conn.execute_batch(SCHEMA_V1)?;
+            conn.execute_batch(SCHEMA_V2)?;
             conn.execute(
                 "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        // v1 → v2 (10): acrescenta `deploy_tokens` sem tocar dado nenhum —
+        // o DDL é só CREATE TABLE IF NOT EXISTS, seguro reexecutar.
+        Some(1) => {
+            conn.execute_batch(SCHEMA_V2)?;
+            conn.execute(
+                "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
             )?;
         }
@@ -581,5 +636,152 @@ mod tests {
             })
             .unwrap();
         assert_eq!(mode, "sleeping");
+    }
+
+    /// Banco v1 REAL (criado na mão com o DDL antigo) migra para v2 sem
+    /// perder projects/settings — o caso de quem atualizou o fluxd antes do
+    /// `flux project token` existir.
+    #[test]
+    fn migra_v1_para_v2_preservando_projects_e_settings() {
+        let path = tmp_db("v1-para-v2");
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA_V1).unwrap();
+            c.execute(
+                "INSERT INTO settings(k, v) VALUES ('schema_version', '1')",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO projects(name, toml, toml_hash) VALUES ('vipers', 'name = \"vipers\"', 'hash')",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO settings(k, v) VALUES ('proxy_target/vipers/dev', '127.0.0.1:9000')",
+                [],
+            )
+            .unwrap();
+        }
+        let st = State::open(&path).unwrap();
+        let versao: String = st
+            .with(|c| {
+                c.query_row(
+                    "SELECT v FROM settings WHERE k = 'schema_version'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(versao, "2", "versão sobe para a atual");
+        let projetos: i64 = st
+            .with(|c| c.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(projetos, 1, "projeto registrado no v1 sobrevive");
+        let proxy: String = st
+            .with(|c| {
+                c.query_row(
+                    "SELECT v FROM settings WHERE k = 'proxy_target/vipers/dev'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(proxy, "127.0.0.1:9000", "settings preservados");
+        let tokens: i64 = st
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='deploy_tokens'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(tokens, 1, "deploy_tokens criada pela migração");
+        // Reabertura idempotente: v2 reconhecido sem erro e sem subir mais.
+        drop(st);
+        let st2 = State::open(&path).unwrap();
+        let versao2: String = st2
+            .with(|c| {
+                c.query_row(
+                    "SELECT v FROM settings WHERE k = 'schema_version'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(versao2, "2", "reabrir em v2 é no-op");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Adulteração da versão continua recusada com erro claro — agora
+    /// cobrindo os dois caminhos do guard: valor não-numérico e versão
+    /// mais nova que a suportada.
+    #[test]
+    fn versao_adulterada_e_recusada_nos_dois_caminhos() {
+        for valor in ["nao-e-numero", "99"] {
+            let path = tmp_db("adulterada");
+            let _ = std::fs::remove_file(&path);
+            {
+                let c = Connection::open(&path).unwrap();
+                c.execute_batch(SCHEMA_V1).unwrap();
+                c.execute(
+                    "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
+                    params![valor],
+                )
+                .unwrap();
+            }
+            let err = State::open(&path).unwrap_err();
+            let msg = err.to_string();
+            if valor == "nao-e-numero" {
+                assert!(
+                    msg.contains("adulterado"),
+                    "valor '{valor}' deve recusar com 'adulterado', erro: {msg}"
+                );
+            } else {
+                assert!(
+                    msg.contains("mais novo"),
+                    "valor '{valor}' deve recusar como muito novo, erro: {msg}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+    }
+
+    /// Roundtrip do token de deploy: grava, lê igual; regenerar troca o hash
+    /// (revoga o anterior); projeto B nunca vê o token do projeto A.
+    #[test]
+    fn deploy_token_roundtrip_regenera_e_nao_toca_outro_projeto() {
+        let st = State::in_memory().unwrap();
+        st.set_deploy_token_hash("vipers", "hash-antigo-do-vipers")
+            .unwrap();
+        assert_eq!(
+            st.deploy_token_hash("vipers").unwrap().as_deref(),
+            Some("hash-antigo-do-vipers"),
+            "hash gravado volta igual"
+        );
+        st.set_deploy_token_hash("vipers", "hash-novo-do-vipers")
+            .unwrap();
+        assert_eq!(
+            st.deploy_token_hash("vipers").unwrap().as_deref(),
+            Some("hash-novo-do-vipers"),
+            "regenerar substitui (revoga o hash anterior)"
+        );
+        st.set_deploy_token_hash("djm", "hash-do-djm").unwrap();
+        assert_eq!(
+            st.deploy_token_hash("djm").unwrap().as_deref(),
+            Some("hash-do-djm"),
+            "outro projeto tem o próprio hash"
+        );
+        assert_eq!(
+            st.deploy_token_hash("vipers").unwrap().as_deref(),
+            Some("hash-novo-do-vipers"),
+            "regenerar do djm não toca o vipers"
+        );
+        assert!(
+            st.deploy_token_hash("sem-token").unwrap().is_none(),
+            "projeto sem token = None (não erro)"
+        );
     }
 }

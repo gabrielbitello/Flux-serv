@@ -363,7 +363,6 @@ async fn main() {
         Cmd::Prod { .. } => stub("fase F9 (spec 10) — prod é git push + rollback"),
         Cmd::Maintenance { .. } => stub("fase F18 (spec 15) — modo manutenção com bypass"),
         Cmd::Shield { .. } => stub("fase F19 (spec 16) — WAF próprio, shadow antes de enforce"),
-        Cmd::Project { .. } => stub("fase F9 (specs 09/10) — token de deploy por projeto"),
         Cmd::Db { cmd } => match cmd {
             DbCmd::Fresh {
                 yes,
@@ -411,6 +410,9 @@ async fn main() {
         Cmd::Token {
             sub: TokenCmd::Generate,
         } => token_generate(),
+        Cmd::Project {
+            cmd: ProjectCmd::Token { name },
+        } => project_token(&name),
         Cmd::Tunnel { .. } => stub("fase F7 (spec 03) — tunnel Cloudflare e domínios"),
         Cmd::Panel => stub("fase F8 (spec 08) — painel web com auth"),
         Cmd::Export => stub("fase F16 (spec 14) — DR export"),
@@ -589,6 +591,77 @@ fn token_generate() {
     println!("  {token}");
     println!();
     println!("próximo comando `flux` já usa o token novo (config.toml [api] token).");
+}
+
+// ------------------------------------------- token de deploy (09/10, F4)
+
+/// Mesmo contrato de nome do registro (api.rs, POST /projects): [a-z0-9-],
+/// não vazio. Validar ANTES do ssh — o nome entra no comando remoto, nome
+/// com aspas/vírgula viraria injeção no shell da VM.
+fn nome_de_projeto_ok(nome: &str) -> bool {
+    !nome.is_empty()
+        && nome
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `flux project token <nome>` (10, F4): token de deploy POR PROJETO —
+/// token novo (CSPRNG do SO, mesmo gerador do token da API), sha256
+/// gravado na tabela `deploy_tokens` do SQLite do fluxd via SSH (o
+/// handler público de deploy compara esse hash) e valor claro impresso
+/// UMA vez (vai para o GitHub Secrets). Regenerar = INSERT OR REPLACE =
+/// hash anterior revogado, sem tocar os tokens dos outros projetos.
+/// Falha de ssh sai com stderr real e exit ≠ 0 — o segredo nunca é
+/// impresso sem a gravação ter acontecido.
+fn project_token(name: &str) {
+    let nome = name.trim();
+    if !nome_de_projeto_ok(nome) {
+        eprintln!(
+            "erro: nome de projeto inválido: use minúsculas, dígitos e '-' (vira host {nome}.bitello.xyz)"
+        );
+        std::process::exit(2);
+    }
+    let token = token_novo();
+    let hash = sha256_hex(token.as_bytes());
+    let ssh_alvo = format!("{}@{}", tunel::VM_USER, tunel::VM_HOST);
+    // `nome` validado contra [a-z0-9-] acima e `hash` é hex fixo de 64
+    // chars gerado aqui — nenhum dos dois injeta no shell remoto.
+    let remoto = format!(
+        "sudo sqlite3 /srv/flux/state/flux.sqlite3 \"INSERT OR REPLACE INTO \
+         deploy_tokens(project, token_hash) VALUES ('{nome}', '{hash}');\""
+    );
+    let saida = match std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            &ssh_alvo,
+            &remoto,
+        ])
+        .output()
+    {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("erro: ssh não lançado (OpenSSH no PATH?): {e}");
+            std::process::exit(1);
+        }
+    };
+    if !saida.status.success() {
+        eprintln!(
+            "erro: gravar deploy_tokens[{}] na VM falhou (ssh {}): {}",
+            nome,
+            ssh_alvo,
+            String::from_utf8_lossy(&saida.stderr).trim()
+        );
+        std::process::exit(1);
+    }
+    println!(
+        "hash de deploy gravado na VM ({ssh_alvo}) · projeto: {nome} · token anterior revogado"
+    );
+    println!();
+    println!("token de deploy (MOSTRA UMA VEZ — guarde no GitHub Secrets):");
+    println!("  {token}");
 }
 
 // ---------------------------------------------------------- comandos F6
@@ -1288,5 +1361,45 @@ mod tests {
             "log do app é log"
         );
         assert!(!frame_de_erro("linha comum"), "linha comum é log");
+    }
+
+    /// Geração e hash do token de deploy (F4): token = 64 chars hex do
+    /// CSPRNG; hash = sha256 lowercase de 64 chars — formato que os DOIS
+    /// lados (CLI grava, fluxd compara) têm de concordar, senão vira 401
+    /// eterno. Vetor NIST fixa o algoritmo contra regressão.
+    #[test]
+    fn token_novo_e_sha256_hex_tem_formato_do_contrato() {
+        let hex_ok = |s: &str| {
+            s.len() == 64
+                && s.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        };
+        let token = token_novo();
+        assert!(hex_ok(&token), "token é 64 chars hex lowercase: {token}");
+        let token2 = token_novo();
+        assert_ne!(token, token2, "CSPRNG: dois tokens nunca coincidem");
+
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "vetor NIST do sha256"
+        );
+        assert!(hex_ok(&sha256_hex(token.as_bytes())));
+    }
+
+    /// Nome válido = o mesmo contrato do registro ([a-z0-9-]): nome
+    /// malicioso com aspas/vírgula seria injeção no sqlite3 remoto.
+    #[test]
+    fn nome_de_projeto_ok_cobre_o_contrato_do_registro() {
+        assert!(nome_de_projeto_ok("vipers"));
+        assert!(nome_de_projeto_ok("dj-is-magic"));
+        assert!(nome_de_projeto_ok("abc123"));
+        assert!(!nome_de_projeto_ok(""), "vazio recusado");
+        assert!(!nome_de_projeto_ok("DJ-is-magic"), "maiúscula recusada");
+        assert!(!nome_de_projeto_ok("vipers_dev"), "underscore recusado");
+        assert!(
+            !nome_de_projeto_ok("x'); DROP TABLE projects;--"),
+            "injeção no sqlite3 remoto recusada"
+        );
     }
 }
