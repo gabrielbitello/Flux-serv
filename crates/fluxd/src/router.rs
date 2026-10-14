@@ -8,10 +8,12 @@ use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, header};
 use axum::response::Response;
+use axum::routing::post;
 use flux_common::config::GlobalConfig;
 use tower::ServiceExt;
 
 use crate::AppState;
+use crate::beat;
 use crate::decision::{self, Action, Decision};
 use crate::docker::DockerSource;
 use crate::edge::{EdgeLayer, EdgeLimits};
@@ -19,6 +21,7 @@ use crate::events;
 use crate::pages;
 use crate::proxy;
 use crate::sqlite_source::SqliteSource;
+use crate::waf::WafLayer;
 
 /// `global` alimenta a borda R30 (teto de body vem do config, 09; o resto é
 /// default da 07). Config ausente JÁ chega aqui como `GlobalConfig::default()`
@@ -28,16 +31,37 @@ use crate::sqlite_source::SqliteSource;
 /// montagem aqui é proibida.
 pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) -> Router {
     Router::new()
+        // Batida do overlay JS do sono (04): rota REAL no host gerenciado —
+        // rota vence o fallback, então `POST /__flux/beat` NUNCA passa pelo
+        // dispatch normal (decisão Host/proxy/panel); o handler zera o timer
+        // e responde 204 vazio. Adaptador só desembrulha a tupla de estado:
+        // axum-core não tem `FromRef` de tupla e beat.rs fica intocado.
+        .route("/__flux/beat", post(beat_roteado))
         .fallback(handle)
         // A borda envolve o router inteiro: `layer` aplicado DEPOIS das rotas
         // roda ANTES do fallback — 413/429 morrem aqui, na admissão, antes da
         // decisão (03: camadas de borda como layers tower; 07/R30).
+        // WAF (16) entra DEPOIS da EdgeLayer no fluxo do request: em tower a
+        // ÚLTIMA `.layer` é a mais externa (roda primeiro), então EdgeLayer
+        // por último = admissão (413/429) antes da inspeção do WAF; o que a
+        // borda deixa passar é o que o WAF inspeciona.
+        .layer(WafLayer::new())
         .layer(EdgeLayer::new(EdgeLimits::from_global(global)))
         .with_state((app, panel))
 }
 
 fn x_robots_tag() -> HeaderName {
     HeaderName::from_static("x-robots-tag")
+}
+
+/// Adaptador de estado do `POST /__flux/beat` (04): o router carrega
+/// `(Arc<AppState>, Router)` e o handler de beat.rs extrai `State<Arc<AppState>>`
+/// — axum-core só tem `FromRef` identidade, então a tupla é desembrulhada aqui.
+async fn beat_roteado(
+    State((app, _panel)): State<(Arc<AppState>, Router)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    beat::beat(State(app), headers).await
 }
 
 const NOINDEX: &str = "noindex, nofollow, noarchive";
@@ -211,5 +235,106 @@ fn host_env(host: &flux_common::host::ManagedHost) -> flux_common::protocol::Env
     match host {
         flux_common::host::ManagedHost::Dev { .. } => flux_common::protocol::Env::Dev,
         _ => flux_common::protocol::Env::Prod,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use flux_common::protocol::Env;
+
+    use crate::panel;
+    use crate::panel_auth;
+    use crate::state::State;
+
+    /// Router completo (mesma montagem do `serve`: painel + edge + waf + beat)
+    /// sobre estado em memória, sem Docker.
+    fn router_com(app: &Arc<AppState>) -> Router {
+        let auth = std::sync::Arc::new(panel_auth::PanelAuth::novo());
+        let painel = panel::build_panel(std::sync::Arc::clone(app), auth);
+        build_router(std::sync::Arc::clone(app), &GlobalConfig::default(), painel)
+    }
+
+    fn app() -> Arc<AppState> {
+        Arc::new(AppState::new(
+            State::in_memory().unwrap(),
+            &GlobalConfig::default(),
+            None,
+        ))
+    }
+
+    fn req(host: &str, path: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("http://{host}{path}"))
+            .header(header::HOST, host)
+            .header(header::ACCEPT, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// `POST /__flux/beat` é rota REAL: vence o fallback e o host gerenciado
+    /// dev mantém o projeto acordado (04) — 204 e `last_interaction` tocada.
+    #[tokio::test]
+    async fn beat_e_rota_real_e_toca_o_timer_do_dev() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        let router = router_com(&app);
+
+        let resp = router
+            .oneshot(req("vipers-d.bitello.xyz", "/__flux/beat"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "beat de host gerenciado: 204 vazio"
+        );
+        let (last, _, _, _) = app.state.sleep_row("vipers", Env::Dev).unwrap();
+        assert!(last.is_some(), "beat zera o timer (touch_interaction, 04)");
+    }
+
+    /// Host NÃO gerenciado no beat → 404 SEM tocar nada (rota responde antes
+    /// do dispatch, e o handler do beat filtra painel/fantasma).
+    #[tokio::test]
+    async fn beat_de_host_desconhecido_e_404_sem_tocar_nada() {
+        let app = app();
+        let router = router_com(&app);
+
+        let resp = router
+            .oneshot(req("zzz.bitello.xyz", "/__flux/beat"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// WAF montado DEPOIS da EdgeLayer: request de tamanho normal passa pela
+    /// borda e é BLOQUEADO na inspeção — padrão SQLI na query, sem IP na
+    /// allowlist (oneshot sem ConnectInfo/XFF = fail-closed, 16) → 403 JSON
+    /// antes de chegar ao fallback (que responderia 404 brandiado).
+    #[tokio::test]
+    async fn waf_bloqueia_injecao_antes_do_dispatch_normal() {
+        let app = app();
+        let router = router_com(&app);
+
+        let resp = router
+            .oneshot(req("zzz.bitello.xyz", "/?q=union%20select"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "padrão SQLI externo leva 403 do WAF"
+        );
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let corpo = String::from_utf8_lossy(&bytes);
+        assert!(corpo.contains("blocked"), "corpo JSON do bloqueio: {corpo}");
     }
 }

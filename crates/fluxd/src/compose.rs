@@ -13,6 +13,12 @@
 //! Os nomes dos services vêm do PRÓPRIO engine (`docker compose config
 //! --services`) — sem parse de YAML aqui (zero dep nova; o engine é a
 //! verdade).
+//!
+//! Live server de dev (`[dev] live` no flux.toml): após um up com SUCESSO em
+//! env=dev, o fluxd dispara o comando de hot reload DENTRO do container `app`
+//! — `docker compose exec -d app sh -c "cd /var/www && {live}"`. Erro do live
+//! é warn no painel e NUNCA falha o up (o container já está de pé); em prod o
+//! gatilho nem dispara.
 
 /// Escolhe o arquivo de compose a passar com `-f`: o da raiz quando tem
 /// `services:` de verdade; se a raiz é só um `include:`, usa o alvo em
@@ -353,6 +359,120 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         "up",
         &format!("{projeto}: subiu (compose up -d --build)"),
     );
+
+    // Live server de dev ([dev] live): só com up bem-sucedido e em dev —
+    // qualquer falha aqui é warn, o up já terminou com sucesso.
+    if env == "dev" {
+        subir_live_se_configurado(st, &name, &projeto).await;
+    }
+}
+
+/// Monta os argumentos do live server: `docker compose -p {projeto} exec -d
+/// app sh -c "cd /var/www && {live}"`. Pura, para o teste cobrir a montagem
+/// sem engine (o `-d` solta o processo: exit 0 = "iniciado", não "saudável").
+fn comando_live_args(projeto: &str, live: &str) -> Vec<String> {
+    vec![
+        "compose".to_owned(),
+        "-p".to_owned(),
+        projeto.to_owned(),
+        "exec".to_owned(),
+        "-d".to_owned(),
+        "app".to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!("cd /var/www && {live}"),
+    ]
+}
+
+/// Dispara o live server de dev quando o flux.toml do projeto (lido do state,
+/// como o temporary lê) declara `[dev] live`. NUNCA falha o up: todo erro é
+/// evento warn com a causa real.
+async fn subir_live_se_configurado(st: &crate::state::State, name: &str, projeto: &str) {
+    let toml_src = match st.project_toml(name) {
+        Ok(Some(t)) => t,
+        Ok(None) => return, // projeto sem flux.toml registrado — não pede live
+        Err(e) => {
+            events::event(
+                st,
+                "warn",
+                "up",
+                &format!("{projeto}: live não disparado — falha lendo flux.toml do state: {e}"),
+            );
+            return;
+        }
+    };
+    let toml = match flux_common::config::ProjectToml::parse_str(&toml_src) {
+        Ok(t) => t,
+        Err(e) => {
+            events::event(
+                st,
+                "warn",
+                "up",
+                &format!("{projeto}: live não disparado — flux.toml do state não parseia: {e}"),
+            );
+            return;
+        }
+    };
+    let Some(live) = toml.dev.as_ref().and_then(|d| d.live.as_deref()) else {
+        return; // sem [dev] live — o projeto não pede live server
+    };
+    if live.trim().is_empty() {
+        events::event(
+            st,
+            "warn",
+            "up",
+            &format!("{projeto}: [dev] live declarado VAZIO no flux.toml — nada a executar"),
+        );
+        return;
+    }
+    events::event(
+        st,
+        "info",
+        "up",
+        &format!("{projeto}: disparando live server de dev: {live}"),
+    );
+    match tokio::process::Command::new("docker")
+        .args(comando_live_args(projeto, live))
+        .output()
+        .await
+    {
+        Ok(s) if s.status.success() => {
+            events::event(
+                st,
+                "info",
+                "up",
+                &format!("{projeto}: live server iniciado ({live})"),
+            );
+        }
+        Ok(s) => {
+            let cauda: String = String::from_utf8_lossy(&s.stderr)
+                .lines()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            events::event(
+                st,
+                "warn",
+                "up",
+                &format!(
+                    "{projeto}: live server falhou ao iniciar (o up segue de pé): exit {} {cauda}",
+                    s.status.code().unwrap_or(-1)
+                ),
+            );
+        }
+        Err(e) => {
+            events::event(
+                st,
+                "warn",
+                "up",
+                &format!("{projeto}: live server não disparado (o up segue de pé): {e}"),
+            );
+        }
+    }
 }
 
 /// Túnel/cloudflared por service: `[(service, imagem)]` dos services que
@@ -451,6 +571,22 @@ mod tests {
         assert!(y.contains("external: true"), "flux-net é a rede do flux-db");
         // Nada publicado = portscan da 09 continua só 22/80/443.
         assert!(!y.contains("ports:\n    -"));
+    }
+
+    #[test]
+    fn comando_live_monta_exec_detach_no_app_a_partir_de_var_www() {
+        let args = comando_live_args("flux-vippers-dev", "npm run dev -- --host 0.0.0.0");
+        assert_eq!(
+            args[..6],
+            ["compose", "-p", "flux-vippers-dev", "exec", "-d", "app"],
+            "exec detached no service app, projeto certo"
+        );
+        assert_eq!(args[6], "sh", "shell é sh (paridade com o exec do db.rs)");
+        assert_eq!(args[7], "-c");
+        assert_eq!(
+            args[8], "cd /var/www && npm run dev -- --host 0.0.0.0",
+            "comando do toml verbatim após o cd /var/www"
+        );
     }
 }
 

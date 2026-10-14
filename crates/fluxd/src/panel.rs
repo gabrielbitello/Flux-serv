@@ -35,6 +35,7 @@ use rusqlite::params;
 use crate::AppState;
 use crate::decision::HostSource;
 use crate::docker;
+use crate::observe_page;
 use crate::panel_auth;
 use crate::sqlite_source;
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
@@ -147,6 +148,9 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
         .route("/", get(dashboard))
         .route("/projects/{name}", get(detalhe_projeto))
         .route("/events", get(pagina_eventos))
+        // Monitor de recursos (13): curvas/picos do observe — o handler extrai
+        // `Arc<AppState>` via `FromRef<PanelState>`; auth herdada do guard.
+        .route("/observe", get(observe_page::pagina))
         .fallback(rota_desconhecida)
         .route_layer(middleware::from_fn_with_state(st.clone(), exige_sessao));
     Router::new()
@@ -644,7 +648,7 @@ fn layout(title: &str, body: &str, auto_refresh: bool) -> String {
 <div class="wrap">
 <header class="top">
 <h1>Flux · painel</h1>
-<nav><a href="/">Dashboard</a><a href="/events">Eventos</a></nav>
+<nav><a href="/">Dashboard</a><a href="/events">Eventos</a><a href="/observe">Monitor</a></nav>
 <form method="post" action="/logout" style="margin-left:auto">
 <button type="submit" style="background:var(--idlebg);color:var(--text);
 border:1px solid var(--line);border-radius:6px;padding:.2rem .7rem;cursor:pointer">Sair</button>
@@ -1375,6 +1379,31 @@ mod tests {
             let (_, headers, _) = get(&app, uri).await;
             assert_eq!(noindex_de(&headers), NOINDEX, "rota {uri} sem noindex");
         }
+    }
+
+    /// Monitor (13): `/observe` montada no router protegido — sem sessão o
+    /// guard herda (redirect pro login) e, com sessão, a página do monitor
+    /// responde no layout com o link novo do nav.
+    #[tokio::test]
+    async fn observe_exige_sessao_e_responde_com_link_no_nav() {
+        let app = app_sem_docker();
+        let (router, _dir) = painel_com_auth(&app).await;
+
+        let (status, headers, _) = pedir(&app, router.clone(), "GET", "/observe", None, None).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "auth herdada do guard");
+        assert_eq!(
+            headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+            Some("/login"),
+            "sem sessão manda pro login como qualquer rota"
+        );
+
+        let (status, _, body) = get(&app, "/observe").await;
+        assert_eq!(status, StatusCode::OK, "com sessão o monitor responde");
+        assert!(body.contains("Monitor 24 h"), "página do monitor: {body}");
+        assert!(
+            body.contains("href=\"/observe\""),
+            "nav do layout tem o link do Monitor: {body}"
+        );
     }
 
     // --------------------------------------------------------------- auth

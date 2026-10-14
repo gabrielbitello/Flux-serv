@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
+use crate::ciclo;
 use crate::db::{self, SchemaOutcome};
 use crate::events;
 // O extrator `State` do axum ocupa o nome; o estado do banco entra como DbState.
@@ -51,6 +52,11 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/projects/{name}/lease", post(grant_lease))
         .route("/projects/{name}/schema", post(run_schema))
         .route("/projects/{name}/up", post(subir))
+        // Ciclo de dev (06): handlers em ciclo.rs — rotas aqui, na frente
+        // do fallback de fase futura (501).
+        .route("/projects/{name}/down", post(ciclo::down))
+        .route("/projects/{name}/logs", get(ciclo::logs))
+        .route("/projects/{name}/exec", post(ciclo::exec))
         .route("/containers", get(listar_containers))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
@@ -532,6 +538,10 @@ struct SchemaBody {
     /// `(arquivo, sha256)` das migrations no disco AGORA — o CLI lê do repo
     /// e manda; laravel usa, stacks com `migrate_cmd` mandam vazio (05).
     files: Vec<(String, String)>,
+    /// Override de seed da CLI (05): `Some` vence o toml; ausente no fio =
+    /// decidir por `[db].seed_on_rebuild`, e sem toml o default da spec é
+    /// `true`. O CLI manda o campo só com `--seed`/`--no-seed`.
+    seed: Option<bool>,
 }
 
 /// Espelho serializável do `SchemaOutcome` de db.rs (tipo de lá não é serde).
@@ -553,9 +563,10 @@ impl From<SchemaOutcome> for SchemaReply {
     }
 }
 
-/// POST /projects/{name}/schema — dispara `db::ensure_schema` com os arquivos
-/// informados. Exige engine: sem Docker não há container onde rodar migrate,
-/// e simular sucesso seria pior que recusar (05).
+/// POST /projects/{name}/schema — dispara `db::ensure_schema_com_seed` com os
+/// arquivos informados e o override de seed do corpo (05: `Some` vence o
+/// toml; `None` = decidir pelo flux.toml). Exige engine: sem Docker não há
+/// container onde rodar migrate, e simular sucesso seria pior que recusar (05).
 async fn run_schema(
     State(app): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -575,7 +586,9 @@ async fn run_schema(
         Ok(src) => src,
         Err(r) => return *r,
     };
-    match db::ensure_schema(&docker, &app.state, &name, env, &toml_src, &b.files).await {
+    match db::ensure_schema_com_seed(&docker, &app.state, &name, env, &toml_src, &b.files, b.seed)
+        .await
+    {
         Ok(o) => Json(SchemaReply::from(o)).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -1010,16 +1023,119 @@ mod tests {
     async fn rota_futura_no_fallback_volta_501() {
         let (base, _app) = servidor(Some("segredo")).await;
         let cli = cliente();
+        // `/down` já é rota real (ciclo.rs, 06) — o fallback 501 segue para
+        // endpoints que NENHUMA fase entregou.
         let (s, c) = req(
             &cli,
             &base,
             "POST",
-            "/projects/vipers/down",
+            "/projects/vipers/teleporte",
             Some("segredo"),
             None,
         )
         .await;
         assert_eq!(s, 501, "{c}");
         assert!(c.contains("ainda não implementado"), "causa: {c}");
+    }
+
+    #[tokio::test]
+    async fn rotas_do_ciclo_montadas_e_atras_do_gate() {
+        let (base, app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+
+        // Projeto fantasma nas três rotas → 404 com causa (rota EXISTE e o
+        // handler validou o registro; sem montagem seria 401/501, não 404).
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/projects/fantasma/down?env=dev",
+            Some("segredo"),
+            None,
+        )
+        .await;
+        assert_eq!(s, 404, "{c}");
+        assert!(c.contains("não registrado"), "causa do down: {c}");
+
+        let (s, c) = req(
+            &cli,
+            &base,
+            "GET",
+            "/projects/fantasma/logs?env=dev&tail=10",
+            Some("segredo"),
+            None,
+        )
+        .await;
+        assert_eq!(s, 404, "{c}");
+        assert!(c.contains("não registrado"), "causa dos logs: {c}");
+
+        let corpo = serde_json::json!({ "cmd": [] });
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/projects/fantasma/exec?env=dev",
+            Some("segredo"),
+            Some(&corpo.to_string()),
+        )
+        .await;
+        assert_eq!(s, 404, "{c}");
+
+        // Projeto registrado SEM pasta sincronizada → 409 do down (02: sync é
+        // pré-condição), com evento gravado — nunca silêncio.
+        let _ = registra(&cli, &base, "vipers", "").await;
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/projects/vipers/down?env=dev",
+            Some("segredo"),
+            None,
+        )
+        .await;
+        assert_eq!(s, 409, "{c}");
+        assert!(c.contains("não existe na VM"), "causa: {c}");
+        let n: i64 = app
+            .state
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM events WHERE scope = 'down'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert!(n >= 1, "falha do down vira evento (nada silencioso)");
+
+        // exec com cmd vazio → 422 com a forma certa no corpo (recusa ANTES
+        // do 503 de engine ausente — contrato do ciclo.rs).
+        let corpo = serde_json::json!({ "cmd": [] });
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/projects/vipers/exec?env=dev",
+            Some("segredo"),
+            Some(&corpo.to_string()),
+        )
+        .await;
+        assert_eq!(s, 422, "{c}");
+        assert!(c.contains("cmd vazio"), "causa: {c}");
+
+        // /schema aceita o campo `seed` no corpo (override da CLI, 05): sem
+        // Docker a rota segue recusando 503 com causa — o campo não quebra
+        // o parse nem muda o fechamento.
+        let corpo = serde_json::json!({ "env": "dev", "files": [], "seed": true });
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/projects/vipers/schema",
+            Some("segredo"),
+            Some(&corpo.to_string()),
+        )
+        .await;
+        assert_eq!(s, 503, "{c}");
+        assert!(c.contains("Docker"), "causa: {c}");
     }
 }

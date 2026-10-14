@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use flux_common::config::ProjectToml;
 use flux_common::protocol::Env;
+use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 
 use crate::api::{ApiClient, ApiError};
@@ -33,6 +34,10 @@ const LEASE_UP_SECS: i64 = 15 * 60;
 /// Teto de espera pelo acordar do container no `flux up` (build de primeira
 /// subida é de minutos; acima disso o problema é visível no painel).
 const UP_TIMEOUT_SECS: u64 = 600;
+
+/// Tail padrão do `flux logs` (contrato CLI ↔ fluxd: o GET de logs leva
+/// tail sempre explícito).
+const TAIL_PADRAO: u64 = 200;
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +57,12 @@ enum Cmd {
     Up {
         #[arg(short = 'm', long = "manifest", default_value_t = false)]
         manifesto: bool,
+        /// Força seed no rebuild do banco (05) — vence o flux.toml.
+        #[arg(long, conflicts_with = "no_seed")]
+        seed: bool,
+        /// Proíbe seed no rebuild do banco (05) — vence o flux.toml.
+        #[arg(long)]
+        no_seed: bool,
         #[arg(default_value = "dev")]
         env: String,
     },
@@ -75,24 +86,33 @@ enum Cmd {
         #[arg(default_value = "dev")]
         env: String,
     },
-    /// Logs do container (lease de sono ativo; janela histórica 13).
+    /// Logs do container (lease de sono ativo, 04; janela histórica 13).
     Logs {
         #[arg(short, long)]
         follow: bool,
+        /// Últimas N linhas (contrato CLI ↔ fluxd; padrão 200).
+        #[arg(long)]
+        tail: Option<u64>,
         #[arg(long)]
         since: Option<String>,
         #[arg(long)]
         until: Option<String>,
-        service: Option<String>,
+        /// env ANTES de [svc]: `flux logs dev` tem de virar env, não serviço
+        /// (o caso comum). A ordem [svc] [env] da spec 06 entra na fase 13,
+        /// quando o fluxd aplicar a janela.
         #[arg(default_value = "dev")]
         env: String,
+        /// Serviço específico (fase 13 — hoje o fluxd não aplica).
+        service: Option<String>,
     },
-    /// `docker exec` no container principal.
+    /// `docker exec` no container principal (contrato CLI ↔ fluxd: corpo
+    /// `{"cmd":[…]}`; exit do comando é repassado). O `--` separa o comando:
+    /// `flux exec [ENV] -- <cmd…>`.
     Exec {
+        #[arg(default_value = "dev")]
+        env: String,
         #[arg(last = true)]
         command: Vec<String>,
-        #[arg(default_value = "dev")]
-        env: String,
     },
     /// `flux exec bash`.
     Shell {
@@ -280,7 +300,12 @@ async fn main() {
     let cli = Cli::parse();
     match cli.cmd {
         // ------- F6: comandos que falam com a API de controle (07) -------
-        Cmd::Up { manifesto, env } => {
+        Cmd::Up {
+            manifesto,
+            seed,
+            no_seed,
+            env,
+        } => {
             if manifesto {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let pasta = cwd
@@ -297,9 +322,9 @@ async fn main() {
                     }
                 }
             }
-            up(&env).await
+            up(&env, seed_escolhida(seed, no_seed)).await
         }
-        Cmd::Down { env } => ciclo_api("down", &env).await,
+        Cmd::Down { env } => down(&env).await,
         Cmd::Restart { env } => ciclo_api("restart", &env).await,
         Cmd::Status { env } => status(&env).await,
         Cmd::Ps { env } => ps(&env).await,
@@ -308,8 +333,9 @@ async fn main() {
             since,
             until,
             service,
+            tail,
             env,
-        } => logs(follow, since, until, service, &env).await,
+        } => logs(follow, since, until, service, tail, &env).await,
         Cmd::Exec { command, env } => exec(command, &env).await,
         Cmd::Shell { env } => exec(vec!["bash".to_owned()], &env).await,
         Cmd::Build { env } => ciclo_api("build", &env).await,
@@ -537,8 +563,9 @@ fn token_generate() {
 /// `flux up [env]` (06, fluxo passo a passo). Fase F6: passos 1–4 reais
 /// (contexto, saúde do fluxd, registro, lease renovável) + status consolidado;
 /// build/sync/banco (passos 5–7) são orquestrados pelo fluxd e entram nas
-/// fases F7+ — o que a API expõe hoje aparece com rótulo honesto.
-async fn up(env: &str) {
+/// fases F7+ — o que a API expõe hoje aparece com rótulo honesto. `seed`:
+/// None = fluxd decide pelo flux.toml; Some = flag explícita vence o toml (05).
+async fn up(env: &str, seed: Option<bool>) {
     let env = parse_env(env);
     let ctx = contexto_atual();
     let cliente = ApiClient::from_env();
@@ -650,8 +677,9 @@ async fn up(env: &str) {
     println!("[5/6] container acordado (engine RUNNING) após {esperado} s");
 
     // [6/6] Migrations (05): o fluxd lê os arquivos do DISCO DA VM (sync já
-    // entregou) — dev novo/mutado reconstrói, prod só aplica.
-    match cliente.schema(&ctx.name, &env.to_string(), &[]).await {
+    // entregou) — dev novo/mutado reconstrói, prod só aplica; seed segue a
+    // precedência da flag (--seed/--no-seed vencem o flux.toml).
+    match cliente.schema(&ctx.name, &env.to_string(), &[], seed).await {
         Ok(o) => println!(
             "[6/6] banco: {} · aplicadas {} · fresh {}",
             o.outcome, o.aplicadas, o.fresh
@@ -837,16 +865,54 @@ fn imprime_status(st: &api::ProjectStatusOut) {
     );
 }
 
-/// down/restart/ps/build — o CLI já fala o protocolo da 07: chama o endpoint
-/// do projeto, mostra a resposta e sai com exit ≠ 0 enquanto o backend do
-/// fluxd ainda é 501. Quando a fase do backend chegar, o comando funciona sem
-/// mudança aqui.
+/// Precedência da flag de seed (05): flag explícita vence o flux.toml; sem
+/// flag, None — o fluxd decide pelo `seed_on_rebuild`. `--seed` junto com
+/// `--no-seed` é bloqueado pelo `conflicts_with` do clap.
+fn seed_escolhida(seed: bool, no_seed: bool) -> Option<bool> {
+    if seed {
+        Some(true)
+    } else if no_seed {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// `flux down [env]` (06 + contrato CLI ↔ fluxd): POST /projects/{name}/down —
+/// o fluxd roda `docker compose -p flux-{name}-{env} stop` (containers param;
+/// banco único segue de pé) e responde `{"stopped":true,"project":…}`. Erro
+/// sai com a causa e exit ≠ 0 (06).
+async fn down(env: &str) {
+    let env = parse_env(env);
+    let ctx = contexto_atual();
+    let cliente = ApiClient::from_env();
+    match cliente.parar(&ctx.name, &env.to_string()).await {
+        Ok(r) => {
+            if r.stopped {
+                println!(
+                    "down {}: containers parados (banco único segue de pé)",
+                    r.project
+                );
+            } else {
+                // O contrato só devolve stopped=false se algo estranho ocorrer
+                // com 200 — nunca tratar como sucesso silencioso.
+                eprintln!("erro: fluxd respondeu stopped=false para {}", r.project);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => falhar(e),
+    }
+}
+
+/// restart/ps/build — o CLI já fala o protocolo da 07: chama o endpoint do
+/// projeto, mostra a resposta e sai com exit ≠ 0 enquanto o backend do fluxd
+/// ainda é 501. Quando a fase do backend chegar, o comando funciona sem
+/// mudança aqui. (down saiu daqui: virou contrato real, `down()` acima.)
 async fn ciclo_api(acao: &str, env: &str) {
     let env = parse_env(env);
     let ctx = contexto_atual();
     let cliente = ApiClient::from_env();
     let (method, caminho) = match acao {
-        "down" => ("POST", format!("/projects/{}/down?env={env}", ctx.name)),
         "restart" => ("POST", format!("/projects/{}/restart?env={env}", ctx.name)),
         "ps" => ("GET", format!("/projects/{}/ps?env={env}", ctx.name)),
         "build" => ("POST", format!("/projects/{}/build?env={env}", ctx.name)),
@@ -864,60 +930,192 @@ async fn ciclo_api(acao: &str, env: &str) {
     }
 }
 
+/// `flux logs [-f] [--tail N] [env]` (06 + contrato CLI ↔ fluxd). Lease ANTES
+/// da primeira chamada (04: `flux logs` segura o ambiente acordado; a guarda
+/// renova até o comando acabar e o lease morre sozinho no TTL depois). Sem
+/// -f: GET devolve text/plain cru. Com -f: consome o stream SSE do fluxd
+/// frame a frame até término limpo (fluxd corta; Ctrl+C mata o processo).
 async fn logs(
     follow: bool,
     since: Option<String>,
     until: Option<String>,
     service: Option<String>,
+    tail: Option<u64>,
     env: &str,
 ) {
     let env = parse_env(env);
     let ctx = contexto_atual();
     let cliente = ApiClient::from_env();
-    let mut caminho = format!("/projects/{}/logs?env={env}&follow={follow}", ctx.name);
-    if let Some(s) = since {
-        caminho.push_str(&format!("&since={s}"));
+
+    // Janela histórica é fase 13 (06): o fluxd de hoje só aplica
+    // env/tail/follow — enviar os parâmetros seria fingir que aplicaram.
+    if since.is_some() || until.is_some() || service.is_some() {
+        eprintln!(
+            "aviso: --since/--until/--service chegam na fase 13 (janela histórica, spec 06) — o fluxd de hoje NÃO os aplica e eles não foram enviados"
+        );
     }
-    if let Some(u) = until {
-        caminho.push_str(&format!("&until={u}"));
-    }
-    if let Some(svc) = service {
-        caminho.push_str(&format!("&service={svc}"));
-    }
-    // Quando o backend de stream (SSE, 07) chegar, o `-f` vira consumo de
-    // stream contínuo — o endpoint e o contrato já são estes.
-    match cliente.call_raw("GET", &caminho, None).await {
-        Ok(corpo) => println!("{corpo}"),
+
+    match cliente
+        .lease(&ctx.name, &env.to_string(), LEASE_UP_SECS)
+        .await
+    {
+        Ok(_) => {}
         Err(e) => falhar(e),
+    }
+    let _guarda = api::manter_lease(
+        cliente.clone(),
+        ctx.name.clone(),
+        env.to_string(),
+        LEASE_UP_SECS,
+    );
+
+    let caminho = caminho_logs(
+        &ctx.name,
+        &env.to_string(),
+        tail.unwrap_or(TAIL_PADRAO),
+        follow,
+    );
+    if follow {
+        let res = match cliente.abrir_stream(&caminho).await {
+            Ok(r) => r,
+            Err(e) => falhar(e),
+        };
+        if let Err(e) = consumir_sse(res).await {
+            falhar(e);
+        }
+    } else {
+        match cliente.call_raw("GET", &caminho, None).await {
+            Ok(corpo) => {
+                print!("{corpo}");
+                if !corpo.ends_with('\n') {
+                    println!();
+                }
+            }
+            Err(e) => falhar(e),
+        }
     }
 }
 
+/// Query do GET de logs (contrato CLI ↔ fluxd): env, tail e follow sempre
+/// explícitos — o fluxd não tem default de query.
+fn caminho_logs(name: &str, env: &str, tail: u64, follow: bool) -> String {
+    format!("/projects/{name}/logs?env={env}&tail={tail}&follow={follow}")
+}
+
+/// Payloads `data:` das linhas completas (terminadas em \n) do buffer — o
+/// contrato do /logs -f é um evento SSE por linha de log (`data: X` + linha
+/// vazia). Separadores, comentários (`: ping`) e outros campos não viram
+/// saída. Linha cortada entre frames fica no buffer para o próximo frame.
+/// O buffer é BYTES crus e o lossy roda SÓ na linha completa: multibyte
+/// cortado ENTRE chunks junta certo (String por chunk viraria U+FFFD).
+fn drenar_linhas(buf: &mut Vec<u8>) -> Vec<String> {
+    let mut saida = Vec::new();
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let linha: Vec<u8> = buf.drain(..=pos).collect();
+        let texto = String::from_utf8_lossy(&linha[..linha.len() - 1]);
+        if let Some(dado) = api::dado_de_data(texto.trim_end_matches('\r')) {
+            saida.push(dado.to_owned());
+        }
+    }
+    saida
+}
+
+/// Payload de erro do engine no stream (contrato: o prefixo `[fluxd:` é
+/// reservado do daemon — linha de log do app nunca começa assim). O frame
+/// precisa virar erro do CLI, não linha de log com exit 0.
+fn frame_de_erro(dado: &str) -> bool {
+    dado.starts_with("[fluxd: erro")
+}
+
+/// Consome o stream SSE do /logs -f (contrato CLI ↔ fluxd): frame
+/// `data: X` → imprime X; termina limpo quando o fluxd corta o stream (frame
+/// None). Erro no meio do stream NUNCA é silencioso: sai com causa e
+/// exit ≠ 0 (06) — inclusive o frame `[fluxd: erro ...]` do engine, que não
+/// pode passar por linha de log comum.
+async fn consumir_sse(res: hyper::Response<hyper::body::Incoming>) -> Result<(), ApiError> {
+    let mut corpo = res.into_body();
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match corpo.frame().await {
+            Some(Ok(frame)) => {
+                let chunk = frame.into_data().map_err(|_| ApiError::Protocolo {
+                    msg: "frame do stream de logs sem payload de dados (trailer?)".into(),
+                })?;
+                buf.extend_from_slice(&chunk);
+                for linha in drenar_linhas(&mut buf) {
+                    if frame_de_erro(&linha) {
+                        return Err(ApiError::Conexao {
+                            url: "fluxd (stream de logs)".into(),
+                            causa: linha,
+                        });
+                    }
+                    println!("{linha}");
+                }
+            }
+            Some(Err(e)) => {
+                return Err(ApiError::Conexao {
+                    url: "fluxd (stream de logs)".into(),
+                    causa: format!("corte do stream com erro: {e}"),
+                });
+            }
+            None => {
+                // Fim limpo: sobra sem \n final ainda pode ser um payload.
+                let resto = String::from_utf8_lossy(&buf).into_owned();
+                if let Some(dado) = api::dado_de_data(resto.trim_end_matches(['\r'])) {
+                    if frame_de_erro(dado) {
+                        return Err(ApiError::Conexao {
+                            url: "fluxd (stream de logs)".into(),
+                            causa: dado.to_owned(),
+                        });
+                    }
+                    println!("{dado}");
+                }
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// `flux exec [env] -- <comando…>` (06 + contrato CLI ↔ fluxd): corpo
+/// `{"cmd":[…]}`; o fluxd roda `docker exec` no container app e responde
+/// text/plain com a ÚLTIMA linha `exit={code}` — o CLI repassa o código como
+/// exit próprio. Lease idem logs (04).
 async fn exec(command: Vec<String>, env: &str) {
     if command.is_empty() {
         eprintln!(
-            "erro: uso: flux exec -- <comando…> [env] (ex.: flux exec dev -- php artisan route:list)"
+            "erro: uso: flux exec [env] -- <comando…> (ex.: flux exec dev -- php artisan migrate --force)"
         );
         std::process::exit(2);
     }
     let env = parse_env(env);
     let ctx = contexto_atual();
     let cliente = ApiClient::from_env();
-    let corpo = match serde_json::to_string(&serde_json::json!({ "command": command })) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("erro: serializando comando: {e}");
-            std::process::exit(1);
-        }
-    };
+
     match cliente
-        .call_raw(
-            "POST",
-            &format!("/projects/{}/exec?env={env}", ctx.name),
-            Some(corpo),
-        )
+        .lease(&ctx.name, &env.to_string(), LEASE_UP_SECS)
         .await
     {
-        Ok(saida) => println!("{saida}"),
+        Ok(_) => {}
+        Err(e) => falhar(e),
+    }
+    let _guarda = api::manter_lease(
+        cliente.clone(),
+        ctx.name.clone(),
+        env.to_string(),
+        LEASE_UP_SECS,
+    );
+
+    match cliente
+        .executar(&ctx.name, &env.to_string(), &command)
+        .await
+    {
+        Ok((saida, code)) => {
+            print!("{saida}");
+            if !saida.ends_with('\n') {
+                println!();
+            }
+            std::process::exit(code);
+        }
         Err(e) => falhar(e),
     }
 }
@@ -926,4 +1124,102 @@ async fn exec(command: Vec<String>, env: &str) {
 fn stub(fase: &str) -> ! {
     eprintln!("erro: comando ainda não implementado — chega na {fase}");
     std::process::exit(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_de_logs_monta_env_tail_e_follow() {
+        assert_eq!(
+            caminho_logs("vipers", "dev", TAIL_PADRAO, false),
+            "/projects/vipers/logs?env=dev&tail=200&follow=false",
+            "padrão do contrato: tail sempre explícito"
+        );
+        assert_eq!(
+            caminho_logs("djm", "prod", 5, true),
+            "/projects/djm/logs?env=prod&tail=5&follow=true",
+            "follow=true em minúsculas (query, não JSON)"
+        );
+    }
+
+    #[test]
+    fn seed_da_flag_tem_precedencia_explicita() {
+        assert_eq!(seed_escolhida(true, false), Some(true), "--seed força true");
+        assert_eq!(
+            seed_escolhida(false, true),
+            Some(false),
+            "--no-seed força false"
+        );
+        assert_eq!(
+            seed_escolhida(false, false),
+            None,
+            "sem flag: o fluxd decide pelo seed_on_rebuild do flux.toml"
+        );
+        // Os dois juntos é bloqueado pelo conflicts_with do clap; aqui a
+        // ordem de leitura é só documentada (seed vence).
+        assert_eq!(seed_escolhida(true, true), Some(true));
+    }
+
+    #[test]
+    fn drenar_linhas_extrai_so_payload_data() {
+        let mut buf = Vec::from("data: linha 1\n\ndata: linha 2\n\n: keepalive\n".as_bytes());
+        assert_eq!(
+            drenar_linhas(&mut buf),
+            vec!["linha 1".to_owned(), "linha 2".to_owned()],
+            "cada evento data: vira uma linha de saída; separador some"
+        );
+        assert!(
+            drenar_linhas(&mut buf).is_empty(),
+            "comentário : não vira saída"
+        );
+        assert!(buf.is_empty(), "buffer drenado por completo");
+    }
+
+    #[test]
+    fn drenar_linhas_monta_linha_cortada_entre_chunks() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"data: par");
+        assert!(
+            drenar_linhas(&mut buf).is_empty(),
+            "sem \\n não há linha completa — nada sai cortado"
+        );
+        buf.extend_from_slice(b"cial\n\ndata: seguinte\n");
+        assert_eq!(
+            drenar_linhas(&mut buf),
+            vec!["parcial".to_owned(), "seguinte".to_owned()],
+            "payload remontado entre frames"
+        );
+    }
+
+    /// Revisão: chunk SSE pode cortar dentro de um caractere UTF-8 — junção
+    /// em BYTES e lossy só na linha completa ("ç" = 0xC3 0xA7 dividido).
+    #[test]
+    fn drenar_linhas_junta_multibyte_cortado_entre_frames() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"data: \xC3"); // 1º byte do "ç" no fim do chunk
+        assert!(
+            drenar_linhas(&mut buf).is_empty(),
+            "sem \\n nada sai — byte parcial fica no buffer"
+        );
+        buf.extend_from_slice(&[0xA7, b'o', b'\n']); // 2º byte vem no chunk seguinte
+        assert_eq!(
+            drenar_linhas(&mut buf),
+            vec!["ço".to_owned()],
+            "byte parcial do multibyte remontado antes do lossy"
+        );
+    }
+
+    #[test]
+    fn frame_de_erro_so_para_prefixo_reservado_do_fluxd() {
+        assert!(frame_de_erro(
+            "[fluxd: erro no stream de logs do engine: boom]"
+        ));
+        assert!(
+            !frame_de_erro("[app] 2026-10-14 erro comum"),
+            "log do app é log"
+        );
+        assert!(!frame_de_erro("linha comum"), "linha comum é log");
+    }
 }

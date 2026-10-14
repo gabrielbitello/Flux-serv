@@ -3,6 +3,12 @@
 //! idempotência é do comando, 06). PROD nunca reconstrói: migration mutada é
 //! ERRO e bloqueia. Execução é sempre DENTRO do container, via `docker exec`.
 //!
+//! Seed (05): a seed só existe no REBUILD de dev (`migrate:fresh` +
+//! `db:seed --force` como exec separado, para a saída do seeder aparecer no
+//! evento). Precedência: CLI (`Some`) > toml `[db].seed_on_rebuild` > default
+//! da spec (true). PROD NUNCA semeia — nem com `Some(true)`: o parâmetro não
+//! alcança o caminho de prod (05: "nunca aplicar seed em prod").
+//!
 //! Janela de silêncio (5 s sem mutação, inotify) pertence ao fluxo de sync
 //! (F2) — quem chama `ensure_schema` já passou pela janela.
 
@@ -47,6 +53,13 @@ pub fn plan_migrations(
     plan
 }
 
+/// Precedência da seed (05): CLI (`cli`) vence o toml (`toml`), que vence o
+/// default da spec — `true` (05, linha 158: "seed_on_rebuild ... default
+/// true"; o fresh de dev semeia por padrão). Pura, para teste sem engine.
+pub fn resolver_seed(cli: Option<bool>, toml: Option<bool>) -> bool {
+    cli.or(toml).unwrap_or(true)
+}
+
 /// Resultado do ciclo de schema — cada variante vira linha de log/painel.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SchemaOutcome {
@@ -59,8 +72,9 @@ pub enum SchemaOutcome {
     NoPipeline,
 }
 
-/// Executa o ciclo completo de schema do projeto. `files` = (arquivo, sha256)
-/// das migrations no disco agora — só laravel usa; vazio nas outras stacks.
+/// Executa o ciclo completo de schema do projeto sem override de seed —
+/// decide pelo flux.toml (05). Wrapper fino sobre `ensure_schema_com_seed`;
+/// a assinatura antiga segue de pé para os chamadores existentes (api.rs).
 /// # Erro
 /// Prod com migration mutada — bloqueia SEMPRE (05: imutável, sem flag).
 pub async fn ensure_schema(
@@ -71,14 +85,28 @@ pub async fn ensure_schema(
     toml_src: &str,
     files: &[(String, String)],
 ) -> Result<SchemaOutcome, String> {
+    ensure_schema_com_seed(docker, st, name, env, toml_src, files, None).await
+}
+
+/// Como `ensure_schema`, com override de seed da CLI (05: `flux db fresh
+/// --seed` / `--no-seed` força uma vez). `seed: Some(v)` vence o toml;
+/// `None` = decidir por `[db].seed_on_rebuild`; ausente nos dois = default
+/// da spec (true). Prod ignora o parâmetro por inteiro — nunca semeia.
+/// # Erro
+/// Prod com migration mutada; exec falho de migrate/seed no rebuild de dev.
+pub async fn ensure_schema_com_seed(
+    docker: &Docker,
+    st: &State,
+    name: &str,
+    env: Env,
+    toml_src: &str,
+    files: &[(String, String)],
+    seed: Option<bool>,
+) -> Result<SchemaOutcome, String> {
     let toml = ProjectToml::parse_str(toml_src)
         .map_err(|e| format!("flux.toml de {name} inválido: {e}"))?;
     let framework = toml.framework();
-    let seed_on_rebuild = toml
-        .db
-        .as_ref()
-        .and_then(|d| d.seed_on_rebuild)
-        .unwrap_or(true);
+    let seed_on_rebuild = resolver_seed(seed, toml.db.as_ref().and_then(|d| d.seed_on_rebuild));
     let migrate_cmd = toml.db.as_ref().and_then(|d| d.migrate_cmd.clone());
 
     match framework {
@@ -177,26 +205,51 @@ async fn ensure_laravel(
         Env::Dev => {
             if !plan.mutated.is_empty() {
                 // Banco dev é descartável por definição: reconstrói (05).
-                let cmd = if seed_on_rebuild {
-                    "php artisan migrate:fresh --force --seed"
-                } else {
-                    "php artisan migrate:fresh --force"
-                };
-                let (_, code) = exec_in_container(docker, name, env, cmd).await?;
+                // Seed é exec SEPARADO (`db:seed --force`) e não a flag
+                // `--seed` do fresh, para a saída do seeder aparecer no
+                // evento — e para falha de seed não ficar engolida no exit
+                // code do migrate:fresh (nada silencioso).
+                let (_, code) =
+                    exec_in_container(docker, name, env, "php artisan migrate:fresh --force")
+                        .await?;
                 if code != 0 {
                     return Err(format!("{name}/dev: migrate:fresh falhou (exit {code})"));
+                }
+                let mut saida_seed = String::new();
+                if seed_on_rebuild {
+                    let (out, code) =
+                        exec_in_container(docker, name, env, "php artisan db:seed --force").await?;
+                    if code != 0 {
+                        return Err(format!(
+                            "{name}/dev: db:seed falhou após o fresh (exit {code}): {out}"
+                        ));
+                    }
+                    saida_seed = out;
                 }
                 st.clear_migrations(name, env).map_err(|e| e.to_string())?;
                 for (f, sha) in files {
                     st.record_migration(name, env, f, sha)
                         .map_err(|e| e.to_string())?;
                 }
+                // Saída do seeder vai no evento (linha única — o painel é
+                // log); sem seed não há o que anexar.
+                let cauda_seed = saida_seed
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let sufixo_seed = if cauda_seed.is_empty() {
+                    String::new()
+                } else {
+                    format!("; saída: {cauda_seed}")
+                };
                 events::event(
                     st,
                     "info",
                     "db",
                     &format!(
-                        "{name}/dev: banco reconstruído (mutação em {:?}; seed={seed_on_rebuild})",
+                        "{name}/dev: banco reconstruído (mutação em {:?}; seed={seed_on_rebuild}{sufixo_seed})",
                         plan.mutated
                     ),
                 );
@@ -332,5 +385,23 @@ mod tests {
         let plan = plan_migrations(&applied, &applied);
         assert_eq!(plan, MigrationPlan::default());
         assert_eq!(plan_migrations(&[], &[]), MigrationPlan::default());
+    }
+
+    #[test]
+    fn precedencia_da_seed_cli_vence_toml_vence_default_da_spec() {
+        assert!(
+            !resolver_seed(Some(false), Some(true)),
+            "CLI --no-seed vence o toml true"
+        );
+        assert!(
+            resolver_seed(Some(true), Some(false)),
+            "CLI --seed vence o toml false"
+        );
+        assert!(resolver_seed(None, Some(true)), "toml true vale sem CLI");
+        assert!(!resolver_seed(None, Some(false)), "toml false vale sem CLI");
+        assert!(
+            resolver_seed(None, None),
+            "CLI e toml ausentes = default da spec 05 (true) — fresh de dev semeia por padrão"
+        );
     }
 }

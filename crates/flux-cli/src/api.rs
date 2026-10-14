@@ -23,6 +23,10 @@ pub const DEFAULT_API_URL: &str = "http://127.0.0.1:7420";
 /// anomalia e vale mensagem de causa, não espera infinita.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Teto do CLI para o exec (contrato CLI ↔ fluxd): o fluxd corta o exec em
+/// 120 s; a folga de 30 s é só de transporte — estourou, é erro com causa.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(150);
+
 /// Erro classificado do cliente — cada variante vira mensagem pronta no CLI
 /// com a origem (CLI→API ou backend do fluxd).
 #[derive(Debug)]
@@ -204,10 +208,22 @@ pub struct UpAceitoOut {
     pub compose_project: String,
 }
 
+/// POST /projects/{name}/down — corpo 200 do contrato CLI ↔ fluxd.
+#[derive(Debug, Deserialize)]
+pub struct DownOut {
+    pub stopped: bool,
+    pub project: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SchemaIn<'a> {
     env: &'a str,
     files: &'a [(String, String)],
+    /// `--seed`/`--no-seed` explícitos no `flux up` (05). Ausente (None) =
+    /// o fluxd decide pelo `seed_on_rebuild` do flux.toml — por isso o campo
+    /// some do JSON em vez de ir como null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<bool>,
 }
 
 /// Espelho do `SchemaReply` (tag = outcome).
@@ -221,6 +237,38 @@ pub struct SchemaOut {
     pub aplicadas: usize,
     #[serde(default)]
     pub output: String,
+}
+
+/// Payload de uma linha SSE `data: …` (contrato do /logs com follow: cada
+/// evento é `data: <linha crua>` seguido de linha vazia). Aceita `data: X` e
+/// `data:X`; separador vazio, comentário `: ping` e outros campos (`event:`,
+/// `id:`) não são payload → None.
+pub fn dado_de_data(linha: &str) -> Option<&str> {
+    let resto = linha.strip_prefix("data:")?;
+    Some(resto.strip_prefix(' ').unwrap_or(resto))
+}
+
+/// Separa a resposta do exec (contrato CLI ↔ fluxd): texto cru com a ÚLTIMA
+/// linha `exit={code}`. Devolve (saída_sem_a_linha_do_exit, código); None
+/// quando o corpo não termina com a linha do exit — protocolo quebrado vira
+/// erro, nunca exit 0 inventado (06: nada silencioso).
+pub fn separar_exec(corpo: &str) -> Option<(String, i32)> {
+    let ultima = corpo.lines().rev().find(|l| !l.trim().is_empty())?.trim();
+    let code: i32 = ultima.strip_prefix("exit=")?.parse().ok()?;
+    let pos = corpo.rfind(ultima)?;
+    let saida = corpo[..pos].trim_end_matches(['\n', '\r']);
+    Some((saida.to_owned(), code))
+}
+
+/// Corta texto longo para caber em mensagem de erro (o teto do exec é 256 KB
+/// — nunca despejar isso no terminal).
+fn truncar(s: &str, max: usize) -> String {
+    let total = s.chars().count();
+    if total <= max {
+        return s.to_owned();
+    }
+    let cortado: String = s.chars().take(max).collect();
+    format!("{cortado}… (+{total} caracteres no total)")
 }
 
 struct Reply {
@@ -281,6 +329,19 @@ impl ApiClient {
         path: &str,
         body: Option<String>,
     ) -> Result<Reply, ApiError> {
+        self.call_com_timeout(method, path, body, TIMEOUT).await
+    }
+
+    /// `call` com timeout ajustável: o exec legítimo pode rodar 120 s no
+    /// fluxd (contrato CLI ↔ fluxd) — o teto de 30 s das rotas rápidas não
+    /// serve aqui.
+    async fn call_com_timeout(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+        teto: Duration,
+    ) -> Result<Reply, ApiError> {
         let mut b = hyper::Request::builder().method(
             hyper::Method::from_bytes(method.as_bytes()).map_err(|e| ApiError::Protocolo {
                 msg: format!("método {method}: {e}"),
@@ -300,18 +361,18 @@ impl ApiClient {
                 msg: format!("montando request {}: {e}", self.base),
             })?;
 
-        let res = tokio::time::timeout(TIMEOUT, self.http.request(req))
+        let res = tokio::time::timeout(teto, self.http.request(req))
             .await
             .map_err(|_| ApiError::Conexao {
                 url: self.base.clone(),
-                causa: format!("timeout de {} s esperando o fluxd", TIMEOUT.as_secs()),
+                causa: format!("timeout de {} s esperando o fluxd", teto.as_secs()),
             })?
             .map_err(|e| ApiError::Conexao {
                 url: self.base.clone(),
                 causa: e.to_string(),
             })?;
         let status = res.status().as_u16();
-        let bytes = tokio::time::timeout(TIMEOUT, BodyExt::collect(res.into_body()))
+        let bytes = tokio::time::timeout(teto, BodyExt::collect(res.into_body()))
             .await
             .map_err(|_| ApiError::Conexao {
                 url: self.base.clone(),
@@ -421,20 +482,130 @@ impl ApiClient {
     }
 
     /// Dispara o ciclo de schema (05) com as migrations do disco local.
+    /// `seed`: None = fluxd decide pelo flux.toml; Some = vence o toml.
     pub async fn schema(
         &self,
         name: &str,
         env: &str,
         files: &[(String, String)],
+        seed: Option<bool>,
     ) -> Result<SchemaOut, ApiError> {
-        let corpo =
-            serde_json::to_string(&SchemaIn { env, files }).map_err(|e| ApiError::Protocolo {
+        let corpo = serde_json::to_string(&SchemaIn { env, files, seed }).map_err(|e| {
+            ApiError::Protocolo {
                 msg: format!("serializando schema: {e}"),
-            })?;
+            }
+        })?;
         let r = self
             .call("POST", &format!("/projects/{name}/schema"), Some(corpo))
             .await?;
         self.json_out(r)
+    }
+
+    // --------------------------- contrato CLI ↔ fluxd (down / logs / exec)
+
+    /// POST /projects/{name}/down?env= (contrato CLI ↔ fluxd): o fluxd roda
+    /// `docker compose -p flux-{name}-{env} stop` e responde 200 com
+    /// `{"stopped":true,"project":…}`; 500 traz `{"error":causa}` — vira
+    /// `ApiError::Status` com exit 1.
+    pub async fn parar(&self, name: &str, env: &str) -> Result<DownOut, ApiError> {
+        let r = self
+            .call("POST", &format!("/projects/{name}/down?env={env}"), None)
+            .await?;
+        self.json_out(r)
+    }
+
+    /// GET de logs com follow (contrato CLI ↔ fluxd): abre o stream SSE SEM
+    /// timeout de corpo — o stream vive até o cliente cortar, e um timeout
+    /// aqui mataria o `flux logs -f` (06/07). Status de erro lê o corpo com
+    /// timeout e classifica como qualquer outra rota.
+    pub async fn abrir_stream(
+        &self,
+        path: &str,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, ApiError> {
+        let mut b = hyper::Request::builder().method(hyper::Method::GET);
+        if let Some(t) = &self.token {
+            b = b.header(hyper::header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let req = b
+            .uri(format!("{}{}", self.base, path))
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| ApiError::Protocolo {
+                msg: format!("montando request {path}: {e}"),
+            })?;
+        let res = tokio::time::timeout(TIMEOUT, self.http.request(req))
+            .await
+            .map_err(|_| ApiError::Conexao {
+                url: self.base.clone(),
+                causa: format!(
+                    "timeout de {} s esperando os headers do stream",
+                    TIMEOUT.as_secs()
+                ),
+            })?
+            .map_err(|e| ApiError::Conexao {
+                url: self.base.clone(),
+                causa: e.to_string(),
+            })?;
+        if res.status().is_success() {
+            return Ok(res);
+        }
+        let status = res.status().as_u16();
+        let bytes = tokio::time::timeout(TIMEOUT, BodyExt::collect(res.into_body()))
+            .await
+            .map_err(|_| ApiError::Conexao {
+                url: self.base.clone(),
+                causa: "timeout lendo o corpo do erro do stream".into(),
+            })?
+            .map_err(|e| ApiError::Conexao {
+                url: self.base.clone(),
+                causa: e.to_string(),
+            })?
+            .to_bytes();
+        let r = Reply {
+            status,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        };
+        match self.decodificar(r) {
+            // Inalcançável para status de erro (decodificar só devolve Ok em
+            // 2xx) — defensivo para nunca mascarar um status como sucesso.
+            Ok(_) => Err(ApiError::Protocolo {
+                msg: format!("stream de {path} terminou com status {status} sem corpo de erro"),
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// POST /projects/{name}/exec?env= (contrato CLI ↔ fluxd): corpo
+    /// `{"cmd":[…]}`, resposta text/plain com a ÚLTIMA linha `exit={code}` —
+    /// separada aqui para o CLI repassar o exit code real (06). O teto de
+    /// 120 s do exec é do fluxd; o do CLI é só de transporte.
+    pub async fn executar(
+        &self,
+        name: &str,
+        env: &str,
+        cmd: &[String],
+    ) -> Result<(String, i32), ApiError> {
+        #[derive(Serialize)]
+        struct ExecIn<'a> {
+            cmd: &'a [String],
+        }
+        let corpo = serde_json::to_string(&ExecIn { cmd }).map_err(|e| ApiError::Protocolo {
+            msg: format!("serializando exec: {e}"),
+        })?;
+        let r = self
+            .call_com_timeout(
+                "POST",
+                &format!("/projects/{name}/exec?env={env}"),
+                Some(corpo),
+                EXEC_TIMEOUT,
+            )
+            .await?;
+        let texto = self.decodificar(r)?;
+        separar_exec(&texto).ok_or_else(|| ApiError::Protocolo {
+            msg: format!(
+                "resposta do exec sem a linha final exit={{código}}: {}",
+                truncar(&texto, 2_000)
+            ),
+        })
     }
 
     // ------------------------------------ rotas cujo backend chega em fases
@@ -496,8 +667,9 @@ mod tests {
     use super::*;
     use axum::Json;
     use axum::Router;
-    use axum::extract::{Path, State};
+    use axum::extract::{Path, Query, State};
     use axum::http::{HeaderMap, StatusCode, header};
+    use axum::response::{IntoResponse, Response};
     use axum::routing::{get, post};
 
     const TOKEN: &str = "segredo";
@@ -596,6 +768,117 @@ mod tests {
             )
         }
 
+        /// POST /projects/{name}/down?env= — contrato CLI ↔ fluxd. O query
+        /// SEM env é recusado (o CLI tem de mandar sempre); projeto
+        /// "quebrado" devolve o 500 do contrato com a causa real do compose.
+        async fn parar_projeto(
+            State(token): State<String>,
+            Path(name): Path<String>,
+            Query(q): Query<std::collections::HashMap<String, String>>,
+            headers: HeaderMap,
+        ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+            gate_com(token, headers).await?;
+            if q.get("env").map(String::as_str) != Some("dev") {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("query do down divergente do contrato: env={:?} (esperado Some(\"dev\"))", q.get("env"))
+                    })),
+                ));
+            }
+            if name == "quebrado" {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "docker compose stop falhou: exit 1"})),
+                ));
+            }
+            Ok(Json(serde_json::json!({"stopped": true, "project": name})))
+        }
+
+        /// GET /projects/{name}/logs — contrato: sem follow, text/plain cru;
+        /// com follow, corpo SSE (`data: <linha>` + linha vazia). O mock
+        /// confere o query EXATO que o CLI deve mandar (env, tail, follow) —
+        /// divergiu, 500 com a divergência apontada.
+        async fn logs_stream(
+            State(token): State<String>,
+            Path(_name): Path<String>,
+            Query(q): Query<std::collections::HashMap<String, String>>,
+            headers: HeaderMap,
+        ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+            gate_com(token, headers).await?;
+            if q.get("env").map(String::as_str) != Some("dev") {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("query dos logs divergente do contrato: env={:?} (esperado Some(\"dev\"))", q.get("env"))
+                    })),
+                ));
+            }
+            if q.get("tail").map(String::as_str) != Some("200") {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("query dos logs divergente do contrato: tail={:?} (esperado Some(\"200\"))", q.get("tail"))
+                    })),
+                ));
+            }
+            if q.get("follow").map(String::as_str) == Some("true") {
+                let corpo = axum::body::Body::from("data: linha 1\n\ndata: linha 2\n\n");
+                return Ok(axum::response::Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(corpo)
+                    .unwrap());
+            }
+            Ok((
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "linha 1\nlinha 2\nlinha 3\n",
+            )
+                .into_response())
+        }
+
+        /// POST /projects/{name}/exec — contrato: corpo `{"cmd":[…]}` (o CLI
+        /// tem de mandar `cmd`, não `command`); vazio → 422. Resposta
+        /// text/plain com `exit=` na ÚLTIMA linha.
+        async fn exec_projeto(
+            State(token): State<String>,
+            Path(_name): Path<String>,
+            headers: HeaderMap,
+            Json(b): Json<serde_json::Value>,
+        ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+            gate_com(token, headers).await?;
+            let Some(cmd) = b["cmd"].as_array() else {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(
+                        serde_json::json!({"error": "campo cmd ausente (contrato: {\"cmd\":[…]})"}),
+                    ),
+                ));
+            };
+            if cmd.is_empty() {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(
+                        serde_json::json!({"error": "cmd vazio — nada para executar no container app"}),
+                    ),
+                ));
+            }
+            let recebido: Vec<&str> = cmd.iter().filter_map(|v| v.as_str()).collect();
+            let esperado = ["php", "artisan", "migrate", "--force"];
+            if recebido != esperado {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("corpo do exec divergente do contrato: cmd={recebido:?} (esperado {esperado:?})")
+                    })),
+                ));
+            }
+            Ok((
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "migrando…\nDIRED  2026_10_14_000000_teste\nexit=0",
+            )
+                .into_response())
+        }
+
         async fn indisponivel() -> (StatusCode, Json<serde_json::Value>) {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -613,7 +896,9 @@ mod tests {
             )
             .route("/projects/{name}", get(project_status))
             .route("/projects/{name}/lease", post(lease))
-            .route("/projects/{name}/down", post(futura))
+            .route("/projects/{name}/down", post(parar_projeto))
+            .route("/projects/{name}/logs", get(logs_stream))
+            .route("/projects/{name}/exec", post(exec_projeto))
             .route("/fechada", get(indisponivel))
             .fallback(futura)
             .with_state(TOKEN.to_owned());
@@ -689,8 +974,10 @@ mod tests {
     async fn endpoint_futuro_do_fallback_vira_exit_2() {
         let base = mock_fluxd().await;
         let cli = cliente(&base, Some(TOKEN));
+        // restart ainda não tem backend real — cai no fallback 501 do mock
+        // (down já é contrato real e tem rota própria no mock).
         let err = cli
-            .call_raw("POST", "/projects/vipers/down", None)
+            .call_raw("POST", "/projects/vipers/restart", None)
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::BackendFuturo { .. }), "erro: {err}");
@@ -717,5 +1004,158 @@ mod tests {
         guard.parar.send(true).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(guard.tarefa.is_finished(), "tarefa para ao receber o sinal");
+    }
+
+    #[tokio::test]
+    async fn down_do_contrato_para_e_reporta() {
+        let base = mock_fluxd().await;
+        let cli = cliente(&base, Some(TOKEN));
+        let r = cli.parar("vipers", "dev").await.unwrap();
+        assert!(r.stopped, "contrato: 200 traz stopped=true");
+        assert_eq!(r.project, "vipers");
+        // 500 do contrato traz a causa do compose — vira Status com exit 1
+        // (06: erro nunca sai com exit 0).
+        let err = cli.parar("quebrado", "dev").await.unwrap_err();
+        assert!(
+            err.to_string().contains("docker compose stop falhou"),
+            "causa real no erro: {err}"
+        );
+        assert_eq!(err.exit_code(), 1);
+    }
+
+    #[tokio::test]
+    async fn down_sem_env_no_query_e_recusado_pelo_mock() {
+        let base = mock_fluxd().await;
+        let cli = cliente(&base, Some(TOKEN));
+        // O contrato manda o CLI sempre levar ?env= — sem ele, o mock
+        // devolve 500 apontando o que faltou.
+        let err = cli
+            .call_raw("POST", "/projects/vipers/down", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("env=None"), "causa: {err}");
+    }
+
+    #[tokio::test]
+    async fn logs_sem_follow_traz_texto_cru() {
+        let base = mock_fluxd().await;
+        let cli = cliente(&base, Some(TOKEN));
+        let corpo = cli
+            .call_raw(
+                "GET",
+                "/projects/vipers/logs?env=dev&tail=200&follow=false",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(corpo, "linha 1\nlinha 2\nlinha 3\n");
+    }
+
+    #[tokio::test]
+    async fn logs_com_follow_abre_stream_sse_e_confere_query() {
+        let base = mock_fluxd().await;
+        let cli = cliente(&base, Some(TOKEN));
+        let res = cli
+            .abrir_stream("/projects/vipers/logs?env=dev&tail=200&follow=true")
+            .await
+            .unwrap();
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let corpo = String::from_utf8_lossy(&bytes);
+        assert!(corpo.contains("data: linha 1"), "corpo: {corpo}");
+        assert!(corpo.contains("data: linha 2"), "corpo: {corpo}");
+        // Query divergente (tail errado) → 500 do mock com a divergência.
+        let err = cli
+            .abrir_stream("/projects/vipers/logs?env=dev&tail=50&follow=true")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("tail="), "causa: {err}");
+    }
+
+    #[tokio::test]
+    async fn exec_manda_cmd_e_le_exit_da_ultima_linha() {
+        let base = mock_fluxd().await;
+        let cli = cliente(&base, Some(TOKEN));
+        let cmd: Vec<String> = ["php", "artisan", "migrate", "--force"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let (saida, code) = cli.executar("vipers", "dev", &cmd).await.unwrap();
+        assert_eq!(code, 0, "última linha exit=0 vira código do comando");
+        assert!(saida.contains("migrando"), "saída: {saida}");
+        assert!(
+            !saida.contains("exit="),
+            "a linha do exit não vaza como saída do comando: {saida}"
+        );
+        // cmd vazio → 422 do contrato → Recusado com a causa.
+        let err = cli.executar("vipers", "dev", &[]).await.unwrap_err();
+        assert!(matches!(err, ApiError::Recusado { .. }), "erro: {err}");
+        assert!(err.to_string().contains("cmd vazio"), "causa: {err}");
+    }
+
+    #[test]
+    fn dado_sse_data_com_e_sem_espaco() {
+        assert_eq!(dado_de_data("data: linha 1"), Some("linha 1"));
+        assert_eq!(dado_de_data("data:linha 1"), Some("linha 1"));
+        assert_eq!(dado_de_data(""), None, "linha vazia é separador SSE");
+        assert_eq!(dado_de_data(": keepalive"), None, "comentário SSE");
+        assert_eq!(dado_de_data("event: log"), None, "outro campo SSE");
+        assert_eq!(
+            dado_de_data("data:  dois espaços"),
+            Some(" dois espaços"),
+            "só UM espaço é consumido (RFC do SSE)"
+        );
+    }
+
+    #[test]
+    fn exec_separa_saida_do_exit() {
+        assert_eq!(
+            separar_exec("migrando…\nexit=0"),
+            Some(("migrando…".to_owned(), 0))
+        );
+        assert_eq!(
+            separar_exec("a\nb\nexit=127\n"),
+            Some(("a\nb".to_owned(), 127)),
+            "\\n final depois do exit não atrapalha"
+        );
+        assert_eq!(separar_exec("exit=2\n"), Some((String::new(), 2)));
+        assert_eq!(
+            separar_exec("exit=1\nok\nexit=0"),
+            Some(("exit=1\nok".to_owned(), 0)),
+            "exit= no MEIO da saída não confunde — a ÚLTIMA linha vence"
+        );
+        assert_eq!(separar_exec("sem linha de exit"), None);
+        assert_eq!(
+            separar_exec("exit=abc"),
+            None,
+            "exit não numérico é protocolo quebrado"
+        );
+        assert_eq!(separar_exec(""), None);
+    }
+
+    #[test]
+    fn schema_in_serializa_seed_somente_quando_explícita() {
+        let sem = serde_json::to_string(&SchemaIn {
+            env: "dev",
+            files: &[],
+            seed: None,
+        })
+        .unwrap();
+        assert_eq!(
+            sem, r#"{"env":"dev","files":[]}"#,
+            "sem flag: campo ausente — o fluxd decide pelo flux.toml"
+        );
+        let com = serde_json::to_string(&SchemaIn {
+            env: "dev",
+            files: &[],
+            seed: Some(false),
+        })
+        .unwrap();
+        assert_eq!(
+            com, r#"{"env":"dev","files":[],"seed":false}"#,
+            "flag explícita vence o toml"
+        );
     }
 }

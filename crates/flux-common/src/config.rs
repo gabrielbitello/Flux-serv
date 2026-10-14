@@ -31,6 +31,7 @@ pub struct ProjectToml {
     pub branding: Option<BrandingSection>,
     pub shield: Option<ShieldSection>,
     pub health: Option<HealthSection>,
+    pub dev: Option<DevSection>,
     pub limits: Option<ProjectLimitsSection>,
 }
 
@@ -191,6 +192,19 @@ pub struct ShieldSection {
 #[serde(deny_unknown_fields)]
 pub struct HealthSection {
     pub path: Option<String>,
+}
+
+/// Live server de dev (seção `[dev]`): comando de hot reload rodado DENTRO do
+/// container `app` logo após um `compose up` com SUCESSO em env=dev —
+/// `docker compose -p {projeto} exec -d app sh -c "cd /var/www && {live}"`.
+/// Ex.: `npm run dev -- --host 0.0.0.0`. Nunca roda em prod (o gatilho é
+/// `env == "dev"` no `subir_projeto` do compose.rs); falha do live NUNCA
+/// derruba o up — vira warn no painel com o erro real.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevSection {
+    /// Comando de hot reload, executado em `/var/www` do container `app`.
+    pub live: Option<String>,
 }
 
 /// Override por projeto da borda (07): rate limit por host.
@@ -494,6 +508,33 @@ rate = 500
     fn flux_toml_chave_desconhecida_e_erro() {
         let err = ProjectToml::parse_str("naame = \"vipers\"").unwrap_err();
         assert!(err.to_string().contains("naame"), "mensagem: {err}");
+    }
+
+    #[test]
+    fn flux_toml_dev_live_parseia() {
+        let src = "\n[dev]\nlive = \"npm run dev -- --host 0.0.0.0\"\n";
+        let t = ProjectToml::parse_str(src).unwrap();
+        assert_eq!(
+            t.dev.as_ref().and_then(|d| d.live.as_deref()),
+            Some("npm run dev -- --host 0.0.0.0"),
+            "[dev] live presente deve parsear verbatim"
+        );
+    }
+
+    #[test]
+    fn flux_toml_sem_dev_fica_none() {
+        let t = ProjectToml::parse_str("name = \"pedi\"\n").unwrap();
+        assert_eq!(
+            t.dev.and_then(|d| d.live),
+            None,
+            "sem seção [dev] não existe live"
+        );
+    }
+
+    #[test]
+    fn flux_toml_dev_chave_desconhecida_e_erro() {
+        let err = ProjectToml::parse_str("[dev]\nlvie = \"npm run dev\"\n").unwrap_err();
+        assert!(err.to_string().contains("lvie"), "mensagem: {err}");
     }
 
     #[test]

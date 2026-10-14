@@ -13,7 +13,6 @@ pub mod events;
 pub mod guard;
 pub mod observe;
 pub mod observe_page;
-pub mod waf;
 pub mod pages;
 pub mod panel;
 pub mod panel_auth;
@@ -23,6 +22,7 @@ pub mod sleep;
 pub mod sqlite_source;
 pub mod state;
 pub mod temporary;
+pub mod waf;
 
 use bollard::Docker;
 use flux_common::config::{DomainConfig, GlobalConfig};
@@ -137,6 +137,15 @@ pub async fn serve(
         });
     }
 
+    // Sampler de recursos (13/16): coleta métricas de 30 s em `metrics_1min`,
+    // retenção de 24 h e perícia de pico. O `iniciar` garante o schema,
+    // avisa de forma explícita quando não há engine (não inicia) e faz o
+    // spawn do próprio loop — aqui é só o disparo único ao lado do sweep.
+    {
+        let shared_for_observe = std::sync::Arc::clone(&shared);
+        tokio::spawn(observe::iniciar(shared_for_observe));
+    }
+
     // 127.0.0.1 nos TRÊS binds (09, critério 2: de fora da VM só 22/80/443
     // respondem — o Caddy é quem fala com o router). ConnectInfo alimenta o
     // rate limit de login do painel por IP real.
@@ -148,6 +157,16 @@ pub async fn serve(
     let router_svc = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     let api_svc = api_app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     let painel_svc = painel.into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+    // WAF (16) — dependência NUNCA silenciosa: os binds são 127.0.0.1, então
+    // o ConnectInfo é sempre loopback (allowlist) e a identificação do IP
+    // real de fora depende do X-Forwarded-For que o Caddy seta. Caddy sem
+    // XFF desligaria o bloqueio externo sem nenhum erro — o aviso fica no
+    // arranque e o warn por-request fica no waf.rs (fonte_ip connectinfo).
+    tracing::warn!(
+        "waf: bloqueio de request externo depende do X-Forwarded-For do Caddy \
+         (binds 127.0.0.1 — sem XFF, todo request entra como loopback/allowlist)"
+    );
 
     tokio::try_join!(
         async { axum::serve(router_listener, router_svc).await },
