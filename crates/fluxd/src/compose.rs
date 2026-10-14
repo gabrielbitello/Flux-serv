@@ -339,6 +339,7 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
 
     // Estado real pós-up: a verdade vem do engine (inspect via labels).
     if let Some(d) = &app.docker {
+        use crate::decision::HostSource;
         let src = crate::docker::DockerSource::new(d.clone(), st);
         let env_enum = if env == "prod" {
             flux_common::protocol::Env::Prod
