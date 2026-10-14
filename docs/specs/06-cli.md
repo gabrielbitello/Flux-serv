@@ -100,7 +100,8 @@ senão static) e cada tipo resolve health, schema e perfil de build:
 ### Fluxo do `flux up` (dev), passo a passo
 
 1. **Contexto**: lê `flux.toml`/detecta projeto; valida guard de imagens ANTES
-   de qualquer rede (05).
+   de qualquer rede (05). `flux up -m` (manifesto) abre o WIZARD abaixo antes
+   deste passo.
 2. **VM**: SSH ping → se falhou, pede start ao serviço `fluxhost` e espera
    (progresso). Verifica `fluxd` saudável.
 3. **Registro**: envia `flux.toml` + hash dos arquivos de compose/Dockerfile ao
@@ -124,6 +125,31 @@ senão static) e cada tipo resolve health, schema e perfil de build:
 
 O arquivo original do projeto segue intocado — overrides são gerados em
 `/srv/flux/state/compose/{name}-{env}.override.yml` e passados via `-f`.
+
+### Wizard `flux up -m` (o CLI GERA o `flux.toml`)
+
+`-m` / `--manifest` = série de perguntas no terminal; respostas viram um
+`flux.toml` na raiz do repo e o `up` segue normal. Existe porque o manifesto
+explícito é a regra (deny_unknown_fields) e digitar TOML na mão é atrito
+desnecessário para os 3–4 campos que mudam de projeto para projeto.
+
+Perguntas (todas com default no Enter; Ctrl+C aborta sem escrever nada):
+
+| # | Pergunta | Default |
+|---|---|---|
+| 1 | Nome do projeto (domínios derivam dele) | nome da pasta em kebab-case |
+| 2 | Framework | laravel (auto-detectado: `artisan` presente → laravel; `package.json` → node; `Cargo.toml` → rust) |
+| 3 | Health path | `/up` (laravel) — node/rust exigem resposta |
+| 4 | Dev TEMPORÁRIO? (apaga da VM após TTL sem interação, 14) | não |
+| 5 | (se temporário) TTL em horas | 6 |
+| 6 | `extra_ignore` de sync (vírgula-separado, vazio = nada) | vazio |
+
+- `flux.toml` já existe → wizard RECUSA (nunca sobrescreve silencioso);
+  sair editando à mão ou apagar antes.
+- Perfil de uso (decisão do Gabriel, 14/10): **99% é dev** — `flux up` é o
+  caminho comum; **prod é comando separado e raro** (`flux deploy`, 10) e não
+  entra no wizard.
+- O `flux.toml` gerado é versionável: revisa no git como qualquer código.
 
 ### `flux.toml` (raiz do projeto, versionado)
 
@@ -156,6 +182,10 @@ worker_cpus = 0.5
 
 [sync]
 extra_ignore = []           # só ADICIONA ao ignore global
+
+[temporary]                 # modo dev temporário (14): apaga da VM sozinho
+# enabled = true            # default false — precisa ser dito
+# ttl_hours = 6             # sem INTERAÇÃO nenhuma por esse tempo = teardown
 
 [provision]
 on_wake = ""                # comando dentro do container, ex.: "bash /provision.sh"

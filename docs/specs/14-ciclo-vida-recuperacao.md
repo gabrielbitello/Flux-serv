@@ -108,6 +108,36 @@ vTPM da VM nova (09).
 Fora de escopo agora (decisão futura do Gabriel): backup OFFSITE da VM/dumps
 para outro dispositivo ou nuvem — hoje todo backup mora no mesmo disco físico.
 
+### Modo dev temporário (`[temporary]`, pedido do Gabriel 14/10)
+
+Projeto de uso curto (experimento, demo, branch descartável) que se apaga
+SOZINHO da VM: `[temporary] enabled = true` no `flux.toml` (wizard `-m`
+pergunta, 06). Contador: **TTL sem interação NENHUMA** (default **6 h**,
+`ttl_hours`) — o mesmo `last_interaction` do sono (04: request proxyado,
+beat, CPU acima do teto, lease de CLI/painel renovam). Vale SÓ para **dev**;
+`enabled = true` em projeto com prod ativo = recusado no registro.
+
+Teardown (executado pelo sweep do `fluxd`, 60 s):
+
+1. `docker compose -p flux-{name}-dev down -v` (containers + rede + volumes
+   nomeados do projeto) e o mesmo para cada worktree `flux-{name}-@{slug}-dev`;
+2. `rm -rf /srv/flux/projects/{name}` e `{name}@*`;
+3. purge no SQLite: `projects`, `sleep_state`, `migration_state` do nome;
+4. evento "temporário expirou" no painel com o motivo ("6 h sem interação")
+   e a lista do que foi apagado.
+
+Garantias:
+
+- **Nunca toca nada FORA da VM**: o repo no Windows fica intocado (sync é
+  one-way-replica VM←Windows, 02 — apagar o beta não apaga a fonte);
+  próxima `flux up` do mesmo repo recria tudo do zero (sync fresca + build).
+- Sessão mutagen do projeto fica `halted` no host (beta sumiu) — inofensiva;
+  o próximo `flux up` detecta sessão halted/órfã e recria.
+- `last_interaction` ausente/ilegível = NÃO expira (sem dado honesto de
+  tempo, não há teardown — nunca chutar relógio).
+- Teardown com lease ativo não acontece: lease renova interação (04), então
+  projeto em uso não chega ao TTL.
+
 ## Decisões
 
 | Decisão | Alternativa descartada | Por quê |
@@ -120,6 +150,11 @@ para outro dispositivo ou nuvem — hoje todo backup mora no mesmo disco físico
 
 ## O que NUNCA fazer
 
+- **Nunca** rodar o teardown temporário com `last_interaction` ausente ou
+  ilegível — sem relógio honesto, não há expiração.
+- **Nunca** apagar nada fora de `/srv/flux` nem containers fora do padrão
+  `flux-{name}*` no teardown — o repo Windows e projetos vizinhos são
+  intocáveis.
 - **Nunca** rodar `migrate --force` de deploy sem o snapshot gravado (com
   pendência existente) — se o dump falha, o deploy PARA com erro claro.
 - **Nunca** gerar export com `secrets.age` sem passphrase.
