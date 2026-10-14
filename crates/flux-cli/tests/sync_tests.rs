@@ -388,9 +388,18 @@ fn pause_e_ultimo_erro_derrubam_a_saude() {
 
 #[test]
 fn identifier_do_create_e_extraido_da_resposta_padrao() {
+    // Formato limpo...
     assert_eq!(
-        sync::parse_created_id("Created session PmrL4GyyDhta6WFt").unwrap(),
-        "PmrL4GyyDhta6WFt"
+        sync::parse_created_id("Created session sync_PmrL4GyyDhta6WFt").unwrap(),
+        "sync_PmrL4GyyDhta6WFt"
+    );
+    // ...e com progresso ANTES da marca (saída real do mutagen 0.18).
+    assert_eq!(
+        sync::parse_created_id(
+            "Creating session...     Connecting to agent (POSIX)...                  Created session sync_aTN3qL8gGyy1BviLUMcMeBb9j0TNAxgEQJA3GTieQ5D"
+        )
+        .unwrap(),
+        "sync_aTN3qL8gGyy1BviLUMcMeBb9j0TNAxgEQJA3GTieQ5D"
     );
     let err = sync::parse_created_id("saída estranha").unwrap_err();
     assert!(matches!(err, SyncError::Saida { .. }));
