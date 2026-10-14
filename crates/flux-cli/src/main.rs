@@ -302,7 +302,7 @@ async fn main() {
         Cmd::Down { env } => ciclo_api("down", &env).await,
         Cmd::Restart { env } => ciclo_api("restart", &env).await,
         Cmd::Status { env } => status(&env).await,
-        Cmd::Ps { env } => ciclo_api("ps", &env).await,
+        Cmd::Ps { env } => ps(&env).await,
         Cmd::Logs {
             follow,
             since,
@@ -664,6 +664,105 @@ async fn up(env: &str) {
         "pronto: https://{} · lease até epoch {}",
         st.dev_host, lease.lease_until
     );
+}
+
+/// `flux ps [env]` — espelho do `docker compose ps` (06) com a regra do
+/// `docker ps`: FORA de projeto (pasta sem flux.toml e não registrada)
+/// lista TODOS os gerenciados; dentro, filtra o projeto (env afina
+/// dev/prod). Estado cru do engine via GET /containers.
+async fn ps(env: &str) {
+    let cliente = ApiClient::from_env();
+    let rows = match cliente.containers().await {
+        Ok(r) => r,
+        Err(e) => falhar(e),
+    };
+    if rows.is_empty() {
+        println!("nenhum container gerenciado (nenhum `flux up` ainda)");
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let pasta = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let flux_toml = cwd.join("flux.toml").is_file();
+    // Contexto: pasta com flux.toml OU nome registrado no fluxd.
+    let registrados: Vec<String> = cliente
+        .list_projects()
+        .await
+        .map(|l| l.into_iter().map(|p| p.name).collect())
+        .unwrap_or_default();
+    let projeto_ctx: Option<String> = if flux_toml || registrados.iter().any(|r| r == &pasta) {
+        Some(pasta.clone())
+    } else {
+        None
+    };
+    let env_filtro = if projeto_ctx.is_some() {
+        parse_env(env);
+        Some(env.to_owned())
+    } else {
+        None
+    };
+
+    let alvo = |r: &api::ContainerRowOut| {
+        // compose project: flux-{name}-{env} (worktrees: flux-{name}-@{slug}-{env})
+        r.compose_project
+            .strip_prefix("flux-")
+            .unwrap_or(&r.compose_project)
+            .to_owned()
+    };
+    let nome_ctx: Option<String> = match (&projeto_ctx, env_filtro.as_ref()) {
+        (Some(p), Some(e)) => Some(format!("flux-{p}-{e}")),
+        (Some(p), None) => Some(format!("flux-{p}-")),
+        _ => None,
+    };
+
+    let mut visiveis: Vec<&api::ContainerRowOut> = rows
+        .iter()
+        .filter(|r| match &nome_ctx {
+            Some(prefixo) => r.compose_project.starts_with(prefixo.as_str()),
+            None => true,
+        })
+        .collect();
+    if visiveis.is_empty() {
+        if let Some(p) = projeto_ctx {
+            eprintln!(
+                "nenhum container de '{p}' — rode `flux up` (ou `flux ps` fora do projeto para ver todos)"
+            );
+            std::process::exit(1);
+        }
+        return;
+    }
+    // Projeto do contexto primeiro; resto depois (fora de projeto = tudo).
+    visiveis.sort_by_key(|r| {
+        let do_ctx = projeto_ctx
+            .as_ref()
+            .is_some_and(|p| alvo(r).starts_with(p.as_str()));
+        (!do_ctx, r.compose_project.clone(), r.service.clone())
+    });
+
+    println!(
+        "{:<32} {:<10} {:<10} {}",
+        "COMPOSE PROJECT",
+        "SERVICE",
+        "ESTADO",
+        "status".to_uppercase()
+    );
+    for r in &visiveis {
+        println!(
+            "{:<32} {:<10} {:<10} {}",
+            r.compose_project, r.service, r.state, r.status
+        );
+    }
+    let total = rows.len();
+    if projeto_ctx.is_some() && visiveis.len() < total {
+        println!();
+        println!(
+            "+ {} container(ns) de outros projetos (flux ps fora do projeto lista todos)",
+            total - visiveis.len()
+        );
+    }
 }
 
 /// `flux status [env]` — o que a API de controle expõe hoje. Projeto do

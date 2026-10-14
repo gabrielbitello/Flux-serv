@@ -51,6 +51,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/projects/{name}/lease", post(grant_lease))
         .route("/projects/{name}/schema", post(run_schema))
         .route("/projects/{name}/up", post(subir))
+        .route("/containers", get(listar_containers))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
         // credencial fica invisível, então o gate grava a recusa no `events`
@@ -578,6 +579,74 @@ async fn run_schema(
         Ok(o) => Json(SchemaReply::from(o)).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+}
+
+/// GET /containers — TODOS os containers gerenciados pela plataforma
+/// (labels compose `flux-*`), o "docker ps" do Flux: `flux ps` fora de
+/// projeto lista tudo (pedido do Gabriel 14/10). Estado cru do engine.
+#[derive(serde::Serialize)]
+struct ContainerRow {
+    compose_project: String,
+    service: String,
+    container: String,
+    state: String,
+    status: String,
+}
+
+async fn listar_containers(State(app): State<Arc<AppState>>) -> Response {
+    use bollard::query_parameters::ListContainersOptionsBuilder;
+    use std::collections::HashMap;
+
+    let Some(docker) = &app.docker else {
+        return erro(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fluxd sem Docker conectado — lista de containers só na VM",
+        );
+    };
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert(
+        "label".to_owned(),
+        vec!["com.docker.compose.project".to_owned()],
+    );
+    let opts = ListContainersOptionsBuilder::new()
+        .all(true)
+        .filters(&filters)
+        .build();
+    let containers = match docker.list_containers(Some(opts)).await {
+        Ok(c) => c,
+        Err(e) => {
+            return erro(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("listando containers: {e}"),
+            );
+        }
+    };
+    let mut rows: Vec<ContainerRow> = containers
+        .iter()
+        .filter_map(|c| {
+            let labels = c.labels.as_ref()?;
+            let projeto = labels.get("com.docker.compose.project")?;
+            projeto.starts_with("flux-").then(|| ContainerRow {
+                compose_project: projeto.clone(),
+                service: labels
+                    .get("com.docker.compose.service")
+                    .cloned()
+                    .unwrap_or_default(),
+                container: c
+                    .names
+                    .as_ref()
+                    .and_then(|ns| ns.first().map(|n| n.trim_start_matches('/').to_owned()))
+                    .unwrap_or_default(),
+                state: c
+                    .state
+                    .map(|st| st.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+                status: c.status.clone().unwrap_or_default(),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.compose_project.cmp(&b.compose_project));
+    Json(rows).into_response()
 }
 
 /// POST /projects/{name}/up (06, passo 5): valida o registro e DEVOLVE 202 —

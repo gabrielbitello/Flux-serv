@@ -179,6 +179,16 @@ pub struct LeaseOut {
 // Contrato pronto e testado contra o mock; entra no fluxo do `flux up`
 // completo na F7 (hoje o up não dispara migrate — o fluxd precisa do sync
 // de arquivos para o plano de migrations ser real).
+#[derive(Debug, Deserialize)]
+pub struct ContainerRowOut {
+    pub compose_project: String,
+    pub service: String,
+    #[allow(dead_code)] // espelho do corpo da API — tabela do ps usa projeto/service
+    pub container: String,
+    pub state: String,
+    pub status: String,
+}
+
 #[derive(Debug, Serialize)]
 struct UpIn<'a> {
     env: Option<&'a str>,
@@ -388,6 +398,12 @@ impl ApiClient {
         let r = self
             .call("POST", &format!("/projects/{name}/lease"), Some(corpo))
             .await?;
+        self.json_out(r)
+    }
+
+    /// GET /containers (o "docker ps" do Flux): todos os gerenciados.
+    pub async fn containers(&self) -> Result<Vec<ContainerRowOut>, ApiError> {
+        let r = self.call("GET", "/containers", None).await?;
         self.json_out(r)
     }
 
