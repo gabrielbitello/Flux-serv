@@ -648,7 +648,7 @@ fn layout(title: &str, body: &str, auto_refresh: bool) -> String {
 <div class="wrap">
 <header class="top">
 <h1>Flux · painel</h1>
-<nav><a href="/">Dashboard</a><a href="/events">Eventos</a><a href="/observe">Monitor</a></nav>
+<nav><a href="/">Dashboard</a><a href="/events">Eventos</a><a href="/observe">Monitor</a><a href="http://192.168.140.2:8081/" title="Gerenciador de banco — LAN-only (05)">Adminer</a></nav>
 <form method="post" action="/logout" style="margin-left:auto">
 <button type="submit" style="background:var(--idlebg);color:var(--text);
 border:1px solid var(--line);border-radius:6px;padding:.2rem .7rem;cursor:pointer">Sair</button>

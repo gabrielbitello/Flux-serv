@@ -52,6 +52,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/projects/{name}/lease", post(grant_lease))
         .route("/projects/{name}/schema", post(run_schema))
         .route("/projects/{name}/up", post(subir))
+        .route("/projects/{name}/switch", post(trocar))
         // Ciclo de dev (06): handlers em ciclo.rs — rotas aqui, na frente
         // do fallback de fase futura (501).
         .route("/projects/{name}/down", post(ciclo::down))
@@ -591,6 +592,51 @@ async fn run_schema(
     {
         Ok(o) => Json(SchemaReply::from(o)).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// POST /projects/{name}/switch (10/R12): troca de versão invisível —
+/// aponta a cor ativa (blue|green) e drena a velha com grace. Cor nova tem
+/// que já estar no ar (o deploy sobe a inativa antes).
+#[derive(Deserialize, Default)]
+struct SwitchBody {
+    color: Option<String>,
+    drain_secs: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct SwitchOut {
+    project: String,
+    cor_nova: String,
+    cor_velha: Option<String>,
+    drenada: bool,
+}
+
+async fn trocar(
+    State(app): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    body: Option<Json<SwitchBody>>,
+) -> Response {
+    let corpo = body.map(|Json(b)| b).unwrap_or_default();
+    let color = corpo.color.unwrap_or_else(|| "blue".to_owned());
+    let drain = corpo
+        .drain_secs
+        .unwrap_or(crate::compose::DRAIN_PADRAO_SECS);
+    if drain > 300 {
+        return erro(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("drain_secs {drain} acima do teto da 10 (300 s)"),
+        );
+    }
+    match crate::compose::trocar_cor(app, &name, &color, drain).await {
+        Ok((velha, drenada)) => Json(SwitchOut {
+            project: name,
+            cor_nova: color,
+            cor_velha: velha,
+            drenada,
+        })
+        .into_response(),
+        Err(e) => erro(StatusCode::CONFLICT, e),
     }
 }
 

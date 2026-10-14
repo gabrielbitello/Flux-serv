@@ -252,6 +252,31 @@ impl State {
         })
     }
 
+    /// Cor ativa do blue-green de prod (10): `blue|green`, `None` quando o
+    /// projeto não usa cores. A leitura guia proxy/wake/sleep na Prod.
+    pub fn active_color(&self, name: &str) -> Result<Option<String>, StateError> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT color FROM active_color WHERE project = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    /// Define a cor ativa (troca ATÔMICA do blue-green, 10).
+    pub fn set_active_color(&self, name: &str, color: &str) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO active_color(project, color) VALUES (?1, ?2)
+                 ON CONFLICT(project) DO UPDATE SET color = excluded.color",
+                params![name, color],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Conteúdo bruto do `flux.toml` registrado (o sweep de temporários
     /// re-parseia para saber TTL). `None` = projeto não registrado.
     pub fn project_toml(&self, name: &str) -> Result<Option<String>, StateError> {

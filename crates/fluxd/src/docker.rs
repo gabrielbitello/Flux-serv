@@ -147,12 +147,25 @@ impl<'a> DockerSource<'a> {
         }
     }
 
+    /// Compose project efetivo: em Prod com blue-green (10), a cor ativa do
+    /// SQLite decide (flux-{name}-prod-{cor}); sem cor, o base. Dev nunca
+    /// tem cor.
+    fn compose_project_cor(&self, name: &str, env: Env) -> String {
+        let base = compose_project(name, env);
+        if env == Env::Prod
+            && let Ok(Some(cor)) = self.sqlite.active_color(name)
+        {
+            return format!("{base}-{cor}");
+        }
+        base
+    }
+
     /// Garante acordado antes do proxy: pausado → `unpause` (< 1 s, invisível,
     /// matriz 03); parado → `start`. Best-effort — erro é logado, o forward
     /// segue e reavalia (upstream falho vira página de estado, nunca 502).
     /// Devolve `true` quando EXECUTOU uma transição para acordar.
     pub async fn ensure_awake(&self, name: &str, env: Env) -> bool {
-        let project = compose_project(name, env);
+        let project = self.compose_project_cor(name, env);
         let Some(c) = find_app_container(&self.docker, &project).await else {
             return false;
         };
@@ -182,7 +195,7 @@ impl<'a> DockerSource<'a> {
     /// `docker start` — o wake da página de espera (03) e do sleep manager (F4).
     /// Devolve `true` quando o container estava parado e foi acordado.
     pub async fn wake(&self, name: &str, env: Env) -> Result<bool, bollard::errors::Error> {
-        let project = compose_project(name, env);
+        let project = self.compose_project_cor(name, env);
         let mut acordou_algum = false;
         for c in containers_do_projeto(&self.docker, &project).await {
             let parado = c
@@ -201,7 +214,7 @@ impl<'a> DockerSource<'a> {
 
     /// `docker pause` — hibernação de prod (< 1 s, invisível, 11).
     pub async fn pause(&self, name: &str, env: Env) -> Result<(), bollard::errors::Error> {
-        let project = compose_project(name, env);
+        let project = self.compose_project_cor(name, env);
         if let Some(c) = find_app_container(&self.docker, &project).await {
             self.docker
                 .pause_container(c.id.as_deref().unwrap_or_default())
@@ -212,7 +225,7 @@ impl<'a> DockerSource<'a> {
 
     /// `docker unpause` — prod pausado volta no request original (03, matriz).
     pub async fn unpause(&self, name: &str, env: Env) -> Result<(), bollard::errors::Error> {
-        let project = compose_project(name, env);
+        let project = self.compose_project_cor(name, env);
         if let Some(c) = find_app_container(&self.docker, &project).await {
             self.docker
                 .unpause_container(c.id.as_deref().unwrap_or_default())
@@ -223,7 +236,7 @@ impl<'a> DockerSource<'a> {
 
     /// `docker stop` — sono de dev (04).
     pub async fn sleep(&self, name: &str, env: Env) -> Result<(), bollard::errors::Error> {
-        let project = compose_project(name, env);
+        let project = self.compose_project_cor(name, env);
         for c in containers_do_projeto(&self.docker, &project).await {
             let rodando = c.state.as_ref().is_some_and(|st| {
                 matches!(

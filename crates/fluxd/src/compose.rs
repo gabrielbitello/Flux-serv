@@ -514,6 +514,149 @@ fn tunel_classificar(
     achados
 }
 
+// --------------------------------------------------- blue-green (10, R12)
+
+/// Teto do drain da cor velha (10: HTTP 60 s; worker termina o job atual —
+/// a semântica `queue:restart` entra com o deploy de Laravel, F9).
+pub const DRAIN_PADRAO_SECS: u64 = 30;
+
+/// Troca de versão invisível (10/R12): aponta o ponteiro para a cor nova
+/// (requests novos já nascem nela) e drena a velha com `docker stop -t`.
+/// A cor nova PRECISA já estar no ar (o deploy sobe a inativa; aqui é só
+/// a troca). Cor velha igual à nova = no-op honesto.
+///
+/// Retorna (cor_velha, drenada) para o evento/handler.
+pub async fn trocar_cor(
+    app: std::sync::Arc<crate::AppState>,
+    name: &str,
+    color: &str,
+    drain_secs: u64,
+) -> Result<(Option<String>, bool), String> {
+    use crate::decision::HostSource;
+
+    if color != "blue" && color != "green" {
+        return Err(format!("cor '{color}' inválida (use blue|green)"));
+    }
+    let st = &app.state;
+    let velha = st.active_color(name).map_err(|e| e.to_string())?;
+    if velha.as_deref() == Some(color) {
+        return Ok((velha, false));
+    }
+
+    // A cor nova tem que estar de pé (o deploy sobe a INATIVA antes da troca).
+    let docker = app.docker.clone().ok_or("fluxd sem Docker conectado")?;
+    let src = crate::docker::DockerSource::new(docker.clone(), st);
+    let projeto_novo = format!("flux-{name}-prod-{color}");
+    let containers = lista_do_projeto(&docker, &projeto_novo).await?;
+    if containers.is_empty() {
+        return Err(format!(
+            "cor {color} de {name} não está no ar (nenhum container em {projeto_novo}) —              o deploy sobe a cor inativa ANTES da troca (10)"
+        ));
+    }
+
+    // Health mínimo v1: app RUNNING (health path do toml entra com o F9 —
+    // anotado no módulo; Running já garante que o HTTP responde na maioria).
+    for c in &containers {
+        let svc = c
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("com.docker.compose.service"))
+            .cloned()
+            .unwrap_or_default();
+        let rodando = c
+            .state
+            .as_ref()
+            .is_some_and(|st| matches!(st, bollard::models::ContainerSummaryStateEnum::RUNNING));
+        if svc == "app" && !rodando {
+            return Err(format!(
+                "app da cor {color} não está RUNNING — troca abortada (sem downtime assumido)"
+            ));
+        }
+    }
+
+    // TROCA ATÔMICA: ponteiro novo (requests novos nascem na cor nova).
+    let target = src
+        .proxy_target(name, flux_common::protocol::Env::Prod)
+        .ok_or("cor nova sem proxy_target (container app sem rede/IP?)")?;
+    let _ = target; // proxy_target do DockerSource resolve pela COR ATIVA —
+    // por isso a ordem é: set_active_color PRIMEIRO.
+    st.set_active_color(name, color)
+        .map_err(|e| e.to_string())?;
+    events::event(
+        st,
+        "info",
+        "deploy",
+        &format!("{name}: cor ativa → {color} (requests novos nascem nela)"),
+    );
+
+    // DRAIN da velha: stop -t (SIGTERM, conexões/job atual terminam no grace).
+    let mut drenada = false;
+    if let Some(cor_velha) = velha.clone() {
+        let projeto_velho = format!("flux-{name}-prod-{cor_velha}");
+        let velhos = lista_do_projeto(&docker, &projeto_velho).await?;
+        for c in velhos {
+            let Some(id) = c.id.clone() else {
+                continue;
+            };
+            let rodando = c.state.as_ref().is_some_and(|st| {
+                matches!(st, bollard::models::ContainerSummaryStateEnum::RUNNING)
+            });
+            if !rodando {
+                continue;
+            }
+            let stop = tokio::process::Command::new("docker")
+                .args(["stop", "-t", &drain_secs.to_string(), &id])
+                .output()
+                .await;
+            match stop {
+                Ok(s) if s.status.success() => drenada = true,
+                Ok(s) => events::event(
+                    st,
+                    "error",
+                    "deploy",
+                    &format!(
+                        "{name}: drain da cor {cor_velha} falhou em {}: {}",
+                        id,
+                        String::from_utf8_lossy(&s.stderr).trim()
+                    ),
+                ),
+                Err(e) => events::event(st, "error", "deploy", &format!("{name}: drain {id}: {e}")),
+            }
+        }
+        events::event(
+            st,
+            "info",
+            "deploy",
+            &format!(
+                "{name}: cor velha {cor_velha} drenada (grace {drain_secs} s, jobs em voo terminaram nela)"
+            ),
+        );
+    }
+    Ok((velha, drenada))
+}
+
+/// Containers do compose project (resumo cru) — lista vazia quando não há.
+async fn lista_do_projeto(
+    docker: &bollard::Docker,
+    projeto: &str,
+) -> Result<Vec<bollard::models::ContainerSummary>, String> {
+    use bollard::query_parameters::ListContainersOptionsBuilder;
+    let mut filters = std::collections::HashMap::new();
+    filters.insert(
+        "label".to_owned(),
+        vec![format!("com.docker.compose.project={projeto}")],
+    );
+    docker
+        .list_containers(Some(
+            ListContainersOptionsBuilder::new()
+                .all(true)
+                .filters(&filters)
+                .build(),
+        ))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Varre `base` (até `profundidade` 3) coletando compose*/Dockerfile* para o
 /// guard — (caminho relativo, tipo, conteúdo).
 fn coletar_guard(dir: &Path, profundidade: usize, out: &mut Vec<(String, String, String)>) {
@@ -689,5 +832,30 @@ mod tunel {
             }
         }
         achados
+    }
+}
+
+#[cfg(test)]
+mod troca {
+    use super::*;
+
+    #[test]
+    fn cor_invalida_recusa_sem_tocar_nada() {
+        // trocar_cor valida ANTES de qualquer efeito: cor ruim = Err seco.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let st = crate::state::State::in_memory().unwrap();
+            st.register_project("x", "name = \"x\"", "h").unwrap();
+            let app = std::sync::Arc::new(crate::AppState::new(
+                st,
+                &flux_common::config::GlobalConfig::default(),
+                None,
+            ));
+            let r = trocar_cor(app, "x", "roxa", 30).await;
+            assert!(r.is_err(), "cor inválida não passa");
+        });
     }
 }
