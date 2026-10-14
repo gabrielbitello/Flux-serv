@@ -317,6 +317,7 @@ async fn main() {
         Cmd::Sync { .. } => stub("fase F2 (spec 02) — sync contínua via mutagen"),
         Cmd::Env { .. } => stub("fase F2/F12 (specs 02/09) — .env exclusivo da VM"),
         Cmd::Vm { cmd } => match cmd {
+            VmCmd::Ssh => vm_ssh(),
             VmCmd::Upgrade => stub("fase F16 (spec 14) — upgrade do fluxd com rollback"),
             _ => stub("fase F1 (spec 01) — VM Hyper-V Bookworm"),
         },
@@ -432,6 +433,21 @@ fn token_novo() -> String {
 /// `flux token generate` (09, estilo key:generate): token novo → sha256
 /// gravado no SQLite do fluxd via SSH (`settings.api_token_hash`) + valor
 /// claro no config do usuário. O config SÓ é escrito DEPOIS do hash na VM
+/// `flux vm ssh` — shell interativo na VM com a chave certa: a entrada
+/// `192.168.140.2` do `~/.ssh/config` carrega user `flux` + IdentityFile
+/// (09 — a chave do Flux nunca vai para outra máquina). Herda o console e
+/// repassa o exit code do ssh.
+fn vm_ssh() -> ! {
+    let status = std::process::Command::new("ssh")
+        .arg(tunel::VM_HOST)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("erro: não consegui lançar o ssh (OpenSSH no PATH?): {e}");
+            std::process::exit(127);
+        });
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 /// dar certo — falha no meio nunca deixa CLI com token que o fluxd não
 /// conhece. Token antigo morre na hora (revogar = gerar outro).
 fn token_generate() {
