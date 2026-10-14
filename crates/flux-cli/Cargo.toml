@@ -17,7 +17,12 @@ hyper-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# `flux token generate` — CSPRNG do SO para o token da API de controle (09).
+getrandom = { workspace = true }
 tokio = { workspace = true }
+# Config global do usuário (09, %USERPROFILE%\.flux\config.toml).
+toml = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
+tempfile = { workspace = true }

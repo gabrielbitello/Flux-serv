@@ -11,6 +11,8 @@ mod api;
 // `flux up`/`flux sync` consome daqui quando a fase CLI da F2 ligar; o
 // módulo carrega `#![allow(dead_code)]` justificado até esse consumo existir.
 mod sync;
+// Túnel SSH p/ a API de controle + config global do usuário (spec 09).
+mod tunel;
 
 use std::path::PathBuf;
 
@@ -156,6 +158,11 @@ enum Cmd {
         #[arg(value_parser = ["host", "vm", "tunnel", "uptime"])]
         target: String,
     },
+    /// Token da API de controle (09): gera, grava hash na VM e valor no config.
+    Token {
+        #[command(subcommand)]
+        sub: TokenCmd,
+    },
     /// Saúde do cloudflared (03).
     Tunnel {
         #[command(subcommand)]
@@ -174,6 +181,13 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ProdCmd {
     Rollback { name: String },
+}
+
+#[derive(Subcommand)]
+enum TokenCmd {
+    /// Gera token novo (CSPRNG 32 bytes), grava o sha256 no SQLite do fluxd
+    /// via SSH e o valor claro no config do usuário — estilo key:generate.
+    Generate,
 }
 
 #[derive(Subcommand)]

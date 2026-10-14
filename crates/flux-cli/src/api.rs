@@ -209,16 +209,28 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    /// `FLUX_API_URL` (default 127.0.0.1:7420) + `FLUX_API_TOKEN` (09: token
-    /// vive em env/arquivo do usuário, nunca em config versionado).
+    /// `FLUX_API_URL`/config do usuário (09) + `FLUX_API_TOKEN`. Com a URL
+    /// DEFAULT (127.0.0.1:7420), garante o túnel SSH antes da primeira
+    /// chamada — a API nunca sai do localhost da VM (09), então o CLI sobe
+    /// `ssh -L` sob demanda (09: "base_url via forward SSH pelo CLI").
     pub fn from_env() -> Self {
-        let base = std::env::var("FLUX_API_URL")
+        let env_url = std::env::var("FLUX_API_URL")
             .ok()
-            .filter(|s| !s.trim().is_empty())
+            .filter(|s| !s.trim().is_empty());
+        let cfg = crate::tunel::config_do_usuario();
+        let base = env_url
+            .clone()
+            .or_else(|| cfg.base_url.clone())
             .unwrap_or_else(|| DEFAULT_API_URL.to_owned());
         let token = std::env::var("FLUX_API_TOKEN")
             .ok()
-            .filter(|t| !t.is_empty());
+            .filter(|t| !t.is_empty())
+            .or(cfg.token);
+        let is_default = env_url.is_none() && base == DEFAULT_API_URL;
+        if let Err(e) = crate::tunel::garantir_forward(is_default) {
+            // AVISO, não fatal: o erro real (com causa) vem do call() abaixo.
+            eprintln!("aviso: túnel SSH para a API: {e}");
+        }
         Self::new(base, token)
     }
 
