@@ -53,6 +53,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/projects/{name}/schema", post(run_schema))
         .route("/projects/{name}/up", post(subir))
         .route("/projects/{name}/switch", post(trocar))
+        .route("/projects/{name}/fresh", post(fresh_forcado))
         // Ciclo de dev (06): handlers em ciclo.rs — rotas aqui, na frente
         // do fallback de fase futura (501).
         .route("/projects/{name}/down", post(ciclo::down))
@@ -637,6 +638,45 @@ async fn trocar(
         })
         .into_response(),
         Err(e) => erro(StatusCode::CONFLICT, e),
+    }
+}
+
+/// POST /projects/{name}/fresh — RECONSTRUÇÃO forçada de dev por comando
+/// (pedido do Gabriel): `migrate:fresh --force [--seed]` + trilha zerada.
+/// DESTRUTIVO (apaga dados de dev) — a confirmação é o `--yes` do CLI.
+/// PROD NUNCA: 403 incondicional (05).
+#[derive(Deserialize, Default)]
+struct FreshBody {
+    env: Option<String>,
+    seed: Option<bool>,
+}
+
+async fn fresh_forcado(
+    State(app): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    body: Option<Json<FreshBody>>,
+) -> Response {
+    let corpo = body.map(|Json(b)| b).unwrap_or_default();
+    let env = corpo.env.unwrap_or_else(|| "dev".to_owned());
+    if env != "dev" {
+        return erro(
+            StatusCode::FORBIDDEN,
+            "fresh forçado é EXCLUSIVO de dev — prod nunca é reconstruído (05)",
+        );
+    }
+    let Some(docker) = app.docker.clone() else {
+        return erro(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fluxd sem Docker conectado — fresh só roda na VM",
+        );
+    };
+    let toml_src = match toml_gravado(&app, &name) {
+        Ok(t) => t,
+        Err(r) => return *r,
+    };
+    match db::fresh_dev_forcado(&docker, &app.state, &name, &toml_src, corpo.seed).await {
+        Ok(output) => (StatusCode::OK, output).into_response(),
+        Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

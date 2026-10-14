@@ -240,6 +240,15 @@ enum DbCmd {
         env: String,
     },
     Fresh {
+        /// Força a reconstrução (mata os dados de dev) — sem isso, recusa.
+        #[arg(long)]
+        yes: bool,
+        /// Liga a seed depois do fresh (precedência sobre o flux.toml).
+        #[arg(long, conflicts_with = "no_seed")]
+        seed: bool,
+        /// Desliga a seed (precedência sobre o flux.toml).
+        #[arg(long, conflicts_with = "seed")]
+        no_seed: bool,
         #[arg(default_value = "dev")]
         env: String,
     },
@@ -356,6 +365,30 @@ async fn main() {
         Cmd::Shield { .. } => stub("fase F19 (spec 16) — WAF próprio, shadow antes de enforce"),
         Cmd::Project { .. } => stub("fase F9 (specs 09/10) — token de deploy por projeto"),
         Cmd::Db { cmd } => match cmd {
+            DbCmd::Fresh {
+                yes,
+                seed,
+                no_seed,
+                env,
+            } => {
+                if !yes {
+                    eprintln!(
+                        "erro: fresh APAGA os dados de dev (migrate:fresh) — repasse --yes para confirmar"
+                    );
+                    std::process::exit(2);
+                }
+                db_fresh(
+                    &env,
+                    if seed {
+                        Some(true)
+                    } else if no_seed {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                )
+                .await;
+            }
             DbCmd::Restore { yes, .. } => {
                 if !yes {
                     eprintln!(
@@ -935,6 +968,40 @@ async fn ciclo_api(acao: &str, env: &str) {
 /// renova até o comando acabar e o lease morre sozinho no TTL depois). Sem
 /// -f: GET devolve text/plain cru. Com -f: consome o stream SSE do fluxd
 /// frame a frame até término limpo (fluxd corta; Ctrl+C mata o processo).
+/// `flux db fresh [env] --yes [--seed/--no-seed]` — reconstrução forçada de
+/// dev (pedido do Gabriel): POST /projects/{name}/fresh; prod é recusado no
+/// fluxd (05) e o env argumento nem chega lá com outro valor (parse_env).
+async fn db_fresh(env: &str, seed: Option<bool>) {
+    let _ = parse_env(env);
+    let ctx = contexto_atual();
+    let cliente = ApiClient::from_env();
+    let corpo = serde_json::to_string(&api::FreshIn {
+        env: env.to_owned(),
+        seed,
+    })
+    .map_err(|e| api::ApiError::Protocolo {
+        msg: format!("serializando fresh: {e}"),
+    })
+    .unwrap_or_default();
+    match cliente
+        .call_raw(
+            "POST",
+            &format!("/projects/{}/fresh", ctx.name),
+            Some(corpo),
+        )
+        .await
+    {
+        Ok(saida) => {
+            println!("fresh {}/dev: reconstruído (dados apagados)", ctx.name);
+            let cauda: Vec<&str> = saida.lines().rev().take(6).collect();
+            for linha in cauda.iter().rev() {
+                println!("  {linha}");
+            }
+        }
+        Err(e) => falhar(e),
+    }
+}
+
 async fn logs(
     follow: bool,
     since: Option<String>,

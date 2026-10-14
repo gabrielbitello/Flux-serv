@@ -194,6 +194,12 @@ pub struct ContainerRowOut {
 }
 
 #[derive(Debug, Serialize)]
+pub struct FreshIn {
+    pub env: String,
+    pub seed: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
 struct UpIn<'a> {
     env: Option<&'a str>,
 }

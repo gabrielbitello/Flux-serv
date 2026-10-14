@@ -405,3 +405,48 @@ mod tests {
         );
     }
 }
+
+/// Fresh FORÇADO de dev por comando (`flux db fresh`, pedido do Gabriel
+/// 14/10): reconstrói o schema MESMO sem migration mutada, com seed
+/// controlável (mesma precedência da pipeline). PROD NUNCA: bloqueio
+/// incondicional antes de qualquer efeito (05). Framework não-laravel =
+/// erro honesto (não há `fresh` genérico fora do artisan).
+pub async fn fresh_dev_forcado(
+    docker: &Docker,
+    st: &State,
+    name: &str,
+    toml_src: &str,
+    seed: Option<bool>,
+) -> Result<String, String> {
+    let toml = ProjectToml::parse_str(toml_src)
+        .map_err(|e| format!("flux.toml de {name} inválido: {e}"))?;
+    if toml.framework() != flux_common::framework::Framework::Laravel {
+        return Err(format!(
+            "{name}: fresh forçado só existe para laravel (framework atual: {}). \
+             Para node/rust, use o migrate_cmd do projeto.",
+            toml.framework()
+        ));
+    }
+    let seed_ligado = resolver_seed(seed, toml.db.as_ref().and_then(|d| d.seed_on_rebuild));
+    let cmd = if seed_ligado {
+        "php artisan migrate:fresh --force --seed"
+    } else {
+        "php artisan migrate:fresh --force"
+    };
+    let (output, code) = exec_in_container(docker, name, Env::Dev, cmd).await?;
+    if code != 0 {
+        return Err(format!("{name}/dev: {cmd} falhou (exit {code}): {output}"));
+    }
+    // Fresh apagou TODAS as tabelas — a trilha de migrations aplicadas também.
+    st.clear_migrations(name, Env::Dev)
+        .map_err(|e| e.to_string())?;
+    events::event(
+        st,
+        "warn",
+        "db",
+        &format!(
+            "{name}/dev: RECONSTRUÍDO por comando ({cmd}) — dados de dev apagados, seed={seed_ligado}"
+        ),
+    );
+    Ok(output)
+}
