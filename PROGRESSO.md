@@ -59,6 +59,20 @@ pela internet); hash da senha do painel (`printf '%s' 'SUA-SENHA' | argon2
 "$(openssl rand -hex 16)" -id -e > /srv/flux/secrets/panel.argon2` dentro da
 VM); F13 porteiro central (`fluxhost :8443`) na frente do cloudflared.
 
+**CLI no PATH com túnel automático (ainda 14/10, commit `e5203a3`)**:
+`flux.exe` release em `%USERPROFILE%\.flux\bin` (dir no PATH de usuário —
+mesmo lugar de mutagen/cloudflared). `tunel.rs`: a `:7420` é 127.0.0.1-only
+na VM (09), então o CLI sobe `ssh -N -L` SOB DEMANDA — probe TCP, processo
+desapegado com CREATE_NO_WINDOW, idempotente. Dois achados reais: (1) SEM
+`-f` — o OpenSSH do Windows (System32) não faz fork como o do Git Bash;
+(2) regra NAT órfã `healthz` (host 7420 → VM 7420) da sessão anterior fazia
+o probe ver porta "aberta" e o request morrer no NAT (fluxd não escuta na
+interface) — deletada via `controlvm natpf1 delete`. Config global criado em
+`%USERPROFILE%\.flux\config.toml` (token dev). Provado dos dois mundos:
+PowerShell (ssh.exe System32) e Git Bash (MSYS ssh) → `flux status`
+atravessa o túnel e responde honesto ("projeto não registrado — rode flux
+up; registrados: teste").
+
 ## 13/10/2026 (parte 6) — FLUXD OPERACIONAL NA VM: router ponta a ponta provado
 
 **Intenção**: pós-reboot do host (HVCI off + WSL/Docker desinstalados), subir a

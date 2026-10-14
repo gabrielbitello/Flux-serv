@@ -35,7 +35,7 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | R5 | Sync Windows↔VM (mutagen) | **PARCIAL** — binário 0.18.1 + agent bundle instalados, sessão real provada (374 ms, aceite < 5 s); falta primeiro projeto real via `flux sync` |
 | R6 | Banco único + migrations + guard | **PARCIAL** — guard de imagens completo + runner via docker exec testado; ciclo do `flux up` e `flux-db` real na F5/F6 |
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
-| R8 | `flux up/logs/exec/down` no Windows | **PARCIAL** — ciclo dev real via API `:7420` com lease de sono; precisa fluxd rodando (VM) |
+| R8 | `flux up/logs/exec/down` no Windows | **PARCIAL** — ciclo dev real via API com lease + FORWARD SSH AUTOMÁTICO (`tunel.rs`: probe + `ssh -N -L` desapegado, config global `%USERPROFILE%\.flux\config.toml`); `flux.exe` no PATH do usuário; provado do PowerShell e Git Bash |
 | R9 | Painel web | **PARCIAL** — dashboard/detalhe/eventos/SVG server-side + AUTH REAL (Argon2id, sessão 12 h, rate limit 5/min, guard) montado no router público; falta SSE de logs e abas de projeto (banco/sync/domínios/deploys) |
 | R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
@@ -71,7 +71,9 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
   apontava pro tunnel velho — dashboard não cria DNS de wildcard, apontado à
   mão pro tunnel novo `c0a19fdd…`). Prova da internet: `zzz.bitello.xyz` →
   404 brandiado (99 ms), `flux.bitello.xyz` → 303 guard + login render +
-  robots Disallow, TLS real válido. **F7 FECHADO.**
+  robots Disallow, TLS real válido. **F7 FECHADO.** CLI `flux.exe` no PATH
+  com FORWARD SSH automático (regra NAT órfã `healthz` 7420 enganava o probe
+  — deletada). Commit `e5203a3`.
 - **14/10/2026** — F7: auth real do painel (Argon2id + sessão + rate limit,
   painel montado no router público, binds 127.0.0.1), Caddy estático com
   `default_sni` provado por TLS do host, mutagen 0.18.1 real (sessão a
