@@ -25,6 +25,22 @@ background em andamento. Arquivos de prod são imutáveis e servidos no perfil
 - Repos privados: `flux repo add {url}` grava deploy key/token de leitura na VM.
   A VM faz `git fetch`; a action não manda código, manda **intenção**.
 
+### Domínio e túnel no deploy — descoberta com fallback (pedido do Gabriel, 14/10)
+
+O deploy NUNCA bloqueia por túnel. A descoberta do domínio público é assim:
+
+1. Candidato: `{name}.bitello.xyz` (derivado do nome — o que o Flux daria
+   de qualquer jeito).
+2. Túnel do host vivo E nome disponível (sem outro projeto dono)?
+   **Assume** — esse é o domínio público dele, público de verdade.
+3. Não achou/indisponível? **Ignora e segue**: sobe pelo caminho padrão do
+   Flux (Caddy → fluxd → container), respondendo em
+   `{name}.bitello.xyz` pela cadeia normal. Sem deadlock, sem abortar.
+
+Túnel/cloudflared no compose do projeto: guard por camada da 05 — no
+service principal (`app`) = NADA sobe; em secundário = sobe tudo menos ele.
+Nunca connector de projeto disputando com o do host (03/12).
+
 ### Pipeline do deploy (roda no `fluxd`, passo a passo)
 
 1. **Fetch**: `git fetch origin` no clone de prod; checkout do SHA em worktree
