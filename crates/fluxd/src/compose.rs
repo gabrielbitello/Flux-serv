@@ -14,6 +14,52 @@
 //! --services`) — sem parse de YAML aqui (zero dep nova; o engine é a
 //! verdade).
 
+/// Escolhe o arquivo de compose a passar com `-f`: o da raiz quando tem
+/// `services:` de verdade; se a raiz é só um `include:`, usa o alvo em
+/// `docker/`. Motivo: o include do compose resolve caminhos relativos ao
+/// DIRETÓRIO CORRENTE (não ao arquivo incluído) — `./serve` do include
+/// viraria `{raiz}/serve`, que não existe.
+pub fn escolher_compose(dir: &Path) -> Option<PathBuf> {
+    for nome in [
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yaml",
+        "docker-compose.yml",
+    ] {
+        let raiz = dir.join(nome);
+        if raiz.is_file() {
+            let so_include = std::fs::read_to_string(&raiz)
+                .map(|c| {
+                    c.lines()
+                        .filter(|l| {
+                            let l = l.trim();
+                            !l.is_empty() && !l.starts_with('#')
+                        })
+                        .all(|l| l.starts_with("include:") || l.starts_with('-'))
+                })
+                .unwrap_or(false);
+            if !so_include {
+                return Some(raiz);
+            }
+            for sub in ["docker", "deploy"] {
+                for sub_nome in [
+                    "compose.yaml",
+                    "compose.yml",
+                    "docker-compose.yaml",
+                    "docker-compose.yml",
+                ] {
+                    let alvo = dir.join(sub).join(sub_nome);
+                    if alvo.is_file() {
+                        return Some(alvo);
+                    }
+                }
+            }
+            return Some(raiz);
+        }
+    }
+    None
+}
+
 use std::path::{Path, PathBuf};
 
 use crate::events;
@@ -36,9 +82,12 @@ pub fn override_yaml(services: &[String], env: &str) -> String {
 
 /// Roda `docker compose config --services` no diretório do projeto
 /// (compose acha o arquivo raiz sozinho — includes respeitados).
-pub async fn services_do(dir: &Path, projeto: &str) -> Result<Vec<String>, String> {
+pub async fn services_do(dir: &Path, compose: &Path, projeto: &str) -> Result<Vec<String>, String> {
     let saida = tokio::process::Command::new("docker")
-        .args(["compose", "-p", projeto, "config", "--services"])
+        .args(["compose", "-p", projeto])
+        .arg("-f")
+        .arg(compose)
+        .args(["config", "--services"])
         .current_dir(dir)
         .output()
         .await
@@ -149,7 +198,16 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         return;
     }
 
-    let services = match services_do(&dir, &projeto).await {
+    let Some(compose_file) = escolher_compose(&dir) else {
+        events::event(
+            st,
+            "error",
+            "up",
+            &format!("{projeto}: nenhum compose na pasta do projeto"),
+        );
+        return;
+    };
+    let services = match services_do(&dir, &compose_file, &projeto).await {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
             events::event(
@@ -201,16 +259,12 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         ),
     );
     let saida = tokio::process::Command::new("docker")
-        .args([
-            "compose",
-            "-p",
-            &projeto,
-            "-f",
-            override_path.to_str().unwrap_or_default(),
-            "up",
-            "-d",
-            "--build",
-        ])
+        .args(["compose", "-p", &projeto])
+        .arg("-f")
+        .arg(&compose_file)
+        .arg("-f")
+        .arg(&override_path)
+        .args(["up", "-d", "--build"])
         .current_dir(&dir)
         .output()
         .await;
@@ -321,5 +375,47 @@ mod tests {
         assert!(y.contains("external: true"), "flux-net é a rede do flux-db");
         // Nada publicado = portscan da 09 continua só 22/80/443.
         assert!(!y.contains("ports:\n    -"));
+    }
+}
+
+#[cfg(test)]
+mod escolha {
+    use super::*;
+
+    #[test]
+    fn raiz_com_services_vence_e_include_vai_pro_docker() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("docker-compose.yml"),
+            "services:\n  app:\n    image: nginx\n",
+        )
+        .unwrap();
+        let r = escolher_compose(tmp.path()).unwrap();
+        assert!(r.ends_with("docker-compose.yml"), "{r:?}");
+        assert_eq!(r.parent().unwrap(), tmp.path(), "raiz direta");
+
+        // Raiz só-include: o alvo real mora em docker/ (presente-digital/DJM).
+        std::fs::create_dir_all(tmp.path().join("docker")).unwrap();
+        std::fs::write(
+            tmp.path().join("docker-compose.yml"),
+            "include:\n  - docker/docker-compose.yml\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("docker").join("docker-compose.yml"),
+            "services:\n  app:\n    build: ./serve\n",
+        )
+        .unwrap();
+        let r2 = escolher_compose(tmp.path()).unwrap();
+        assert!(
+            r2.ends_with(std::path::Path::new("docker/docker-compose.yml")),
+            "{r2:?}"
+        );
+    }
+
+    #[test]
+    fn sem_compose_nada_escolhido() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(escolher_compose(tmp.path()).is_none());
     }
 }
