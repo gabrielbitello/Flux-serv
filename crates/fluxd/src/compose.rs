@@ -35,7 +35,10 @@ pub fn escolher_compose(dir: &Path) -> Option<PathBuf> {
                             let l = l.trim();
                             !l.is_empty() && !l.starts_with('#')
                         })
-                        .all(|l| l.starts_with("include:") || l.starts_with('-'))
+                        .all(|l| {
+                            let l = l.trim();
+                            l.starts_with("include:") || l.starts_with('-')
+                        })
                 })
                 .unwrap_or(false);
             if !so_include {
