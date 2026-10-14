@@ -171,17 +171,19 @@ fn from_state(name: &str, env: Env, wants_json: bool, src: &dyn HostSource) -> A
             }
         },
         ContainerState::Sleeping | ContainerState::Starting => match (env, wants_json) {
+            // API parada/acordando: 503 JSON + Retry-After, nunca HTML (12).
             (_, true) => Action::ApiWaking {
                 retry_after: API_RETRY_AFTER,
             },
-            (Env::Dev, false) => Action::Wait {
+            // BROWSER: página de espera 200 em dev E em prod — a tabela da
+            // 12 é explícita ("Parado: Navegador = página de espera 200,
+            // Cliente de API = 503 JSON") e a 03 completa ("Container
+            // subindo → 200") sem distinguir ambiente. 503 é SÓ pra quem
+            // fala JSON; página de espera nunca é "200 falso" porque ela
+            // diz "acordando" e se auto-atualiza (03).
+            (_, false) => Action::Wait {
                 name: name.to_owned(),
                 phase: WaitPhase::Waking,
-            },
-            // Prod parado (não pausado) NUNCA devolve 200 falso para API nem
-            // página de espera: 503 JSON + Retry-After, fila prioritária (12).
-            (Env::Prod, false) => Action::ApiWaking {
-                retry_after: API_RETRY_AFTER,
             },
         },
         ContainerState::Failed => failed(name, wants_json),
@@ -324,17 +326,24 @@ mod tests {
     }
 
     #[test]
-    fn matriz_prod_parado_nunca_200_falso() {
+    fn matriz_prod_parado_browser_espera_api_503() {
         let m = Mock::default().st("vipers", Env::Prod, ContainerState::Sleeping);
-        for json in [false, true] {
-            assert_eq!(
-                m.decide("vipers.bitello.xyz", "/", json),
-                Action::ApiWaking {
-                    retry_after: API_RETRY_AFTER
-                },
-                "json={json}"
-            );
-        }
+        // Browser em prod parado = página de espera 200 (tabela da 12:
+        // "Navegador = página de espera 200; Cliente de API = 503 JSON").
+        assert_eq!(
+            m.decide("vipers.bitello.xyz", "/", false),
+            Action::Wait {
+                name: "vipers".into(),
+                phase: WaitPhase::Waking,
+            }
+        );
+        // Cliente de API = 503 JSON + Retry-After (nunca HTML, nunca 200 falso).
+        assert_eq!(
+            m.decide("vipers.bitello.xyz", "/", true),
+            Action::ApiWaking {
+                retry_after: API_RETRY_AFTER
+            }
+        );
     }
 
     #[test]
@@ -434,7 +443,10 @@ mod tests {
         assert!(
             matches!(
                 a,
-                Action::Proxy { .. } | Action::ApiWaking { .. } | Action::NotFound
+                Action::Proxy { .. }
+                    | Action::ApiWaking { .. }
+                    | Action::NotFound
+                    | Action::Wait { .. }
             ),
             "sem flag, robots passa pelo fluxo normal: {a:?}"
         );
