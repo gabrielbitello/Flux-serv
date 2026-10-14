@@ -384,13 +384,22 @@ fn run(bin: &str, args: &[String]) -> Result<String, SyncError> {
 /// ("Created session <identifier>", `cmd/mutagen/sync/create.go`). Público
 /// porque o CLI também usa para exibir o id em modo verboso.
 pub fn parse_created_id(saida: &str) -> Result<String, SyncError> {
+    // A saída do mutagen vem com texto de progresso ANTES da confirmação
+    // ("Creating session… Connecting to agent… Created session sync_X") —
+    // procura a marca em qualquer posição, não no prefixo.
+    let marca = "Created session ";
     saida
-        .strip_prefix("Created session ")
-        .map(|id| id.trim().to_owned())
-        .filter(|id| !id.is_empty())
+        .find(marca)
+        .and_then(|pos| {
+            saida[pos + marca.len()..]
+                .split_whitespace()
+                .next()
+                .map(ToOwned::to_owned)
+        })
+        .filter(|id| id.starts_with("sync_") && !id.is_empty())
         .ok_or_else(|| SyncError::Saida {
             cmd: "mutagen sync create".into(),
-            motivo: format!("esperava `Created session <id>`, veio `{saida}`"),
+            motivo: format!("esperava `Created session sync_<id>`, veio `{saida}`"),
         })
 }
 
