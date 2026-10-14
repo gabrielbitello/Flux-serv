@@ -108,6 +108,20 @@ segurança do compose — bloqueadas com erro explícito, liberáveis só com
 
 `--ack {motivo}` grava quem, quando, qual chave e por quê — nunca silencioso.
 
+### Túnel do projeto (cloudflared) — regra por camada (pedido do Gabriel, 14/10)
+
+O túnel é ÚNICO, no host (03/12). Projeto com connector próprio no compose
+recebe tratamento POR CAMADA, classificado via `docker compose config` (JSON
+do engine — sem parse de YAML):
+
+| Túnel/cloudflared onde | Efeito |
+|---|---|
+| Service **principal** (`app`) | **erro — NADA sobe** (o projeto inteiro é um connector: conflito direto com o do host) |
+| Service **secundário** (sidecar, a própria imagem cloudflared) | sobe o resto; **só ele fica de fora** (`--scale {svc}=0`) + aviso no painel |
+
+Regra vale para dev E prod (o caminho de compose é o mesmo). Banco próprio
+continua bloqueando TUDO (sem camada).
+
 ### Pipeline de migrations
 
 Estado por projeto+ambiente no SQLite do `fluxd` (tabela `migration_state`):
