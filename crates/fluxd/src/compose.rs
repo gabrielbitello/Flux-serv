@@ -79,14 +79,27 @@ use crate::events;
 /// vivos ganham `depends_on: !reset null` — dependência de removido morre
 /// junto (pedido do Gabriel: "algo automático que sempre desliga o
 /// depends_on"). A base SEMPRE é a do projeto; o flux só muta isso.
-pub fn override_yaml(services: &[String], env: &str, stripped: &[String]) -> String {
+///
+/// `publicar_vite`: com live server declarado (`[dev] live`), publica a
+/// porta do dev server no host — o hostname `vite-{dev}` do túnel aponta pra
+/// cá (06/live; o fluxd roteia o host pro mesmo container, porta 5173).
+pub fn override_yaml(
+    services: &[String],
+    env: &str,
+    stripped: &[String],
+    publicar_vite: bool,
+) -> String {
     let mut y = String::from("services:\n");
     for svc in stripped {
         y.push_str(&format!("  {svc}: !reset null\n"));
     }
     for svc in services {
         y.push_str(&format!("  {svc}:\n"));
-        y.push_str("    ports: !reset null\n");
+        if publicar_vite {
+            y.push_str("    ports:\n      - \"5173:5173\"\n");
+        } else {
+            y.push_str("    ports: !reset null\n");
+        }
         y.push_str("    depends_on: !reset null\n");
         y.push_str("    restart: \"no\"\n");
         y.push_str("    labels:\n      flux.managed: \"true\"\n");
@@ -371,7 +384,21 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             return;
         }
     };
-    if let Err(e) = std::fs::write(&override_path, override_yaml(&services, &env, &strip)) {
+    // Porta do dev server publicada só quando há live server (`[dev] live`,
+    // 06/live): o hostname `vite-{dev}` do túnel aponta pra cá.
+    let publicar_vite = st
+        .project_toml(&name)
+        .ok()
+        .flatten()
+        .and_then(|t| flux_common::config::ProjectToml::parse_str(&t).ok())
+        .and_then(|t| t.dev)
+        .and_then(|d| d.live)
+        .map(|l| !l.trim().is_empty())
+        .unwrap_or(false);
+    if let Err(e) = std::fs::write(
+        &override_path,
+        override_yaml(&services, &env, &strip, publicar_vite),
+    ) {
         events::event(
             st,
             "error",
@@ -498,10 +525,17 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
 }
 
 /// Monta os argumentos do live server: `docker compose -p {projeto} exec -d
-/// {service} sh -c "{live}"`. Pura, para o teste cobrir a montagem sem engine
-/// (o `-d` solta o processo: exit 0 = "iniciado", não "saudável"). O workdir
-/// é o do SERVICE (working_dir declarado ou WORKDIR da imagem) — o flux não
-/// chumba caminho: cada projeto tem o seu (/var/www, /app, ...).
+/// {service} sh -c "{live}; rc=$?; rm -f public/hot; exit $rc"`. Pura, para o
+/// teste cobrir a montagem sem engine (o `-d` solta o processo: exit 0 =
+/// "iniciado", não "saudável"). O workdir é o do SERVICE (working_dir
+/// declarado ou WORKDIR da imagem) — o flux não chumba caminho: cada projeto
+/// tem o seu (/var/www, /app, ...).
+///
+/// O `rm -f public/hot` pós-live é a prova de hot órfão (06): dev server
+/// (`npm run dev`) cria `public/hot` e MORRE por qualquer motivo → sem a
+/// limpeza o Laravel continua servindo assets do servidor morto (site sem
+/// CSS). Com o wrapper, TODA morte do live limpa o hot e o Laravel volta pro
+/// manifest sozinho. Para `build --watch` o rm é no-op (watch não cria hot).
 fn comando_live_args(projeto: &str, service: &str, live: &str) -> Vec<String> {
     vec![
         "compose".to_owned(),
@@ -512,7 +546,7 @@ fn comando_live_args(projeto: &str, service: &str, live: &str) -> Vec<String> {
         service.to_owned(),
         "sh".to_owned(),
         "-c".to_owned(),
-        live.to_owned(),
+        format!("{{ {live}; }}; rc=$?; rm -f public/hot; exit $rc"),
     ]
 }
 
@@ -831,6 +865,7 @@ mod tests {
             &["app".into(), "worker".into()],
             "dev",
             &["mysql".into()],
+            false,
         );
         assert!(y.contains("  app:\n"));
         assert!(y.contains("  worker:\n"));
@@ -857,6 +892,20 @@ mod tests {
         assert!(y.contains("external: true"), "flux-net é a rede do flux-db");
         // Nada publicado = portscan da 09 continua só 22/80/443.
         assert!(!y.contains("ports:\n    -"));
+    }
+
+    #[test]
+    fn override_com_live_publica_a_porta_do_dev_server() {
+        let sem = override_yaml(&["app".into()], "dev", &[], false);
+        let com = override_yaml(&["app".into()], "dev", &[], true);
+        assert!(
+            !sem.contains("5173:5173"),
+            "sem live declarado, nada publicado"
+        );
+        assert!(
+            com.contains("      - \"5173:5173\"\n"),
+            "com live, a porta do dev server sobe pro host (hostname vite-dev)"
+        );
     }
 
     #[test]
@@ -898,8 +947,9 @@ mod tests {
         assert_eq!(args[6], "sh", "shell é sh (paridade com o exec do db.rs)");
         assert_eq!(args[7], "-c");
         assert_eq!(
-            args[8], "npm run build -- --watch",
-            "comando do toml verbatim — workdir vem do service, não do flux"
+            args[8],
+            "{ npm run build -- --watch; }; rc=$?; rm -f public/hot; exit $rc",
+            "comando do toml verbatim dentro do wrapper que limpa hot órfão"
         );
     }
 

@@ -99,7 +99,7 @@ pub fn decide(
     domain: &DomainConfig,
     src: &dyn HostSource,
 ) -> Decision {
-    let host = ManagedHost::parse(host_raw, domain, |n| src.project_exists(n));
+    let host = ManagedHost::parse(host_raw, domain, &|n| src.project_exists(n));
     let action = match &host {
         ManagedHost::Panel => match rota_deploy(path) {
             Some(name) => Action::Deploy { name },
@@ -114,9 +114,46 @@ pub fn decide(
         ManagedHost::Dev { name, branch } => {
             dev_action(name, branch.as_deref(), path, wants_json, src)
         }
+        ManagedHost::Vite { name, branch } => {
+            vite_action(name, branch.as_deref(), path, wants_json, src)
+        }
     };
     Decision { host, action }
 }
+
+/// Host do dev server (`vite-{dev-host}`, 06/live): MESMO container e regras
+/// do dev, com o target apontando pra porta do dev server (5173) — assets e
+/// HMR saem pelo túnel HTTPS, sem mixed content. Live desligado ou container
+/// dormindo = páginas failed/espera do router (honestas). Websocket do HMR
+/// ainda não atravessa o proxy do fluxd: o overlay do projeto liga
+/// `server.hmr = false` até o WS subir — F5 enquanto isso.
+fn vite_action(
+    name: &str,
+    branch: Option<&str>,
+    path: &str,
+    wants_json: bool,
+    src: &dyn HostSource,
+) -> Action {
+    match dev_action(name, branch, path, wants_json, src) {
+        Action::Proxy { name, env, target } => {
+            // mesmo IP do container, porta do dev server
+            let ip = target
+                .rsplit_once(':')
+                .map(|(ip, _)| ip.to_owned())
+                .unwrap_or(target);
+            Action::Proxy {
+                name,
+                env,
+                target: format!("{ip}:{VITE_PORT}"),
+            }
+        }
+        other => other,
+    }
+}
+
+/// Porta do dev server (vite) dentro do container — o compose publica a
+/// mesma porta no host quando o live server está declarado (06/live).
+pub const VITE_PORT: u16 = 5173;
 
 /// Reconhece o path EXATO da rota pública de deploy (10/F4):
 /// `/api/projects/{name}/deploy` com `name` em `[a-z0-9-]`. Qualquer outro
@@ -387,6 +424,27 @@ mod tests {
             m.decide("vipers-d.bitello.xyz", "/api/x", true),
             Action::ApiFailed
         );
+    }
+
+    #[test]
+    fn matriz_vite_host_proxila_na_porta_do_dev_server() {
+        // `vite-{dev}`: mesmo container e regras do dev, porta 5173 (06/live).
+        let m = Mock::default()
+            .st("vipers", Env::Dev, ContainerState::Awake)
+            .target("vipers", Env::Dev, "10.0.0.5:80");
+        assert_eq!(
+            m.decide("vite-vipers-d.bitello.xyz", "/", false),
+            Action::Proxy {
+                name: "vipers".into(),
+                env: Env::Dev,
+                target: "10.0.0.5:5173".into()
+            }
+        );
+        // Host vite sem projeto = 404 brandiado (mesma matriz).
+        assert!(matches!(
+            m.decide("vite-zzz-d.bitello.xyz", "/", false),
+            Action::NotFound
+        ));
     }
 
     #[test]
