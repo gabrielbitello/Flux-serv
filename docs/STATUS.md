@@ -73,7 +73,9 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
   404 brandiado (99 ms), `flux.bitello.xyz` → 303 guard + login render +
   robots Disallow, TLS real válido. **F7 FECHADO.** CLI `flux.exe` no PATH
   com FORWARD SSH automático (regra NAT órfã `healthz` 7420 enganava o probe
-  — deletada). Commit `e5203a3`.
+  — deletada). Commit `e5203a3`. Fix da matriz (commit `333547a`, provado
+  pela internet): browser em prod dormindo = página de espera 200 — 503 JSON
+  é SÓ pra cliente de API (spec 12); `flux vm ssh` real (`2858dbe`).
 - **14/10/2026** — F7: auth real do painel (Argon2id + sessão + rate limit,
   painel montado no router público, binds 127.0.0.1), Caddy estático com
   `default_sni` provado por TLS do host, mutagen 0.18.1 real (sessão a
