@@ -5,9 +5,9 @@ Matriz viva do Flux: cada funcionalidade em escopo com status de implementação
 integração falta. **NÃO** = só na spec.
 
 Atualizar no fim de CADA sessão que mexer em código (mesma cadência do
-[PROGRESSO](../PROGRESSO.md)). Última atualização: **14/10/2026** (F7: Caddy TLS + auth do painel + mutagen real).
+[PROGRESSO](../PROGRESSO.md)). Última atualização: **14/10/2026 (madrugada)** — PRIMEIRO PROJETO REAL: presente-digital e djm VIVOS pela internet.
 
-Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
+Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo dev temporário).
 
 ## Base de plataforma
 
@@ -23,6 +23,8 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | Módulo Docker (bollard): estado/alvo/wake/pause/stop por labels `flux-{name}-{env}` | **PARCIAL** — testado em engine real; sem fluxo end-to-end na VM |
 | CLI `flux`: árvore completa da spec 06 | **PARCIAL** — ciclo dev (up/down/status/logs/exec…) real via API com lease + forward SSH automático + token do config; `flux token generate` real (hash na VM + config local); vm/tunnel/panel/shield etc. continuam stubs |
 | Docker + Caddy na VM operacionais (Debian 12, fluxd systemd, TLS catch-all) | **SIM** — boot validado, host-only 192.168.140.1/2, router proxyando container real PELO TLS do Caddy (64 ms) |
+| flux-db (mariadb:11) + endpoint `/up` com override + fila de sync no `flux up` | **SIM** — banco healthy em flux-net, DBs por projeto; compose com guard re-varrido, `ports !reset`, `DB_HOST=flux-db` |
+| Modo dev temporário (14): teardown após TTL sem interação | **PARCIAL** — implementado (sweep 60 s, relógio interação→created_at, purga compose+dirs+SQLite, 7 testes); expiração REAL ainda não presenciada (primeiros TTLs correm) |
 
 ## Requisitos R1–R34
 
@@ -32,10 +34,10 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | R2 | Docker em VM Debian | **SIM** — VM VirtualBox operacional, Docker 29.9, router do fluxd proxyando container real |
 | R3 | Sono automático por interação | **PARCIAL** — sweep 60 s + guardas (lease/cooldown/CPU) testados em engine real; sem janela do sync nem painel |
 | R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — CADEIA PÚBLICA COMPLETA pela internet (tunnel + Caddy TLS + fluxd): ghost → 404 brandiado 99 ms, painel → 303 guard, TLS válido; página de espera pela internet falta projeto real |
-| R5 | Sync Windows↔VM (mutagen) | **PARCIAL** — binário 0.18.1 + agent bundle instalados, sessão real provada (374 ms, aceite < 5 s); falta primeiro projeto real via `flux sync` |
-| R6 | Banco único + migrations + guard | **PARCIAL** — guard de imagens completo + runner via docker exec testado; ciclo do `flux up` e `flux-db` real na F5/F6 |
+| R5 | Sync Windows↔VM (mutagen) | **SIM** — sessões one-way-replica reais dos 2 projetos no `flux up`; .env/storage/vendor fora por ignore e persistem na VM |
+| R6 | Banco único + migrations + guard | **PARCIAL** — flux-db (mariadb:11) REAL com DBs/users dos 2 projetos, migrations rodaram por docker exec; guard re-varre no up; fresh/seed de dev ainda não exercido |
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
-| R8 | `flux up/logs/exec/down` no Windows | **PARCIAL** — ciclo dev real via API com lease + FORWARD SSH AUTOMÁTICO (`tunel.rs`: probe + `ssh -N -L` desapegado, config global `%USERPROFILE%\.flux\config.toml`); `flux.exe` no PATH do usuário; provado do PowerShell e Git Bash |
+| R8 | `flux up/logs/exec/down` no Windows | **SIM** — `flux up` COMPLETO (register → lease → sync → compose up no fluxd com guard/override → poll do ENGINE → migrations), túnel SSH automático, wizard `-m`; provado nos 2 projetos reais |
 | R9 | Painel web | **PARCIAL** — dashboard/detalhe/eventos/SVG server-side + AUTH REAL (Argon2id, sessão 12 h, rate limit 5/min, guard) montado no router público; falta SSE de logs e abas de projeto (banco/sync/domínios/deploys) |
 | R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
@@ -43,7 +45,7 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | R13 | Cota global dev / limite individual prod | **NÃO** — F10 |
 | R14 | Prod hiberna, worker 24/7 | **PARCIAL** — pause/unpause no sleep manager (`prod_mode`); worker 24/7 e pressão RAM na F10 |
 | R15 | Branch routing `{branch}-{name}-d` | **PARCIAL** — parse implementado/testado; worktrees/watch na F11 |
-| R16 | Gerenciador de banco (Adminer) | **NÃO** — decidido; F12 |
+| R16 | Gerenciador de banco (Adminer) | **NÃO** — decidido; F12 (flux-db real já no ar) |
 | R17 | Toolchain sob demanda (`flux tool`) | **NÃO** — stub |
 | R18 | `.env` cifrado + painel read-only | **NÃO** — F12 |
 | R19 | VM Save após 30 dias | **NÃO** — `savestate` mapeado; F13 |
@@ -64,6 +66,14 @@ Placar atual: **9 SIM · 24 PARCIAL · 12 NÃO** (45 itens).
 | R34 | Backup banco prod 48 h/7 d | **NÃO** — F16 |
 
 ## Histórico de atualização
+
+- **14/10/2026 (madrugada)** — PRIMEIRO PROJETO REAL: **presente-digital** e
+  **djm** vivos pela internet (`*-d.bitello.xyz` 200/302 pela cadeia tunnel →
+  Caddy → fluxd → container). flux-db mariadb:11 no ar; composes dos 2 repos
+  adaptados ao modelo Flux (service `app`, mysql/ports/tunnel/docker.sock
+  fora); `flux up` COMPLETO (sync + compose + migrations); wizard `flux up
+  -m`; modo dev temporário 6 h (commits `2f0d9c2`→`24ccd32`). Nos repos:
+  presente-digital `a0bbf05`, djm `0b6a6ff`.
 
 - **14/10/2026 (noite)** — TUNNEL PÚBLICO VIVO: cloudflared serviço Windows
   Running (fixes: .ps1 ASCII-only para PS 5.1; chave de EventLog órfã da era

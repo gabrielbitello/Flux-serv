@@ -2,6 +2,58 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 14/10/2026 (parte 8) — PRIMEIROS PROJETOS REAIS: presente-digital e djm VIVOS
+
+**Intenção** (pedido do Gabriel): dev-only de presente-digital e djm ("sigla
+djm"); `flux up -m` como wizard que GERA o `flux.toml`; prod continua comando
+separado (99% é dev); modo dev temporário que se apaga da VM após 6 h sem
+interação — nunca nada fora da VM.
+
+**Entregas de código** (commits `2f0d9c2`→`24ccd32`): specs 06 (wizard) e 14
+(temporário); `[temporary]` no flux-common; `temporary.rs` no fluxd (sweep de
+60 s, relógio = interação→created_at, teardown compose down -v → rm dirs →
+purge SQLite POR ÚLTIMO, nome inseguro = recusado); wizard `-m` no CLI
+(auto-detecta framework, recusa flux.toml existente); **ciclo completo do
+`flux up`** — sync mutagen idempotente → `POST /projects/{name}/up` (202 +
+background: guard re-varre, override com `ports: !reset`/flux-net/`DB_HOST=
+flux-db` gerado dos services REAIS do engine, `compose up -d --build`) →
+poll do estado do ENGINE (não da linha de sono — falso positivo do default
+'awake' provado no DJM) → migrations.
+
+**Infra**: flux-db (mariadb:11) healthy em `flux-net`; DBs `{name}` +
+`{name}_test` com users por projeto; regra NAT órfã `healthz` 7420 deletada.
+
+**Projetos**: composes adaptados nos 2 repos (presente-digital `a0bbf05`,
+djm `0b6a6ff`) — service `app`, mysql/phpmyadmin/tunnel/docker.sock FORA
+(banco único, tunnel ÚNICO no host — o cloudflared do container do djm
+brigaria pelo ingress). `.env` exclusivo da VM (sync ignora, persiste);
+vendor/node_modules/storage das massas: composer/npm/migrate RODADOS no
+container (sync não carrega artefatos).
+
+**Resultado**: `https://presente-digital-d.bitello.xyz` → **200 em 254 ms**
+(landing completa); `https://djm-d.bitello.xyz` → **302 → /entrar → 200**
+(6 containers: app/worker/reverb/scheduler/stream/pi; rádio fica no profile
+`radio` com credencial Spotify preservada). Robots dev `Disallow` (R22) nos
+dois. Painel mostra os 2 projetos com auth.
+
+**Tropeços reais** (registrados como NUNCA): (1) include do compose resolve
+caminho pelo CWD — `./serve` do include não é do arquivo incluído; o fluxd
+agora passa `-f` do compose real (`escolher_compose`); (2) `trim()` dentro
+de `filter` não propaga pro `all()` — stub só-include era escolhido; (3)
+pipeline de verificação terminando em pipe engoliu clippy/teste FALHANDO e
+commitou quebrado 2× — verificação com exit code visível daqui em diante;
+(4) `env_file` do mariadb quer `MARIADB_ROOT_PASSWORD`, não `DB_ROOT_PASSWORD`.
+
+**O que NUNCA fazer** (novo): nunca confiar no `mode` da linha de sono como
+estado de container (nasce 'awake'); nunca rodar `flux up` esperando build
+síncrono no request HTTP (202 + poll); nunca marcar projeto real como
+temporário sem o Gabriel saber — os DOIS entraram temporários (6 h) por
+pedido dele: sem interação 6 h, a VM apaga sync+containers (repo Windows
+intocado; `flux up` recria tudo).
+
+**Próximo**: assistir os primeiros teardowns de 6 h (validação real do 14);
+`flux sync reset`/`logs`/`exec` polidos; F12 Adminer; SSE de logs no painel.
+
 ## 14/10/2026 (parte 7) — F7: Caddy TLS + auth do painel + mutagen REAL
 
 **Intenção**: fechar a cadeia de tráfego da 03 dentro da VM (Caddy → fluxd),
