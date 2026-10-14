@@ -686,17 +686,20 @@ async fn ps(env: &str) {
         .and_then(|n| n.to_str())
         .map(str::to_owned)
         .unwrap_or_default();
-    let flux_toml = cwd.join("flux.toml").is_file();
-    // Contexto: pasta com flux.toml OU nome registrado no fluxd.
-    let registrados: Vec<String> = cliente
-        .list_projects()
-        .await
-        .map(|l| l.into_iter().map(|p| p.name).collect())
-        .unwrap_or_default();
-    let projeto_ctx: Option<String> = if flux_toml || registrados.iter().any(|r| r == &pasta) {
-        Some(pasta.clone())
+    // Contexto: flux.toml vence (o `name` DELE, não o da pasta — djm mora
+    // em DJ-is-magic); sem toml, o nome da pasta se estiver registrado.
+    let projeto_ctx: Option<String> = if cwd.join("flux.toml").is_file() {
+        std::fs::read_to_string(cwd.join("flux.toml"))
+            .ok()
+            .and_then(|src| flux_common::config::ProjectToml::parse_str(&src).ok())
+            .map(|t| t.effective_name(&pasta).to_owned())
     } else {
-        None
+        let registrados: Vec<String> = cliente
+            .list_projects()
+            .await
+            .map(|l| l.into_iter().map(|p| p.name).collect())
+            .unwrap_or_default();
+        registrados.into_iter().find(|r| r == &pasta)
     };
     let env_filtro = if projeto_ctx.is_some() {
         parse_env(env);
