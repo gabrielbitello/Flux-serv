@@ -2,6 +2,7 @@
 //! (`main.rs`) só parseia argumentos; tudo testável vive aqui.
 
 pub mod api;
+pub mod compose;
 pub mod db;
 pub mod decision;
 pub mod docker;
@@ -32,6 +33,9 @@ pub struct AppState {
     /// Cliente Docker quando disponível (na VM sempre; em dev/testes via
     /// `FLUX_DOCKER_URL`). `None` = degrada para estado do SQLite.
     pub docker: Option<Docker>,
+    /// Diretório de estado (/srv/flux/state na VM) — onde o fluxd escreve
+    /// os overrides de compose (06). `None` = testes/dev sem disco.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -41,6 +45,7 @@ impl AppState {
             domain: config.domain.clone(),
             http: proxy::new_client(),
             docker,
+            state_dir: None,
         }
     }
 }
@@ -79,7 +84,10 @@ pub async fn serve(
         tracing::info!("Docker conectado — estado dos containers vem do engine");
     }
 
-    let shared = std::sync::Arc::new(AppState::new(st, &global, docker));
+    let mut app_state = AppState::new(st, &global, docker);
+    // Overrides de compose (06) vivem ao lado do SQLite: /srv/flux/state.
+    app_state.state_dir = db.parent().map(std::path::Path::to_path_buf);
+    let shared = std::sync::Arc::new(app_state);
     // Auth do painel (08/09): hash em /srv/flux/secrets/panel.argon2.
     // Fail-closed: sem hash, login impossível e a tela ensina a gerar.
     let auth = std::sync::Arc::new(panel_auth::PanelAuth::novo());

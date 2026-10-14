@@ -50,6 +50,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/projects/{name}", get(project_status))
         .route("/projects/{name}/lease", post(grant_lease))
         .route("/projects/{name}/schema", post(run_schema))
+        .route("/projects/{name}/up", post(subir))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
         // credencial fica invisível, então o gate grava a recusa no `events`
@@ -563,6 +564,67 @@ async fn run_schema(
         Ok(o) => Json(SchemaReply::from(o)).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+}
+
+/// POST /projects/{name}/up (06, passo 5): valida o registro e DEVOLVE 202 —
+/// o compose up (com build) roda em background; o CLI apura pelo
+/// GET /projects/{name} (estado vem do engine). Build de primeira subida é
+/// de MINUTOS: request HTTP síncrono estouraria timeout de cliente e do edge.
+#[derive(Deserialize, Default)]
+struct UpBody {
+    env: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct UpAceito {
+    started: bool,
+    project: String,
+    compose_project: String,
+}
+
+async fn subir(
+    State(app): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    body: Option<Json<UpBody>>,
+) -> Response {
+    let env = body
+        .and_then(|Json(b)| b.env)
+        .unwrap_or_else(|| "dev".to_owned());
+    if env != "dev" && env != "prod" {
+        return erro(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("ambiente '{env}' inválido (use dev|prod)"),
+        );
+    }
+    // Projeto precisa estar registrado (o toml é a fonte do override).
+    if let Err(r) = toml_gravado(&app, &name) {
+        return *r;
+    }
+    // Pasta sincronizada tem que existir — sem sync não há compose para subir.
+    let dir = std::path::Path::new(crate::temporary::PROJECTS_ROOT_PADRAO).join(&name);
+    if !dir.is_dir() {
+        return erro(
+            StatusCode::CONFLICT,
+            format!(
+                "pasta {} não existe na VM — o sync (mutagen) roda antes do up (02)",
+                dir.display()
+            ),
+        );
+    }
+    let compose_project = format!("flux-{name}-{env}");
+    events::event(
+        &app.state,
+        "info",
+        "up",
+        &format!("{compose_project}: up aceito (202)"),
+    );
+    tokio::spawn(crate::compose::subir_projeto(app, name.clone(), env));
+    Json(UpAceito {
+        started: true,
+        project: name,
+        compose_project,
+    })
+    .into_response()
 }
 
 async fn not_implemented() -> Response {

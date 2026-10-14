@@ -175,7 +175,18 @@ pub struct LeaseOut {
 // Contrato pronto e testado contra o mock; entra no fluxo do `flux up`
 // completo na F7 (hoje o up não dispara migrate — o fluxd precisa do sync
 // de arquivos para o plano de migrations ser real).
-#[allow(dead_code)]
+#[derive(Debug, Serialize)]
+struct UpIn<'a> {
+    env: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpAceitoOut {
+    pub started: bool,
+    pub project: String,
+    pub compose_project: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SchemaIn<'a> {
     env: &'a str,
@@ -373,8 +384,20 @@ impl ApiClient {
         self.json_out(r)
     }
 
+    /// POST /projects/{name}/up (06): aceito = 202, o compose roda em
+    /// background no fluxd; o CLI apura pelo status.
+    pub async fn subir(&self, name: &str, env: &str) -> Result<UpAceitoOut, ApiError> {
+        let corpo =
+            serde_json::to_string(&UpIn { env: Some(env) }).map_err(|e| ApiError::Protocolo {
+                msg: format!("serializando up: {e}"),
+            })?;
+        let r = self
+            .call("POST", &format!("/projects/{name}/up"), Some(corpo))
+            .await?;
+        self.json_out(r)
+    }
+
     /// Dispara o ciclo de schema (05) com as migrations do disco local.
-    #[allow(dead_code)] // ver SchemaIn: entra no up completo na F7
     pub async fn schema(
         &self,
         name: &str,

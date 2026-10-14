@@ -30,6 +30,10 @@ use crate::api::{ApiClient, ApiError};
 /// padrão da plataforma, não exceção).
 const LEASE_UP_SECS: i64 = 15 * 60;
 
+/// Teto de espera pelo acordar do container no `flux up` (build de primeira
+/// subida é de minutos; acima disso o problema é visível no painel).
+const UP_TIMEOUT_SECS: u64 = 600;
+
 #[derive(Parser)]
 #[command(
     name = "flux",
@@ -365,6 +369,8 @@ struct Contexto {
     name: String,
     toml: String,
     toml_hash: String,
+    /// Raiz do repo (alpha da sync, 02).
+    dir: std::path::PathBuf,
 }
 
 fn contexto_atual() -> Contexto {
@@ -387,6 +393,7 @@ fn contexto_atual() -> Contexto {
             std::process::exit(1);
         });
     let caminho = cwd.join("flux.toml");
+    let dir = cwd.clone();
     let (toml, name) = if caminho.exists() {
         let src = match std::fs::read_to_string(&caminho) {
             Ok(s) => s,
@@ -414,6 +421,7 @@ fn contexto_atual() -> Contexto {
         toml_hash: sha256_hex(toml.as_bytes()),
         name,
         toml,
+        dir,
     }
 }
 
@@ -570,20 +578,90 @@ async fn up(env: &str) {
         LEASE_UP_SECS,
     );
     println!(
-        "[3/5] lease de {}/{} por {} s — renova sozinho até o comando terminar",
+        "[3/6] lease de {}/{} por {} s — renova sozinho até o comando terminar",
         ctx.name, env, LEASE_UP_SECS
     );
 
-    let st = match cliente.status(&ctx.name).await {
+    // [4/6] Sync (02): sessão one-way-replica Windows → VM, idempotente.
+    if env == Env::Dev {
+        let beta = crate::sync::vm_beta(&ctx.name, None);
+        match crate::sync::SyncSpec::for_project(&ctx.dir, beta, None) {
+            Ok(spec) => match crate::sync::create(&spec) {
+                Ok(id) => {
+                    println!(
+                        "[4/6] sync `{}` ativa — pasta da VM: /srv/flux/projects/{} (full scan inicial roda em fundo)",
+                        spec.session(),
+                        ctx.name
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                Err(e) => falhar(api::ApiError::Protocolo {
+                    msg: format!("sync: {e}"),
+                }),
+            },
+            Err(e) => falhar(api::ApiError::Protocolo {
+                msg: format!("montando sync: {e}"),
+            }),
+        }
+    } else {
+        println!("[4/6] prod não sincroniza do Windows (02) — release vem do deploy (10)");
+    }
+
+    // [5/6] Subida: 202 do fluxd + apuração pelo estado do engine.
+    let _aceito = match cliente.subir(&ctx.name, &env.to_string()).await {
+        Ok(a) => a,
+        Err(e) => falhar(e),
+    };
+    println!("[5/6] compose up -d --build rodando no fluxd — apurando estado…");
+    let mut st = match cliente.status(&ctx.name).await {
         Ok(s) => s,
         Err(e) => falhar(e),
     };
+    let mut acordado = st.sleep.dev.mode.as_deref() == Some("awake");
+    let mut esperado = 0u64;
+    while !acordado && esperado < UP_TIMEOUT_SECS {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        esperado += 3;
+        match cliente.status(&ctx.name).await {
+            Ok(s) => {
+                st = s;
+                acordado = st.sleep.dev.mode.as_deref() == Some("awake");
+                if esperado % 30 == 0 {
+                    println!(
+                        "      … {} s (estado: {})",
+                        esperado,
+                        st.sleep.dev.mode.as_deref().unwrap_or("sem sinal")
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("aviso: apuração falhou uma vez: {e}");
+            }
+        }
+    }
+    if !acordado {
+        falhar(api::ApiError::Protocolo {
+            msg: format!(
+                "container não acordou em {UP_TIMEOUT_SECS} s — veja os eventos no painel                  (https://flux.bitello.xyz) ou `flux events` quando existir; causa comum: build                  falhando no compose"
+            ),
+        });
+    }
+    println!("[5/6] container acordado (engine RUNNING) após {esperado} s");
+
+    // [6/6] Migrations (05): o fluxd lê os arquivos do DISCO DA VM (sync já
+    // entregou) — dev novo/mutado reconstrói, prod só aplica.
+    match cliente.schema(&ctx.name, &env.to_string(), &[]).await {
+        Ok(o) => println!(
+            "[6/6] banco: {} · aplicadas {} · fresh {}",
+            o.outcome, o.aplicadas, o.fresh
+        ),
+        Err(e) => eprintln!("aviso: pipeline de migrations falhou: {e} — o resto do up seguiu"),
+    }
+
     imprime_status(&st);
     println!(
-        "pronto: https://{} · {} · lease até epoch {}",
-        st.dev_host,
-        st.sleep.dev.mode.as_deref().unwrap_or("sem sinal"),
-        lease.lease_until
+        "pronto: https://{} · lease até epoch {}",
+        st.dev_host, lease.lease_until
     );
 }
 
