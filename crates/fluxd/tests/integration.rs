@@ -33,10 +33,14 @@ async fn spawn_upstream() -> u16 {
 
 async fn spawn_router(st: State) -> u16 {
     let app = Arc::new(AppState::new(st, &GlobalConfig::default(), None));
+    // Painel com auth de verdade no router (mesma montagem do `serve`) — o
+    // hash aponta para arquivo que não existe: fail-closed, login 503.
+    let auth = std::sync::Arc::new(fluxd::panel_auth::PanelAuth::novo());
+    let painel = fluxd::panel::build_panel(std::sync::Arc::clone(&app), auth);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
-        axum::serve(l, build_router(app, &GlobalConfig::default()))
+        axum::serve(l, build_router(app, &GlobalConfig::default(), painel))
             .await
             .unwrap();
     });
@@ -109,6 +113,19 @@ async fn host_desconhecido_recebe_404_brandiado() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("Host desconhecido"), "corpo: {body}");
+}
+
+/// Painel no wildcard público (03/08): host do painel SEM sessão cai no
+/// guard — redirect para /login, nunca dashboard aberto.
+#[tokio::test]
+async fn painel_sem_sessao_redireciona_para_login() {
+    let st = State::in_memory().unwrap();
+    let port = spawn_router(st).await;
+    let client = test_client();
+    let (status, body, headers) = get(&client, port, "flux.bitello.xyz", "/").await;
+
+    assert_eq!(status, StatusCode::SEE_OTHER, "corpo: {body}");
+    assert_eq!(header(&headers, "location"), Some("/login"));
 }
 
 #[tokio::test]

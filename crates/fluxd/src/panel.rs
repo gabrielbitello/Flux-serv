@@ -4,14 +4,14 @@
 //! com JS desligado, critério 4 da 08). Sem rust-embed e sem build de
 //! frontend — `cargo build` gera tudo, como a spec manda.
 //!
-//! FASE DE FUNDAÇÃO — SEM AUTH de propósito (login Argon2id + sessão por
-//! cookie é do painel real). Por isso este módulo NÃO é declarado em `lib.rs`
-//! nem montado no `serve`: `build_panel` devolve um `Router` SOLTO e é o
-//! integrador quem decide onde expor. Enquanto isso, TODA página carrega o
-//! aviso visível de que o painel não pode ficar público (spec 03: "nunca
-//! deixar o painel sem auth no wildcard público") e TODA resposta leva
-//! `X-Robots-Tag: noindex, nofollow, noarchive` + `meta robots` — o painel é
-//! como dev para bots (R22).
+//! AUTH REAL (08/09): login único com senha em Argon2id
+//! (`/srv/flux/secrets/panel.argon2`), sessão por cookie httpOnly +
+//! `SameSite=Lax` (12 h), rate limit de 5 logins/min por IP e guard de sessão
+//! em TODA rota exceto `/login`. `build_panel` devolve o Router pronto para
+//! entrar no wildcard público atrás do host do painel (03) — e também roda
+//! sozinho na `:7421` para depuração local (sempre 127.0.0.1, 09). Toda
+//! resposta leva `X-Robots-Tag: noindex, nofollow, noarchive` + `meta robots`
+//! (R22 — o painel é como dev para bots).
 //!
 //! Honestidade dos dados (regra da casa): o que o painel não sabe, ele diz
 //! que não sabe — "sem dados ainda", "sem verdade de disco nesta fase" —
@@ -19,13 +19,15 @@
 //! senão a linha do sweep (60 s, 04) — com a FONTE escrita na tela. Erro de
 //! leitura do estado aparece na página com a mensagem real, nunca silencioso.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{RawPathParams, RawQuery, State};
-use axum::http::{HeaderName, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::extract::{ConnectInfo, Form, FromRef, RawPathParams, RawQuery, Request, State};
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
 use flux_common::config::ProjectToml;
 use flux_common::protocol::{ContainerState, Env};
 use rusqlite::params;
@@ -33,6 +35,7 @@ use rusqlite::params;
 use crate::AppState;
 use crate::decision::HostSource;
 use crate::docker;
+use crate::panel_auth;
 use crate::sqlite_source;
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
@@ -44,12 +47,6 @@ const NOINDEX: &str = "noindex, nofollow, noarchive";
 fn x_robots_tag() -> HeaderName {
     HeaderName::from_static("x-robots-tag")
 }
-
-/// Aviso de auth visível em TODA página — requisito da fase fundação (03/08).
-const AVISO_SEM_AUTH: &str = "<div class=\"aviso\"><strong>AVISO:</strong> este painel está \
-<strong>sem autenticação</strong> nesta fase (funda\u{e7}\u{e3}o F8). Nunca exponha \
-publicamente — a spec 03 exige auth (Argon2id + sess\u{e3}o) antes de qualquer acesso \
-externo. O integrador deve montar esta rota somente atr\u{e1}s de rede confi\u{e1}vel.</div>";
 
 /// Últimos eventos no dashboard e tamanho de página de `/events`.
 const EVENTOS_DASHBOARD: i64 = 15;
@@ -117,16 +114,173 @@ footer{margin-top:2rem;color:var(--muted);font-size:.78rem}
 
 // ------------------------------------------------------------------ router
 
-/// Monta o Router do painel (08). NÃO é chamado pelo `serve` nesta fase: sem
-/// auth o painel nunca pode entrar no wildcard público (03). Integração
-/// futura: montar atrás da camada de auth do painel real (Argon2id + sessão).
-pub fn build_panel(app: Arc<AppState>) -> Router {
-    Router::new()
+/// Estado do painel: o daemon (`AppState`) + o auth (sessões/limiter/hash).
+/// Router do axum aceita UM tipo de estado — os handlers extraem o que
+/// precisam via `FromRef`.
+#[derive(Clone)]
+pub struct PanelState {
+    pub app: Arc<AppState>,
+    pub auth: Arc<panel_auth::PanelAuth>,
+}
+
+impl FromRef<PanelState> for Arc<AppState> {
+    fn from_ref(s: &PanelState) -> Self {
+        s.app.clone()
+    }
+}
+
+impl FromRef<PanelState> for Arc<panel_auth::PanelAuth> {
+    fn from_ref(s: &PanelState) -> Self {
+        s.auth.clone()
+    }
+}
+
+/// Monta o Router do painel (08) COM auth: só `/login` é aberto; todo o resto
+/// passa pelo guard de sessão (`exige_sessao`) e cai no redirect para o login
+/// sem cookie válido. Autorizado a entrar no wildcard público atrás do host
+/// do painel (03) — sem este auth, a montagem é proibida.
+pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Router {
+    let st = PanelState { app, auth };
+    // Protegido SEM `with_state` próprio: o `route_layer` do guard vale só
+    // para as rotas deste sub-router — /login e /logout ficam de fora.
+    let protegido = Router::new()
         .route("/", get(dashboard))
         .route("/projects/{name}", get(detalhe_projeto))
         .route("/events", get(pagina_eventos))
         .fallback(rota_desconhecida)
-        .with_state(app)
+        .route_layer(middleware::from_fn_with_state(st.clone(), exige_sessao));
+    Router::new()
+        .route("/login", get(login_form).post(login_submit))
+        .route("/logout", post(logout))
+        .merge(protegido)
+        .with_state(st)
+}
+
+/// Guard de sessão: cookie válido → segue; qualquer outra coisa → login.
+/// Redirect (303) também para deep links — após logar, o dashboard é a
+/// entrada (v1: sem `?next=`, zero superfície de open-redirect).
+async fn exige_sessao(State(st): State<PanelState>, req: Request, next: Next) -> Response {
+    let autenticado =
+        panel_auth::token_do_header(req.headers()).is_some_and(|t| st.auth.sessions.validate(&t));
+    if autenticado {
+        next.run(req).await
+    } else {
+        Redirect::to("/login").into_response()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CredenciaisLogin {
+    password: String,
+}
+
+async fn login_form(RawQuery(q): RawQuery) -> Response {
+    let com_erro = q
+        .as_deref()
+        .is_some_and(|s| s.split('&').any(|p| p == "erro=1"));
+    resposta(
+        StatusCode::OK,
+        render_login(if com_erro {
+            Some("Senha incorreta.")
+        } else {
+            None
+        }),
+    )
+}
+
+/// IP real do cliente para o rate limit de login (08). `ConnectInfo` só
+/// existe quando o `serve` usa `into_make_service_with_connect_info` — sem a
+/// extension (chamados de teste diretos), cai para 127.0.0.1 (nunca pânico).
+struct IpDoCliente(std::net::IpAddr);
+
+impl<S> axum::extract::FromRequestParts<S> for IpDoCliente
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(a)| a.ip())
+            .unwrap_or_else(|| std::net::IpAddr::from([127, 0, 0, 1]));
+        Ok(Self(ip))
+    }
+}
+
+/// Login (08): rate limit 5/min por IP ANTES de qualquer leitura de hash;
+/// hash ausente/inválido = 503 honesto com a instrução de geração (fail-closed,
+/// mesma postura da API sem token); senha certa = sessão nova + cookie.
+/// Todo resultado (ok/recusa/limite) vira evento no estado — nada silencioso.
+async fn login_submit(
+    State(st): State<PanelState>,
+    IpDoCliente(ip): IpDoCliente,
+    corpo: Result<Form<CredenciaisLogin>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let creds = match corpo {
+        Ok(Form(c)) => c,
+        Err(e) => {
+            return resposta(
+                StatusCode::BAD_REQUEST,
+                render_login(Some(&format!("Corpo do login inválido: {e}"))),
+            );
+        }
+    };
+    if !st.auth.limiter.permitir(ip) {
+        crate::events::event(
+            &st.app.state,
+            "warn",
+            "painel",
+            &format!("login recusado: rate limit excedido ip={ip}"),
+        );
+        return resposta(
+            StatusCode::TOO_MANY_REQUESTS,
+            render_login(Some("Muitas tentativas — aguarde 1 minuto.")),
+        );
+    }
+    match st.auth.verificar(&creds.password) {
+        Err(msg) => {
+            tracing::error!("painel: hash indisponível: {msg}");
+            resposta(StatusCode::SERVICE_UNAVAILABLE, render_login(Some(&msg)))
+        }
+        Ok(true) => {
+            let token = st.auth.sessions.create();
+            crate::events::event(&st.app.state, "info", "painel", "login ok");
+            let mut resp = Redirect::to("/").into_response();
+            if let Ok(v) = panel_auth::set_cookie_sessao(&token).parse() {
+                resp.headers_mut().insert(header::SET_COOKIE, v);
+            }
+            resp
+        }
+        Ok(false) => {
+            crate::events::event(
+                &st.app.state,
+                "warn",
+                "painel",
+                &format!("login recusado: senha incorreta ip={ip}"),
+            );
+            let mut resp = Redirect::to("/login?erro=1").into_response();
+            resp.headers_mut()
+                .insert(x_robots_tag(), HeaderValue::from_static(NOINDEX));
+            resp
+        }
+    }
+}
+
+async fn logout(State(st): State<PanelState>, req: Request) -> Response {
+    if let Some(t) = panel_auth::token_do_header(req.headers()) {
+        st.auth.sessions.revoke(&t);
+        crate::events::event(&st.app.state, "info", "painel", "logout");
+    }
+    let mut resp = Redirect::to("/login").into_response();
+    if let Ok(v) = panel_auth::set_cookie_limpo().parse() {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
 }
 
 /// Toda resposta do painel passa por aqui: no-store (estado vivo), noindex no
@@ -466,7 +620,7 @@ fn badge_level(level: &str) -> String {
 
 // ------------------------------------------------------------------ layout
 
-/// Esqueleto de página: tokens CSS, aviso de sem-auth, `meta robots` (R22) e
+/// Esqueleto de página: tokens CSS, botão Sair, `meta robots` (R22) e
 /// `meta refresh` opcional (só dashboard — eventos/detalhe são leitura sob
 /// demanda; zero JS: o refresh é mecânico do browser).
 fn layout(title: &str, body: &str, auto_refresh: bool) -> String {
@@ -484,8 +638,6 @@ fn layout(title: &str, body: &str, auto_refresh: bool) -> String {
 <meta name="robots" content="noindex, nofollow">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<!-- Painel sem auth na fundação F8 — montar SOMENTE atrás de auth/rede
-     confiável (spec 03). -->
 <style>{CSS}</style>
 </head>
 <body>
@@ -493,14 +645,41 @@ fn layout(title: &str, body: &str, auto_refresh: bool) -> String {
 <header class="top">
 <h1>Flux · painel</h1>
 <nav><a href="/">Dashboard</a><a href="/events">Eventos</a></nav>
+<form method="post" action="/logout" style="margin-left:auto">
+<button type="submit" style="background:var(--idlebg);color:var(--text);
+border:1px solid var(--line);border-radius:6px;padding:.2rem .7rem;cursor:pointer">Sair</button>
+</form>
 </header>
-{AVISO_SEM_AUTH}
 {body}
 <footer>fluxd — painel server-side, zero JS (spec 08) · horários em UTC</footer>
 </div>
 </body>
 </html>"#
     )
+}
+
+/// Tela de login (08): campo de senha só — usuário único (Gabriel), o nome
+/// não participa da autenticação. Mensagem opcional em cima (senha errada,
+/// rate limit, hash ausente). Sem nav — quem não logou não navega.
+fn render_login(mensagem: Option<&str>) -> String {
+    let msg = mensagem
+        .map(|m| format!("<div class=\"aviso\">{}</div>", esc(m)))
+        .unwrap_or_default();
+    let mut body = String::from("<h1>Entrar no painel</h1>");
+    body.push_str(&msg);
+    body.push_str(
+        r#"<form method="post" action="/login" class="card" style="max-width:380px;
+display:flex;flex-direction:column;gap:.7rem;margin-top:.8rem">
+<label for="password">Senha</label>
+<input type="password" id="password" name="password" required autofocus
+style="background:var(--bg);color:var(--text);border:1px solid var(--line);
+border-radius:6px;padding:.45rem .6rem">
+<button type="submit" style="background:var(--accentbg);color:var(--accent);
+border:1px solid var(--accent);border-radius:6px;padding:.45rem .6rem;
+font-weight:600;cursor:pointer">Entrar</button>
+</form>"#,
+    );
+    layout("Flux — entrar", &body, false)
 }
 
 fn linha_estado(e: &PainelEnv) -> String {
@@ -860,29 +1039,64 @@ fn render_eventos(app: &AppState, page_pedida: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argon2::password_hash::SaltString;
+    use argon2::{Argon2, PasswordHasher};
     use axum::body::Body;
     use flux_common::config::GlobalConfig;
     use http_body_util::BodyExt;
+
+    const SENHA_DE_TESTE: &str = "senha-de-teste";
 
     fn app_sem_docker() -> Arc<AppState> {
         let st = crate::state::State::in_memory().unwrap();
         Arc::new(AppState::new(st, &GlobalConfig::default(), None))
     }
 
-    /// GET de verdade: server efêmero + cliente hyper do próprio AppState.
-    async fn get(app: &Arc<AppState>, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
-        let router = build_panel(Arc::clone(app));
+    /// Router do painel COM auth de verdade: hash Argon2id de
+    /// `SENHA_DE_TESTE` em tempdir (um PanelAuth novo por chamada — sessões
+    /// e limiter zerados entre testes). O `_dir` tem que sobreviver à chamada.
+    async fn painel_com_auth(app: &Arc<AppState>) -> (Router, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let salt = SaltString::generate(&mut rand_core::OsRng);
+        let hash = Argon2::default()
+            .hash_password(SENHA_DE_TESTE.as_bytes(), &salt)
+            .unwrap()
+            .to_string();
+        std::fs::write(dir.path().join("panel.argon2"), &hash).unwrap();
+        let auth = Arc::new(panel_auth::PanelAuth::with_hash_path(
+            dir.path().join("panel.argon2"),
+        ));
+        (build_panel(Arc::clone(app), auth), dir)
+    }
+
+    async fn pedir(
+        app: &Arc<AppState>,
+        router: Router,
+        method: &str,
+        uri: &str,
+        cookie: Option<&str>,
+        corpo: Option<String>,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
         let url: hyper::Uri = format!("http://{addr}{uri}").parse().unwrap();
-        let req = axum::http::Request::builder()
-            .method("GET")
+        let mut builder = axum::http::Request::builder()
+            .method(method)
             .uri(url)
-            .body(Body::empty())
-            .unwrap();
+            .header(header::HOST, "flux.bitello.xyz");
+        if let Some(c) = cookie {
+            builder = builder.header(header::COOKIE, c);
+        }
+        let req = match corpo {
+            Some(b) => builder
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(b))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
         let resp = app.http.request(req).await.unwrap();
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -896,6 +1110,28 @@ mod tests {
         )
         .unwrap();
         (status, headers, body)
+    }
+
+    /// GET de verdade: server efêmero + cliente hyper do próprio AppState —
+    /// loga sozinho (POST /login) e leva o cookie da sessão.
+    async fn get(app: &Arc<AppState>, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+        let (router, _dir) = painel_com_auth(app).await;
+        let (_, headers, _) = pedir(
+            app,
+            router.clone(),
+            "POST",
+            "/login",
+            None,
+            Some(format!("password={SENHA_DE_TESTE}")),
+        )
+        .await;
+        let cookie = headers
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("login de teste tem que devolver Set-Cookie")
+            .to_owned();
+        let cookie = cookie.split(';').next().unwrap().to_owned();
+        pedir(app, router, "GET", uri, Some(&cookie), None).await
     }
 
     fn noindex_de(headers: &axum::http::HeaderMap) -> String {
@@ -949,25 +1185,19 @@ mod tests {
     // ---------------------------------------------------------- integração
 
     #[tokio::test]
-    async fn dashboard_vazio_e_honesto_com_aviso_e_noindex() {
+    async fn dashboard_vazio_e_honesto_por_login_e_noindex() {
         let app = app_sem_docker();
         let (status, headers, body) = get(&app, "/").await;
         assert_eq!(status, StatusCode::OK);
+        // O login do próprio harness grava eventos ("login ok" + access log),
+        // então a curva TEM dados nesta cena — o vazio aqui é de PROJETOS.
         assert!(
             body.contains("Nenhum projeto registrado"),
             "estado vazio tem que ser dito: {body}"
         );
         assert!(
-            body.contains("sem dados ainda"),
-            "curva sem dado mostra a frase exata: {body}"
-        );
-        assert!(
-            body.contains("sem autenticação"),
-            "aviso de sem-auth visível em toda página: {body}"
-        );
-        assert!(
-            !body.contains("<polyline"),
-            "sem dado NÃO desenha gráfico: {body}"
+            !body.contains("AVISO"),
+            "auth real não tem aviso de sem-auth: {body}"
         );
         assert_eq!(noindex_de(&headers), NOINDEX);
         assert_eq!(
@@ -1145,6 +1375,161 @@ mod tests {
             let (_, headers, _) = get(&app, uri).await;
             assert_eq!(noindex_de(&headers), NOINDEX, "rota {uri} sem noindex");
         }
+    }
+
+    // --------------------------------------------------------------- auth
+
+    #[tokio::test]
+    async fn sem_sessao_qualquer_rota_vai_pro_login() {
+        let app = app_sem_docker();
+        let (router, _dir) = painel_com_auth(&app).await;
+        for uri in ["/", "/events", "/projects/x"] {
+            let (status, headers, _) = pedir(&app, router.clone(), "GET", uri, None, None).await;
+            assert_eq!(status, StatusCode::SEE_OTHER, "rota {uri} sem cookie");
+            assert_eq!(
+                headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+                Some("/login"),
+                "rota {uri} manda pro login"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn login_correto_sessao_logout_revoga() {
+        let app = app_sem_docker();
+        let (router, _dir) = painel_com_auth(&app).await;
+
+        // Formulário aberto e sem mensagem de erro.
+        let (status, _, form) = pedir(&app, router.clone(), "GET", "/login", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(form.contains("name=\"password\""), "form: {form}");
+        assert!(
+            !form.contains("class=\"aviso\""),
+            "sem erro ainda (CSS tem .aviso — olha a classe na div): {form}"
+        );
+
+        // Senha ERRADA → redirect de volta com erro; sem cookie.
+        let (status, headers, _) = pedir(
+            &app,
+            router.clone(),
+            "POST",
+            "/login",
+            None,
+            Some("password=errada".to_owned()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert!(
+            headers
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .contains("erro=1"),
+            "senha errada volta pro form com erro"
+        );
+        assert!(
+            headers.get(header::SET_COOKIE).is_none(),
+            "recusa não cria sessão"
+        );
+
+        // Senha CERTA → 303 + Set-Cookie de sessão.
+        let (status, headers, _) = pedir(
+            &app,
+            router.clone(),
+            "POST",
+            "/login",
+            None,
+            Some(format!("password={SENHA_DE_TESTE}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let cookie_bruto = headers
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("login ok tem Set-Cookie")
+            .to_owned();
+        assert!(cookie_bruto.contains("HttpOnly") && cookie_bruto.contains("SameSite=Lax"));
+        let cookie = cookie_bruto.split(';').next().unwrap().to_owned();
+
+        // Dashboard com a sessão: 200 de verdade.
+        let (status, _, body) = pedir(&app, router.clone(), "GET", "/", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Nenhum projeto registrado"), "body: {body}");
+
+        // Logout revoga: o MESMO cookie não serve mais.
+        let (status, headers, _) =
+            pedir(&app, router.clone(), "POST", "/logout", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert!(
+            headers
+                .get(header::SET_COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .contains("Max-Age=0"),
+            "logout limpa o cookie"
+        );
+        let (status, _, _) = pedir(&app, router, "GET", "/", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "sessão revogada não entra");
+    }
+
+    #[tokio::test]
+    async fn sexto_login_no_minuto_come_429() {
+        let app = app_sem_docker();
+        let (router, _dir) = painel_com_auth(&app).await;
+        for i in 0..5 {
+            let (status, _, _) = pedir(
+                &app,
+                router.clone(),
+                "POST",
+                "/login",
+                None,
+                Some("password=errada".to_owned()),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::SEE_OTHER,
+                "tentativa {i} passa do limite"
+            );
+        }
+        let (status, _, body) = pedir(
+            &app,
+            router,
+            "POST",
+            "/login",
+            None,
+            Some(format!("password={SENHA_DE_TESTE}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            body.contains("Muitas tentativas"),
+            "429 do painel é página brandiada: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_ausente_da_503_com_instrucao() {
+        let app = app_sem_docker();
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(panel_auth::PanelAuth::with_hash_path(
+            dir.path().join("nao-existe"),
+        ));
+        let router = build_panel(Arc::clone(&app), auth);
+        let (status, _, body) = pedir(
+            &app,
+            router,
+            "POST",
+            "/login",
+            None,
+            Some("password=x".to_owned()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "fail-closed");
+        assert!(
+            body.contains("argon2") && body.contains("SUA-SENHA"),
+            "503 ensina a gerar o hash: {body}"
+        );
     }
 
     /// GATED: exige engine de Docker (`FLUX_DOCKER_URL`, convenção do repo —

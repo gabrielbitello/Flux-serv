@@ -27,6 +27,9 @@ clap = { workspace = true }
 bollard = "0.21.1"
 futures-util = "0.3.34"
 sha2.workspace = true
+# Auth do painel (08/09): Argon2id + CSPRNG do SO para o token de sessão.
+argon2.workspace = true
+getrandom.workspace = true
 # Borda R30 (edge.rs): traits Layer/Service do tower para a layer na frente
 # do router; "util" cobre ServiceExt (tests via oneshot/ServiceExt). Não está
 # no workspace deps — axum 0.8 já resolve tower 0.5, aqui só se declara.
@@ -38,3 +41,8 @@ http-body-util = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 http-body-util = { workspace = true }
+tempfile = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+# OsRng para gerar hash/salt nos testes (re-export do argon2 vem sem a
+# feature `getrandom` ligada — ligamos aqui no nosso lado).
+rand_core = { version = "0.6", features = ["getrandom"] }

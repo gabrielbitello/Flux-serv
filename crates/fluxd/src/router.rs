@@ -9,6 +9,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, header};
 use axum::response::Response;
 use flux_common::config::GlobalConfig;
+use tower::ServiceExt;
 
 use crate::AppState;
 use crate::decision::{self, Action, Decision};
@@ -22,14 +23,17 @@ use crate::sqlite_source::SqliteSource;
 /// `global` alimenta a borda R30 (teto de body vem do config, 09; o resto é
 /// default da 07). Config ausente JÁ chega aqui como `GlobalConfig::default()`
 /// — o warn de "usando defaults" é do `serve`, não se repete por request.
-pub fn build_router(app: Arc<AppState>, global: &GlobalConfig) -> Router {
+/// `panel` é o Router do painel COM auth (08) — o `Action::Panel` manda a
+/// request inteira pra ele (host do painel, 03); sem auth no painel a
+/// montagem aqui é proibida.
+pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) -> Router {
     Router::new()
         .fallback(handle)
         // A borda envolve o router inteiro: `layer` aplicado DEPOIS das rotas
         // roda ANTES do fallback — 413/429 morrem aqui, na admissão, antes da
         // decisão (03: camadas de borda como layers tower; 07/R30).
         .layer(EdgeLayer::new(EdgeLimits::from_global(global)))
-        .with_state(app)
+        .with_state((app, panel))
 }
 
 fn x_robots_tag() -> HeaderName {
@@ -82,7 +86,7 @@ impl decision::HostSource for Source<'_> {
     }
 }
 
-async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
+async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Request) -> Response {
     let started = std::time::Instant::now();
     let (parts, body) = req.into_parts();
 
@@ -169,7 +173,18 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
         Action::ApiWaking { retry_after } => pages::api_waking(retry_after),
         Action::ApiFailed => pages::api_failed(),
         Action::NotFound => pages::not_found(&host_raw),
-        Action::Panel => pages::panel(),
+        // Painel real com auth (08): a request inteira vai pro Router do
+        // painel — sessão/guard/login são coisa dele. A resposta volta para o
+        // rastro comum abaixo (log de acesso + noindex quando dev — painel
+        // já é noindex pelas próprias respostas, R22).
+        Action::Panel => {
+            let req = Request::from_parts(parts, body);
+            panel
+                .clone()
+                .oneshot(req)
+                .await
+                .expect("Router do painel é infalível (Infallible)")
+        }
         Action::ServeRobots(r) => pages::robots(&r, &app.domain),
         Action::ServeSitemap(s) => pages::sitemap(&s, &app.domain),
     };

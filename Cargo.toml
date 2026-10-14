@@ -23,3 +23,8 @@ http-body-util = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Auth do painel (08/09): Argon2id (pure Rust, sem dep de sistema) e
+# getrandom para o token de sessão (CSPRNG do SO).
+argon2 = "0.5"
+getrandom = "0.3"
+tempfile = "3"

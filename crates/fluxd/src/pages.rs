@@ -125,17 +125,6 @@ pub fn not_found(host: &str) -> Response {
     )
 }
 
-/// Placeholder do painel (F8 entrega o painel real com auth — o painel nunca
-/// fica público sem auth, 03).
-pub fn panel() -> Response {
-    let body = "<p>Painel em construção — chega na fase F8 com autenticação \
-obrigatória antes de qualquer exposição pública.</p>";
-    html_response(
-        StatusCode::OK,
-        html_page("Flux — painel", "Painel Flux", body, false),
-    )
-}
-
 /// 503 JSON + Retry-After para API parada/acordando (matriz 03/12).
 pub fn api_waking(retry_after: u64) -> Response {
     (
