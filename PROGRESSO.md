@@ -2,6 +2,56 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 14/10/2026 (parte 9) — WORKFLOW DE 7 FRENTES: ciclo CLI, beat, WAF, observe 24h, live+seed
+
+**Intenção** (pedido do Gabriel): fechar o ciclo de uso diário (1: down/logs/exec),
+beat JS (2), Adminer (3), SQLi/path scan com 403 e LAN fora do bloqueio,
+monitoramento de recursos 24 h MUITO detalhado com filtros + perícia de pico
+("gravar o que a imagem e as irmãs faziam no pico"), live server no dev
+configurável (prod é só build), migrate automático com seed controlável.
+"/workflow com o máximo de agentes assíncronos possíveis".
+
+**Execução**: dwfrun-5788c36a — 7 construtores com arquivos disjuntos (stubs
+pré-declarados em lib.rs para ninguém tocar arquivo alheio) + integrador +
+portões determinísticos (fmt/clippy/test, 3 rodadas) + revisão de olhos
+frescos com confirmador por achado. 2 escaladas resolvidas ao vivo: fallback
+da seed = TRUE (spec 05 > frase mal escrita do meu prompt); pagina-observe
+entrega com verde do próprio escopo (falhas remanescentes eram da frente
+observe, ainda rodando). **242 testes no workspace**; commits `caa6c08`,
+`c73929b`.
+
+**Entregas** (todas provadas AO VIVO pós-run):
+- `flux down/logs/exec` reais (lease segurando acordado; SSE `data:` por
+  linha; exec com exit real — truncado = -1, não falso 0; 409 honesto quando
+  o projeto dorme).
+- Beat JS: `/__flux/beat` 204 + script injetado em HTML elegível (prova:
+  grep no HTML pelo domínio público).
+- WAF ENFORCE (decisão do Gabriel, acima do shadow da 16): SQLi + path scan
+  → 403; LAN (192.168.140.0/24 + loopback) nunca bloqueada. **Furo achado na
+  prova e consertado**: internet via túnel chegava com IP do cloudflared e
+  herdava a allowlist — precedência agora é CF-Connecting-IP > XFF >
+  ConnectInfo. Prova final: internet 403, LAN 200, /.env 403.
+- Observe: sampler 30 s → metrics_1min (retenção 24 h), perícia de pico
+  (cpu>80% ou mem>85% do limite) com snapshot JSON da imagem + irmãos
+  coletados na hora, anti-spam 300 s; página `/observe` no painel (SVG 24 h,
+  filtros geral→projeto→container, peaks expansíveis).
+- Live server: `[dev] live` no flux.toml → exec -d no acordar (evento;
+  nunca derruba o up) — provado com comando marcador.
+- Seed: `[db].seed_on_rebuild` + `flux up --seed/--no-seed`; precedência
+  CLI > toml > default da spec (true); NUNCA em prod.
+
+**Adminer (3 do pedido)**: NÃO entregue ainda — ficou de fora do workflow
+(sem frente atribuída); pendência honesta.
+
+**Achados da revisão não corrigidos (baixos, registrados)**: peaks sem poda
+(576 linhas/dia teórico em pico contínuo); exec com saída >256 KB pode
+reportar exit de execução parcial; WAF depende do Caddy setar XFF (sem XFF
+parseável = fail para ConnectInfo = loopback); LIKE do filtro ?projeto não
+escapa %/_ (superfície autenticada).
+
+**Próximo**: Adminer (F12), watch dos teardowns 6 h, SSE de logs no painel,
+F10 (cotas) quando o 3º projeto entrar.
+
 ## 14/10/2026 (parte 8) — PRIMEIROS PROJETOS REAIS: presente-digital e djm VIVOS
 
 **Intenção** (pedido do Gabriel): dev-only de presente-digital e djm ("sigla

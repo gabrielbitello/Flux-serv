@@ -5,7 +5,7 @@ Matriz viva do Flux: cada funcionalidade em escopo com status de implementação
 integração falta. **NÃO** = só na spec.
 
 Atualizar no fim de CADA sessão que mexer em código (mesma cadência do
-[PROGRESSO](../PROGRESSO.md)). Última atualização: **14/10/2026 (madrugada)** — PRIMEIRO PROJETO REAL: presente-digital e djm VIVOS pela internet.
+[PROGRESSO](../PROGRESSO.md)). Última atualização: **14/10/2026 (madrugada 2)** — workflow de 7 frentes: ciclo CLI completo, beat, WAF 403, observe 24h com perícia de pico, live+seed — TUDO PROVADO AO VIVO.
 
 Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo dev temporário).
 
@@ -32,13 +32,13 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 |---|---|---|
 | R1 | Rust | **SIM** |
 | R2 | Docker em VM Debian | **SIM** — VM VirtualBox operacional, Docker 29.9, router do fluxd proxyando container real |
-| R3 | Sono automático por interação | **PARCIAL** — REAL nos projetos: 15 min sem interação → `docker stop` (presenciado), request → página de espera + wake (1,1 s no 2º request); falta overlay JS `/__flux/beat` (aba parada não segura) |
+| R3 | Sono automático por interação | **SIM** — presenciado ponta a ponta: dormiu (15 min), acordou (1,1 s), lease de CLI, CPU no sweep, E o overlay JS `/__flux/beat` injetado em HTML elegível com throttle 30 s (prova: script no HTML + POST 204) |
 | R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — CADEIA PÚBLICA COMPLETA pela internet (tunnel + Caddy TLS + fluxd): ghost → 404 brandiado 99 ms, painel → 303 guard, TLS válido; página de espera pela internet falta projeto real |
 | R5 | Sync Windows↔VM (mutagen) | **SIM** — sessões one-way-replica reais dos 2 projetos no `flux up`; .env/storage/vendor fora por ignore e persistem na VM |
-| R6 | Banco único + migrations + guard | **PARCIAL** — flux-db (mariadb:11) REAL com DBs/users dos 2 projetos, migrations rodaram por docker exec; guard re-varre no up; fresh/seed de dev ainda não exercido |
+| R6 | Banco único + migrations + guard | **PARCIAL** — flux-db real, migrations por docker exec, guard re-varre no up, seed com precedência flag CLI > toml > spec (nunca em prod); fresh ainda não exercido |
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
-| R8 | `flux up/logs/exec/down` no Windows | **SIM** — `flux up` COMPLETO (register → lease → sync → compose up no fluxd com guard/override → poll do ENGINE → migrations), túnel SSH automático, wizard `-m`; provado nos 2 projetos reais |
-| R9 | Painel web | **PARCIAL** — dashboard/detalhe/eventos/SVG server-side + AUTH REAL (Argon2id, sessão 12 h, rate limit 5/min, guard) montado no router público; falta SSE de logs e abas de projeto (banco/sync/domínios/deploys) |
+| R8 | `flux up/logs/exec/down` no Windows | **SIM** — up COMPLETO + `logs [-f]` (SSE, lease), `exec --` (exit real; truncado = -1), `down`; túnel SSH automático; wizard `-m`; provado ao vivo nos projetos |
+| R9 | Painel web | **PARCIAL** — auth real + dashboard/detalhe/eventos + **/observe (24 h, filtros geral→projeto→container, peaks com snapshot)**; falta SSE de logs e abas (banco/sync/domínios/deploys) |
 | R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
 | R12 | Troca de versão invisível + drain de jobs | **NÃO** — F10 |
@@ -53,7 +53,7 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 | R21 | API acorda sem quebrar app | **PARCIAL** — 503 JSON + `Retry-After` testado; hold/fila na F13 |
 | R22 | Homolog escondida de bots | **SIM** |
 | R23 | robots/sitemap autogen em prod | **SIM** |
-| R24 | Métricas + alertas + logs com rotação | **PARCIAL** — log de acesso/events no SQLite; F15 |
+| R24 | Métricas + alertas + logs com rotação | **PARCIAL** — sampler 30 s→rollup 1 min com retenção 24 h + perícia de pico (snapshot de irmãos) no SQLite + página com filtros; F15 traz alertas/curva longa |
 | R25 | DR + upgrade fluxd + boot do host | **PARCIAL** — versionamento de schema + recusa corrupção; F16 |
 | R26 | Multi-stack (laravel/node/rust/static) | **PARCIAL** — enum + `[health]`/`[db] migrate_cmd`; adapters na F17 |
 | R27 | Fila de builds priorizando prod | **NÃO** — config existe; F10 |
@@ -61,11 +61,19 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 | R29 | Guard de runtime | **NÃO** — F14 |
 | R30 | Borda: rate limit + teto de body | **SIM** — 300/min burst 100 por host, 100 conexões, 413 cedo, 429/413 brandiados; montada no router (testes unitários; sem tráfego real até a VM) |
 | R31 | Páginas de erro fora de dev + manutenção | **PARCIAL** — família Flux pronta; 429/413/manutenção na F18 |
-| R32 | Headers + WAF próprio com shadow mode | **NÃO** — F19 |
+| R32 | Headers + WAF próprio com shadow mode | **PARCIAL** — WAF SQLi+path scan em ENFORCE 403 (decisão do Gabriel, acima do shadow da 16) com allowlist 192.168.140.0/24+loopback (LAN nunca) e CF-Connecting-IP > XFF > ConnectInfo (prova: internet 403, LAN 200); headers e bad bots F19 |
 | R33 | Status público com causa classificada | **NÃO** — enum `Causa` existe no código; F20 |
 | R34 | Backup banco prod 48 h/7 d | **NÃO** — F16 |
 
 ## Histórico de atualização
+
+- **14/10/2026 (madrugada 2)** — WORKFLOW dwfrun-5788c36a (7 frentes paralelas +
+  integrador + portões cargo + revisão independente com confirmador; 242
+  testes): ciclo CLI completo (down/logs/exec provados ao vivo), beat JS
+  (spec 04 completa), WAF enforce 403 com allowlist LAN + CF-Connecting-IP
+  (prova: internet 403, LAN 200), observe 24 h com perícia de pico + página
+  /observe, live server + seed (commits `caa6c08`, `c73929b`). Fix de furo
+  achado na prova: internet via túnel herdava allowlist do IP do cloudflared.
 
 - **14/10/2026 (madrugada)** — PRIMEIRO PROJETO REAL: **presente-digital** e
   **djm** vivos pela internet (`*-d.bitello.xyz` 200/302 pela cadeia tunnel →
