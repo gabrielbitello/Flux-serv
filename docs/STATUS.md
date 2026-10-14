@@ -32,7 +32,7 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 |---|---|---|
 | R1 | Rust | **SIM** |
 | R2 | Docker em VM Debian | **SIM** — VM VirtualBox operacional, Docker 29.9, router do fluxd proxyando container real |
-| R3 | Sono automático por interação | **PARCIAL** — sweep 60 s + guardas (lease/cooldown/CPU) testados em engine real; sem janela do sync nem painel |
+| R3 | Sono automático por interação | **PARCIAL** — REAL nos projetos: 15 min sem interação → `docker stop` (presenciado), request → página de espera + wake (1,1 s no 2º request); falta overlay JS `/__flux/beat` (aba parada não segura) |
 | R4 | Nunca 500/404: página de espera + wake | **PARCIAL** — CADEIA PÚBLICA COMPLETA pela internet (tunnel + Caddy TLS + fluxd): ghost → 404 brandiado 99 ms, painel → 303 guard, TLS válido; página de espera pela internet falta projeto real |
 | R5 | Sync Windows↔VM (mutagen) | **SIM** — sessões one-way-replica reais dos 2 projetos no `flux up`; .env/storage/vendor fora por ignore e persistem na VM |
 | R6 | Banco único + migrations + guard | **PARCIAL** — flux-db (mariadb:11) REAL com DBs/users dos 2 projetos, migrations rodaram por docker exec; guard re-varre no up; fresh/seed de dev ainda não exercido |
