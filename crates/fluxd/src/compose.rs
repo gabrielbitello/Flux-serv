@@ -498,6 +498,10 @@ mod escolha {
 
 #[cfg(test)]
 mod tunel {
+    // A classificação testada aqui é a MESMA lógica que o tunel_classificar
+    // aplica (match de imagem em minúsculas) — testada inline para não rodar
+    // docker compose no unit test.
+    #[allow(unused_imports)]
     use super::*;
 
     fn config_com(servicos: serde_json::Value) -> serde_json::Value {
