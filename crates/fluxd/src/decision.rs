@@ -42,6 +42,11 @@ pub enum Action {
     NotFound,
     /// Painel em `flux.bitello.xyz` (auth chega na F8).
     Panel,
+    /// `POST /api/projects/{name}/deploy` NO HOST DO PAINEL (10/F4): rota
+    /// pública de deploy, gated pela flag `[deploy] public_route` (o gate é
+    /// verificado no handler — a decisão não vê config). Só o host do painel
+    /// tem a rota; em Prod/Dev o mesmo path segue pro proxy do container.
+    Deploy { name: String },
     /// Intercept de `/robots.txt` ANTES do proxy (R22/R23).
     ServeRobots(Robots),
     /// Intercept de `/sitemap.xml` ANTES do proxy (R23).
@@ -96,10 +101,13 @@ pub fn decide(
 ) -> Decision {
     let host = ManagedHost::parse(host_raw, domain, |n| src.project_exists(n));
     let action = match &host {
-        ManagedHost::Panel => match path {
-            "/robots.txt" => Action::ServeRobots(Robots::DisallowAll),
-            "/sitemap.xml" => Action::ServeSitemap(Sitemap::Empty),
-            _ => Action::Panel,
+        ManagedHost::Panel => match rota_deploy(path) {
+            Some(name) => Action::Deploy { name },
+            None => match path {
+                "/robots.txt" => Action::ServeRobots(Robots::DisallowAll),
+                "/sitemap.xml" => Action::ServeSitemap(Sitemap::Empty),
+                _ => Action::Panel,
+            },
         },
         ManagedHost::Unknown(_) => Action::NotFound,
         ManagedHost::Prod { name } => prod_action(name, path, wants_json, src),
@@ -108,6 +116,26 @@ pub fn decide(
         }
     };
     Decision { host, action }
+}
+
+/// Reconhece o path EXATO da rota pública de deploy (10/F4):
+/// `/api/projects/{name}/deploy` com `name` em `[a-z0-9-]`. Qualquer outro
+/// formato (nome vazio, nome inválido, sufixo/ prefixo divergente) devolve
+/// `None` — o path cai no fluxo normal do host (painel → 404 do painel;
+/// Prod/Dev → proxy ao container, comportamento atual intacto). O MÉTODO não
+/// participa da decisão: recusar ≠ POST é do handler (deploy.rs), antes do
+/// rate limit.
+fn rota_deploy(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/projects/")?;
+    let name = rest.strip_suffix("/deploy")?;
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return None;
+    }
+    Some(name.to_owned())
 }
 
 fn prod_action(name: &str, path: &str, wants_json: bool, src: &dyn HostSource) -> Action {
@@ -480,6 +508,83 @@ mod tests {
         assert_eq!(
             m.decide("flux.bitello.xyz", "/robots.txt", false),
             Action::ServeRobots(Robots::DisallowAll)
+        );
+    }
+
+    /// Rota pública de deploy (10/F4): reconhecida SÓ no host do painel, com
+    /// nome válido; a decisão não vê método nem config — handler resolve.
+    #[test]
+    fn rota_de_deploy_so_no_host_do_painel_com_nome_valido() {
+        let m = Mock::default();
+        assert_eq!(
+            m.decide("flux.bitello.xyz", "/api/projects/vipers/deploy", true),
+            Action::Deploy {
+                name: "vipers".into()
+            },
+            "host do painel + path exato → Deploy"
+        );
+        assert_eq!(
+            m.decide("flux.bitello.xyz", "/api/projects/my-app-2/deploy", true),
+            Action::Deploy {
+                name: "my-app-2".into()
+            },
+            "nome com dígito e '-' passa"
+        );
+        // Formatos que NÃO são a rota: caem no fluxo normal do painel.
+        for ruim in [
+            "/api/projects//deploy",
+            "/api/projects/Vipers/deploy",
+            "/api/projects/vipers/deploy/", // sufixo divergente
+            "/api/projects/vipers/deploi",
+            "/api/project/vipers/deploy",
+            "/api/deploy",
+        ] {
+            assert_eq!(
+                m.decide("flux.bitello.xyz", ruim, true),
+                Action::Panel,
+                "path {ruim:?} não é a rota de deploy"
+            );
+        }
+        // robots/sitemap do painel intocados pela novidade.
+        assert_eq!(
+            m.decide("flux.bitello.xyz", "/robots.txt", false),
+            Action::ServeRobots(Robots::DisallowAll)
+        );
+        assert_eq!(
+            m.decide("flux.bitello.xyz", "/sitemap.xml", false),
+            Action::ServeSitemap(Sitemap::Empty)
+        );
+    }
+
+    /// Fora do host do painel o MESMO path mantém o comportamento ATUAL:
+    /// Prod/Dev proxyam o container (o path é do app do cliente), host
+    /// desconhecido continua no único 404 da matriz (03). Nada de rota nova
+    /// vazando para hosts de projeto.
+    #[test]
+    fn path_de_deploy_fora_do_painel_segue_comportamento_atual() {
+        let acordado = Mock::default()
+            .st("vipers", Env::Prod, ContainerState::Awake)
+            .target("vipers", Env::Prod, "10.0.0.5:80");
+        assert_eq!(
+            acordado.decide("vipers.bitello.xyz", "/api/projects/vipers/deploy", true),
+            Action::Proxy {
+                name: "vipers".into(),
+                env: Env::Prod,
+                target: "10.0.0.5:80".into()
+            },
+            "prod: path é do app do cliente, não do fluxd"
+        );
+        let dev = Mock::default()
+            .st("vipers", Env::Dev, ContainerState::Awake)
+            .target("vipers", Env::Dev, "10.0.0.9:8080");
+        assert!(matches!(
+            dev.decide("vipers-d.bitello.xyz", "/api/projects/vipers/deploy", true),
+            Action::Proxy { .. }
+        ));
+        let fantasma = Mock::default();
+        assert_eq!(
+            fantasma.decide("zzz.bitello.xyz", "/api/projects/vipers/deploy", true),
+            Action::NotFound
         );
     }
 

@@ -233,6 +233,7 @@ pub struct GlobalConfig {
     pub shield: Option<GlobalShieldSection>,
     pub status: Option<StatusSection>,
     pub tools: Option<ToolsSection>,
+    pub deploy: Option<DeploySection>,
 }
 
 impl GlobalConfig {
@@ -277,6 +278,28 @@ impl GlobalConfig {
             .and_then(|l| l.max_body_bytes)
             .unwrap_or(104_857_600)
     }
+
+    /// Rota pública de deploy ligada? (`[deploy] public_route`, 10/F4.)
+    /// Default FALSE: o fluxd nasce fechado — nenhuma superfície nova fica
+    /// exposta sem decisão explícita no config (mesmo idioma de
+    /// `[temporary] enabled`, que também só existe declarado).
+    pub fn deploy_public(&self) -> bool {
+        self.deploy
+            .as_ref()
+            .and_then(|d| d.public_route)
+            .unwrap_or(false)
+    }
+}
+
+/// Rota pública de deploy (10/F4): `POST /api/projects/{name}/deploy` no host
+/// do painel, servida pelo router :8080 do fluxd. A API de controle :7420
+/// NÃO é afetada — continua 127.0.0.1.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploySection {
+    /// `true` = rota responde (com auth por projeto + rate limit próprio);
+    /// ausente/`false` = o path não existe para o router (404 brandiado).
+    pub public_route: Option<bool>,
 }
 
 /// Domínios gerenciados (09 [domain]): `{name}.bitello.xyz` prod,
@@ -584,6 +607,21 @@ node = "node:22"
         assert_eq!(c.idle_minutes(), 15);
         assert_eq!(c.domain.zone, "bitello.xyz");
         assert_eq!(c.domain.panel_host, "flux.bitello.xyz");
+        assert!(
+            !c.deploy_public(),
+            "sem [deploy] a rota pública nasce FECHADA (default false)"
+        );
+    }
+
+    #[test]
+    fn deploy_public_route_somente_declarada_liga_a_rota() {
+        let fechado = GlobalConfig::parse_str("[deploy]\npublic_route = false\n").unwrap();
+        assert!(!fechado.deploy_public(), "explicit false fecha");
+        let aberto = GlobalConfig::parse_str("[deploy]\npublic_route = true\n").unwrap();
+        assert!(aberto.deploy_public(), "explicit true abre");
+        // Chave desconhecida na seção continua ERRO (validação estrita, 06).
+        let err = GlobalConfig::parse_str("[deploy]\npublic_rout = true\n").unwrap_err();
+        assert!(err.to_string().contains("public_rout"), "erro: {err}");
     }
 
     #[test]

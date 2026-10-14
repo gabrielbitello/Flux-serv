@@ -129,12 +129,16 @@ fn stored_token_hash(st: &DbState) -> Option<String> {
     }
 }
 
-/// `Authorization: Bearer <token>` → `<token>`.
-fn bearer_token(v: &str) -> Option<&str> {
+/// `Authorization: Bearer <token>` → `<token>`. `pub(crate)` SÓ para o
+/// handler de deploy (deploy.rs) reusar o mesmo parse — build_api e as rotas
+/// da :7420 seguem intocados (a rota de deploy NUNCA entra aqui).
+pub(crate) fn bearer_token(v: &str) -> Option<&str> {
     v.strip_prefix("Bearer ").filter(|t| !t.is_empty())
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+/// sha256 em hex lowercase de 64 chars — formato gravado pelo
+/// `flux project token` e esperado pelo handler de deploy nos DOIS lados.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
     let mut s = String::with_capacity(64);
@@ -149,7 +153,8 @@ fn sha256_hex(data: &[u8]) -> String {
 /// byte num processo local. O bind 127.0.0.1 já mitiga (lib.rs), mas o gate
 /// de auth usa o padrão — custo trivial. Divergência de tamanho é pública
 /// (sha256 hex são sempre 64 chars) e sai cedo sem vazar conteúdo.
-fn hash_confere(a: &str, b: &str) -> bool {
+/// `pub(crate)` SÓ para o handler de deploy comparar o token do projeto.
+pub(crate) fn hash_confere(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;

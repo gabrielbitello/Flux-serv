@@ -7,6 +7,7 @@ pub mod ciclo;
 pub mod compose;
 pub mod db;
 pub mod decision;
+pub mod deploy;
 pub mod docker;
 pub mod edge;
 pub mod events;
@@ -41,6 +42,14 @@ pub struct AppState {
     /// Diretório de estado (/srv/flux/state na VM) — onde o fluxd escreve
     /// os overrides de compose (06). `None` = testes/dev sem disco.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Flag da rota pública de deploy (`[deploy] public_route`, 10/F4).
+    /// `false` = o path não existe para o router (404 brandiado) — desligar
+    /// a flag é o rollback completo da fase.
+    pub deploy_public: bool,
+    /// Rate limit PRÓPRIO da rota de deploy, por projeto (10/F4): bucket
+    /// dedicado com limites do deploy.rs — independente da borda global R30
+    /// (router.rs), que segue intocada.
+    pub deploy_limiter: std::sync::Arc<edge::EdgeState>,
 }
 
 impl AppState {
@@ -51,6 +60,12 @@ impl AppState {
             http: proxy::new_client(),
             docker,
             state_dir: None,
+            deploy_public: config.deploy_public(),
+            deploy_limiter: std::sync::Arc::new(edge::EdgeState::new(edge::EdgeLimits {
+                rate_per_min: deploy::DEPLOY_RATE_PER_MIN,
+                burst: deploy::DEPLOY_BURST,
+                ..edge::EdgeLimits::default()
+            })),
         }
     }
 }
@@ -64,7 +79,11 @@ pub const PANEL_PORT: u16 = 7421;
 /// Ciclo do `fluxd serve`: router catch-all :8080 (Caddy aponta pra cá, 03 —
 /// bind 127.0.0.1: só o Caddy da própria VM alcança, 09) + API de controle
 /// :7420 (127.0.0.1, NUNCA sai do localhost, 07) + painel web :7421
-/// (127.0.0.1, com auth, debug local).
+/// (127.0.0.1, com auth, debug local). ÚNICA exceção pública: a rota de
+/// deploy `POST /api/projects/{name}/deploy` no host do painel (10/F4) —
+/// servida pelo router :8080, atrás da flag `[deploy] public_route` e de
+/// rate limit + auth por projeto (deploy.rs). A API de CONTROLE da :7420
+/// não muda: segue 127.0.0.1 e sem essa rota (build_api intocado).
 pub async fn serve(
     db: std::path::PathBuf,
     config: Option<GlobalConfig>,

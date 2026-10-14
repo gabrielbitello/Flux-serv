@@ -15,6 +15,7 @@ use tower::ServiceExt;
 use crate::AppState;
 use crate::beat;
 use crate::decision::{self, Action, Decision};
+use crate::deploy;
 use crate::docker::DockerSource;
 use crate::edge::{EdgeLayer, EdgeLimits};
 use crate::events;
@@ -209,6 +210,18 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                 .await
                 .expect("Router do painel é infalível (Infallible)")
         }
+        // Rota pública de deploy (10/F4), SÓ no host do painel. Gate da flag
+        // PRIMEIRO: `[deploy] public_route` ausente/false = o path NÃO existe
+        // (404 brandiado do host) — desligar a flag é o rollback da fase.
+        // Ligada, o handler cuida de método/rate/auth/corpo (deploy.rs) e a
+        // resposta segue para o rastro comum abaixo.
+        Action::Deploy { name } => {
+            if !app.deploy_public {
+                pages::not_found(&host_raw)
+            } else {
+                deploy::deploy(Arc::clone(&app), name, Request::from_parts(parts, body)).await
+            }
+        }
         Action::ServeRobots(r) => pages::robots(&r, &app.domain),
         Action::ServeSitemap(s) => pages::sitemap(&s, &app.domain),
     };
@@ -336,5 +349,78 @@ mod tests {
             .to_bytes();
         let corpo = String::from_utf8_lossy(&bytes);
         assert!(corpo.contains("blocked"), "corpo JSON do bloqueio: {corpo}");
+    }
+
+    /// Rota pública de deploy (10/F4) com flag LIGADA: no host do painel o
+    /// path vive — sem Bearer o handler responde 401 (a rota existe e fecha).
+    #[tokio::test]
+    async fn deploy_com_flag_ligada_responde_no_host_do_painel() {
+        let cfg = GlobalConfig::parse_str("[deploy]\npublic_route = true\n").unwrap();
+        let app = Arc::new(AppState::new(State::in_memory().unwrap(), &cfg, None));
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        let router = router_com(&app);
+
+        let resp = router
+            .oneshot(req("flux.bitello.xyz", "/api/projects/vipers/deploy"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "flag ligada: rota existe e fecha sem token"
+        );
+    }
+
+    /// Flag DESLIGADA (default): o mesmo path no host do painel é 404
+    /// brandiado — a rota NÃO existe para o router (rollback = desligar flag).
+    /// Em host de projeto o path NUNCA foi da rota: segue proxyando o
+    /// container (comportamento atual, prova contra vazamento da rota).
+    #[tokio::test]
+    async fn deploy_sem_flag_some_em_404_brandiado() {
+        let app = app(); // GlobalConfig::default() → deploy_public = false
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        let router = router_com(&app);
+
+        let resp = router
+            .oneshot(req("flux.bitello.xyz", "/api/projects/vipers/deploy"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "flag desligada: rota some"
+        );
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let corpo = String::from_utf8_lossy(&bytes);
+        assert!(
+            corpo.contains("flux.bitello.xyz"),
+            "404 brandiado do host do painel: {corpo}"
+        );
+
+        // API de controle :7420 intocada (corte 11): sem token, rota de
+        // controle existe e fecha 503/401 — nunca 404 de rota pública.
+        let api = crate::api::build_api(Arc::clone(&app));
+        let resp = api
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://127.0.0.1:7420/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        assert!(
+            status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
+            "API de controle segue fechada SEM token: {status}"
+        );
     }
 }
