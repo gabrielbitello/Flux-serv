@@ -587,7 +587,7 @@ async fn up(env: &str) {
         let beta = crate::sync::vm_beta(&ctx.name, None);
         match crate::sync::SyncSpec::for_project(&ctx.dir, beta, None) {
             Ok(spec) => match crate::sync::create(&spec) {
-                Ok(id) => {
+                Ok(_) => {
                     println!(
                         "[4/6] sync `{}` ativa — pasta da VM: /srv/flux/projects/{} (full scan inicial roda em fundo)",
                         spec.session(),
@@ -626,7 +626,7 @@ async fn up(env: &str) {
             Ok(s) => {
                 st = s;
                 acordado = st.sleep.dev.mode.as_deref() == Some("awake");
-                if esperado % 30 == 0 {
+                if esperado.is_multiple_of(30) {
                     println!(
                         "      … {} s (estado: {})",
                         esperado,

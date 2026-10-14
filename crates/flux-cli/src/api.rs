@@ -182,8 +182,11 @@ struct UpIn<'a> {
 
 #[derive(Debug, Deserialize)]
 pub struct UpAceitoOut {
+    #[allow(dead_code)] // espelho do corpo da API — consumidor é o log do fluxd
     pub started: bool,
+    #[allow(dead_code)]
     pub project: String,
+    #[allow(dead_code)]
     pub compose_project: String,
 }
 
