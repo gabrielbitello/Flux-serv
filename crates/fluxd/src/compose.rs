@@ -252,6 +252,39 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         return;
     }
 
+    // Guard de TÚNEL por camada (05, regra do Gabriel 14/10): cloudflared no
+    // service principal (app) = NADA sobe; em secundário = só ele fica de
+    // fora (--scale 0) com aviso.
+    let pular = tunel_classificar(&dir, &compose_file, &projeto, &services);
+    if pular.iter().any(|(svc, _)| svc == "app") {
+        events::event(
+            st,
+            "error",
+            "up",
+            &format!(
+                "{projeto}: túnel/cloudflared no SERVICE PRINCIPAL (app) — NADA sobe (05: o \
+                 túnel é único, no host 03/12). Tire o connector do compose e use o do host."
+            ),
+        );
+        return;
+    }
+    if !pular.is_empty() {
+        let lista: Vec<String> = pular
+            .iter()
+            .map(|(svc, img)| format!("{svc} ({img})"))
+            .collect();
+        events::event(
+            st,
+            "warn",
+            "up",
+            &format!(
+                "{projeto}: túnel/cloudflared em service SECUNDÁRIO — sobe o resto, fica de \
+                 fora: {}",
+                lista.join(", ")
+            ),
+        );
+    }
+
     events::event(
         st,
         "info",
@@ -261,16 +294,17 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             services.join(", ")
         ),
     );
-    let saida = tokio::process::Command::new("docker")
-        .args(["compose", "-p", &projeto])
+    let mut up = tokio::process::Command::new("docker");
+    up.args(["compose", "-p", &projeto])
         .arg("-f")
         .arg(&compose_file)
         .arg("-f")
         .arg(&override_path)
-        .args(["up", "-d", "--build"])
-        .current_dir(&dir)
-        .output()
-        .await;
+        .args(["up", "-d", "--build"]);
+    for (svc, _) in &pular {
+        up.args(["--scale", &format!("{svc}=0")]);
+    }
+    let saida = up.current_dir(&dir).output().await;
     let saida = match saida {
         Ok(s) => s,
         Err(e) => {
@@ -319,6 +353,45 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         "up",
         &format!("{projeto}: subiu (compose up -d --build)"),
     );
+}
+
+/// Túnel/cloudflared por service: `[(service, imagem)]` dos services que
+/// carregam connector. Fonte = `docker compose config` em JSON (engine é a
+/// verdade; imagem resolvida inclui build). Padrões: cloudflared.
+fn tunel_classificar(
+    dir: &Path,
+    compose: &Path,
+    projeto: &str,
+    services: &[String],
+) -> Vec<(String, String)> {
+    let mut achados = Vec::new();
+    let Ok(saida) = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            tokio::process::Command::new("docker")
+                .args(["compose", "-p", projeto])
+                .arg("-f")
+                .arg(compose)
+                .args(["config", "--format", "json"])
+                .current_dir(dir)
+                .output()
+                .await
+        })
+    }) else {
+        return achados;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&saida.stdout) else {
+        return achados;
+    };
+    for svc in services {
+        let Some(imagem) = v["services"][svc]["image"].as_str() else {
+            continue;
+        };
+        let baixo = imagem.to_lowercase();
+        if baixo.contains("cloudflared") || baixo.contains("cloudflare/cloudflared") {
+            achados.push((svc.clone(), imagem.to_owned()));
+        }
+    }
+    achados
 }
 
 /// Varre `base` (até `profundidade` 3) coletando compose*/Dockerfile* para o
@@ -420,5 +493,61 @@ mod escolha {
     fn sem_compose_nada_escolhido() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(escolher_compose(tmp.path()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod tunel {
+    use super::*;
+
+    fn config_com(servicos: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "services": servicos })
+    }
+
+    #[test]
+    fn cloudflared_em_app_e_o_principal_bloqueia() {
+        let v = config_com(serde_json::json!({
+            "app": { "image": "cloudflare/cloudflared:latest" }
+        }));
+        let achados = classificar_de(&v, &["app".to_owned()]);
+        assert_eq!(achados.len(), 1);
+        assert_eq!(
+            achados[0].0, "app",
+            "principal: o chamador NEGA o up inteiro"
+        );
+    }
+
+    #[test]
+    fn cloudflared_em_sidecar_sera_pulado() {
+        let v = config_com(serde_json::json!({
+            "app": { "image": "serve:local" },
+            "tunnel": { "image": "cloudflare/cloudflared:latest" }
+        }));
+        let achados = classificar_de(&v, &["app".to_owned(), "tunnel".to_owned()]);
+        assert_eq!(achados.len(), 1);
+        assert_eq!(achados[0].0, "tunnel", "secundário: --scale 0 só nele");
+    }
+
+    #[test]
+    fn imagem_build_sem_field_image_nao_e_tunel() {
+        // Service com build (sem image no config JSON) NUNCA é túnel.
+        let v = config_com(serde_json::json!({
+            "app": { "build": { "context": "./serve" } }
+        }));
+        let achados = classificar_de(&v, &["app".to_owned()]);
+        assert!(achados.is_empty());
+    }
+
+    fn classificar_de(v: &serde_json::Value, services: &[String]) -> Vec<(String, String)> {
+        let mut achados = Vec::new();
+        for svc in services {
+            if let Some(imagem) = v["services"][svc]["image"].as_str() {
+                let baixo = imagem.to_lowercase();
+                if baixo.contains("cloudflared") || baixo.contains("cloudflare/cloudflared") {
+                    achados.push((svc.clone(), imagem.to_owned()));
+                }
+            }
+        }
+        achados
     }
 }
