@@ -321,6 +321,9 @@ async fn main() {
             _ => stub("fase F1 (spec 01) — VM Hyper-V Bookworm"),
         },
         Cmd::Setup { .. } => stub("fase F1 (spec 01) — setup do host Windows + VM"),
+        Cmd::Token {
+            sub: TokenCmd::Generate,
+        } => token_generate(),
         Cmd::Tunnel { .. } => stub("fase F7 (spec 03) — tunnel Cloudflare e domínios"),
         Cmd::Panel => stub("fase F8 (spec 08) — painel web com auth"),
         Cmd::Export => stub("fase F16 (spec 14) — DR export"),
@@ -415,6 +418,61 @@ fn parse_env(env: &str) -> Env {
 fn falhar(e: ApiError) -> ! {
     eprintln!("erro: {e}");
     std::process::exit(e.exit_code())
+}
+
+// ------------------------------------------------------- token da API (09)
+
+/// 64 chars hex de 32 bytes do CSPRNG do SO — token da API de controle.
+fn token_novo() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf).expect("CSPRNG do SO indisponível — não há token seguro sem isso");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `flux token generate` (09, estilo key:generate): token novo → sha256
+/// gravado no SQLite do fluxd via SSH (`settings.api_token_hash`) + valor
+/// claro no config do usuário. O config SÓ é escrito DEPOIS do hash na VM
+/// dar certo — falha no meio nunca deixa CLI com token que o fluxd não
+/// conhece. Token antigo morre na hora (revogar = gerar outro).
+fn token_generate() {
+    let token = token_novo();
+    let hash = sha256_hex(token.as_bytes());
+    let ssh_alvo = format!("{}@{}", tunel::VM_USER, tunel::VM_HOST);
+    let remoto = format!(
+        "sudo sqlite3 /srv/flux/state/flux.sqlite3 \"INSERT OR REPLACE INTO \
+         settings(k, v) VALUES ('api_token_hash', '{hash}');\""
+    );
+    let saida = match std::process::Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", &ssh_alvo, &remoto])
+        .output()
+    {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("erro: ssh não lançado (OpenSSH no PATH?): {e}");
+            std::process::exit(1);
+        }
+    };
+    if !saida.status.success() {
+        eprintln!(
+            "erro: gravar api_token_hash na VM falhou (ssh {}): {}",
+            ssh_alvo,
+            String::from_utf8_lossy(&saida.stderr).trim()
+        );
+        std::process::exit(1);
+    }
+    let caminho = match tunel::salvar_token_no_config(&token) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("erro: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("hash gravado na VM ({ssh_alvo}) · config atualizado: {}", caminho.display());
+    println!();
+    println!("token (MOSTRA UMA VEZ — guarde no gerenciador de senhas):");
+    println!("  {token}");
+    println!();
+    println!("próximo comando `flux` já usa o token novo (config.toml [api] token).");
 }
 
 // ---------------------------------------------------------- comandos F6
