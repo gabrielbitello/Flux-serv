@@ -16,7 +16,7 @@ mod tunel;
 // Wizard `flux up -m` que gera o flux.toml (spec 06).
 mod wizard;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use flux_common::config::ProjectToml;
@@ -400,7 +400,14 @@ async fn main() {
             _ => stub("fase F7+ (spec 05) — banco único e migrations via fluxd"),
         },
         Cmd::Sync { .. } => stub("fase F2 (spec 02) — sync contínua via mutagen"),
-        Cmd::Env { .. } => stub("fase F2/F12 (specs 02/09) — .env exclusivo da VM"),
+        Cmd::Env { cmd } => {
+            let ctx = contexto_atual();
+            match cmd {
+                EnvCmd::Pull => env_pull(&ctx.name),
+                EnvCmd::Push => env_push(&ctx.name),
+                EnvCmd::Edit => env_edit(&ctx.name),
+            }
+        }
         Cmd::Vm { cmd } => match cmd {
             VmCmd::Ssh => vm_ssh(),
             VmCmd::Upgrade => stub("fase F16 (spec 14) — upgrade do fluxd com rollback"),
@@ -782,22 +789,58 @@ async fn up(env: &str, seed: Option<bool>) {
     }
     println!("[5/6] container acordado (engine RUNNING) após {esperado} s");
 
-    // [6/6] Migrations (05): o fluxd lê os arquivos do DISCO DA VM (sync já
-    // entregou) — dev novo/mutado reconstrói, prod só aplica; seed segue a
-    // precedência da flag (--seed/--no-seed vencem o flux.toml).
-    match cliente.schema(&ctx.name, &env.to_string(), &[], seed).await {
+    // [6/6] Migrations (05): o CLI coleta `database/migrations/*.php` do repo
+    // (nome + sha256) e manda no corpo — o contrato é esse (api.rs: "o CLI lê
+    // do repo e manda"); o fluxd compara com o hash aplicado: dev novo/mutado
+    // reconstrói, prod só aplica. Seed segue a precedência da flag
+    // (--seed/--no-seed vencem o flux.toml).
+    let migrations = coletar_migrations();
+    if migrations.is_empty() {
+        eprintln!("[6/6] banco: nenhuma migration em database/migrations — schema pulado");
+    }
+    match cliente.schema(&ctx.name, &env.to_string(), &migrations, seed).await {
         Ok(o) => println!(
             "[6/6] banco: {} · aplicadas {} · fresh {}",
             o.outcome, o.aplicadas, o.fresh
         ),
         Err(e) => eprintln!("aviso: pipeline de migrations falhou: {e} — o resto do up seguiu"),
     }
-
     imprime_status(&st);
     println!(
         "pronto: https://{} · lease até epoch {}",
         st.dev_host, lease.lease_until
     );
+}
+
+/// Coleta `database/migrations/*.php` do repo ATUAL (o `flux up` roda na
+/// pasta do projeto), ordenado por nome (ordem cronológica do Laravel) e
+/// com sha256 de cada conteúdo — o par (arquivo, hash) que o contrato do
+/// schema espera. Dir ausente = lista vazia (projeto sem migrations).
+fn coletar_migrations() -> Vec<(String, String)> {
+    coletar_migrations_em(Path::new("database/migrations"))
+}
+
+/// Versão injetável do coletor — pura o suficiente para testar sem chdir.
+fn coletar_migrations_em(dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut arquivos: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "php").unwrap_or(false))
+        .collect();
+    arquivos.sort();
+    arquivos
+        .iter()
+        .filter_map(|p| {
+            let corpo = std::fs::read(p).ok()?;
+            let mut h = Sha256::new();
+            h.update(&corpo);
+            let nome = p.file_name()?.to_str()?.to_owned();
+            Some((nome, format!("{:x}", h.finalize())))
+        })
+        .collect()
 }
 
 /// `flux ps [env]` — espelho do `docker compose ps` (06) com a regra do
@@ -1260,6 +1303,154 @@ async fn exec(command: Vec<String>, env: &str) {
     }
 }
 
+/// `flux env` (02): o `.env` vive SÓ na VM (`/srv/flux/projects/{name}/.env`)
+/// — o repo do Windows NUNCA ganha uma cópia (repo intocado, 02). `push`
+/// envia o `.env` da pasta local (rascunho gitignored) pra VM; `pull` traz o
+/// da VM pra pasta local; `edit` puxa pra um temp FORA do repo, abre o
+/// $EDITOR e devolve. Conteúdo nunca é exibido nem logado; destino sempre
+/// chmod 600. Tudo por SSH com a chave da entrada do ~/.ssh/config.
+fn env_ssh_alvo() -> String {
+    format!("{}@{}", tunel::VM_USER, tunel::VM_HOST)
+}
+
+fn env_remoto(name: &str) -> String {
+    format!("/srv/flux/projects/{name}/.env")
+}
+
+fn env_pull(name: &str) {
+    let saida = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            &env_ssh_alvo(),
+            &format!("cat {}", env_remoto(name)),
+        ])
+        .output()
+        .unwrap_or_else(|e| {
+            eprintln!("erro: não consegui lançar o ssh: {e}");
+            std::process::exit(127);
+        });
+    if !saida.status.success() {
+        let cauda = String::from_utf8_lossy(&saida.stderr).trim().to_owned();
+        eprintln!("erro: pull do .env falhou (o projeto já subiu na VM?): {cauda}");
+        std::process::exit(1);
+    }
+    std::fs::write(".env", &saida.stdout).unwrap_or_else(|e| {
+        eprintln!("erro: escrevendo .env local: {e}");
+        std::process::exit(1);
+    });
+    if !gitignored_env() {
+        eprintln!(
+            "aviso: `.env` não está no .gitignore do repo — NUNCA comita esse arquivo (02)"
+        );
+    }
+    println!(".env da VM → .env local ({} bytes)", saida.stdout.len());
+}
+
+fn env_push(name: &str) {
+    let corpo = std::fs::read(".env").unwrap_or_else(|e| {
+        eprintln!("erro: sem .env na pasta local para enviar: {e} (use `flux env pull` primeiro)");
+        std::process::exit(1);
+    });
+    let saida = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            &env_ssh_alvo(),
+            &format!(
+                "cat > {} && chmod 600 {}",
+                env_remoto(name),
+                env_remoto(name)
+            ),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut filho| {
+            use std::io::Write;
+            filho
+                .stdin
+                .as_mut()
+                .expect("stdin pipado")
+                .write_all(&corpo)?;
+            filho.wait_with_output()
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("erro: não consegui enviar o .env por ssh: {e}");
+            std::process::exit(127);
+        });
+    if !saida.status.success() {
+        let cauda = String::from_utf8_lossy(&saida.stderr).trim().to_owned();
+        eprintln!("erro: push do .env falhou: {cauda}");
+        std::process::exit(1);
+    }
+    println!(
+        ".env local → VM ({} bytes) — vale no próximo request; restart não precisa",
+        corpo.len()
+    );
+}
+
+fn env_edit(name: &str) {
+    let temp = std::env::temp_dir().join(format!("flux-env-{name}.env"));
+    let saida = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            &env_ssh_alvo(),
+            &format!("cat {}", env_remoto(name)),
+        ])
+        .output()
+        .unwrap_or_else(|e| {
+            eprintln!("erro: não consegui lançar o ssh: {e}");
+            std::process::exit(127);
+        });
+    if !saida.status.success() {
+        let cauda = String::from_utf8_lossy(&saida.stderr).trim().to_owned();
+        eprintln!("erro: edit precisa do .env na VM (subiu o projeto?): {cauda}");
+        std::process::exit(1);
+    }
+    std::fs::write(&temp, &saida.stdout).unwrap_or_else(|e| {
+        eprintln!("erro: escrevendo rascunho em {}: {e}", temp.display());
+        std::process::exit(1);
+    });
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "notepad".to_owned());
+    let status = std::process::Command::new(&editor)
+        .arg(&temp)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("erro: abrindo editor \"{editor}\": {e}");
+            std::process::exit(127);
+        });
+    if !status.success() {
+        eprintln!("erro: editor saiu com falha — nada foi enviado; rascunho em {}", temp.display());
+        std::process::exit(1);
+    }
+    let corpo = std::fs::read(&temp).unwrap_or_else(|e| {
+        eprintln!("erro: relendo rascunho: {e}");
+        std::process::exit(1);
+    });
+    std::fs::remove_file(&temp).ok();
+    std::fs::write(".env", &corpo).ok();
+    env_push(name);
+}
+
+/// `.env` coberto pelo .gitignore do repo? Barra barra defensiva: avisa, não
+/// bloqueia — o arquivo vive na VM; a cópia local é rascunho.
+fn gitignored_env() -> bool {
+    std::fs::read_to_string(".gitignore")
+        .map(|g| g.lines().any(|l| l.trim() == ".env"))
+        .unwrap_or(false)
+}
+
 /// Stub explícito: recusa com fase e exit ≠ 0 — nunca finge que fez (06).
 fn stub(fase: &str) -> ! {
     eprintln!("erro: comando ainda não implementado — chega na {fase}");
@@ -1269,6 +1460,32 @@ fn stub(fase: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coletor_de_migrations_ordena_e_hashea_so_php() {
+        let base = std::env::temp_dir().join(format!("flux-mig-test-{}", std::process::id()));
+        let dir = base.join("database/migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026_01_02_cria_x.php"), b"b").unwrap();
+        std::fs::write(dir.join("2026_01_01_cria_a.php"), b"a").unwrap();
+        std::fs::write(dir.join("notas.txt"), b"ignora").unwrap();
+
+        let lista = coletar_migrations_em(&base.join("database/migrations"));
+        assert_eq!(lista.len(), 2, "só .php");
+        assert_eq!(lista[0].0, "2026_01_01_cria_a.php", "ordem cronológica");
+        let esperado = {
+            let mut h = Sha256::new();
+            h.update(b"a");
+            format!("{:x}", h.finalize())
+        };
+        assert_eq!(lista[0].1, esperado);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn coletor_com_dir_ausente_devolve_vazio() {
+        assert!(coletar_migrations_em(Path::new("definitivamente/inexistente")).is_empty());
+    }
 
     #[test]
     fn query_de_logs_monta_env_tail_e_follow() {
