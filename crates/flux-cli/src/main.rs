@@ -617,7 +617,8 @@ async fn up(env: &str) {
         Ok(s) => s,
         Err(e) => falhar(e),
     };
-    let mut acordado = st.sleep.dev.mode.as_deref() == Some("awake");
+    let acordado_em = |s: &api::ProjectStatusOut| s.dev_container_state.as_deref() == Some("awake");
+    let mut acordado = acordado_em(&st);
     let mut esperado = 0u64;
     while !acordado && esperado < UP_TIMEOUT_SECS {
         std::thread::sleep(std::time::Duration::from_secs(3));
@@ -625,7 +626,7 @@ async fn up(env: &str) {
         match cliente.status(&ctx.name).await {
             Ok(s) => {
                 st = s;
-                acordado = st.sleep.dev.mode.as_deref() == Some("awake");
+                acordado = acordado_em(&st);
                 if esperado.is_multiple_of(30) {
                     println!(
                         "      … {} s (estado: {})",

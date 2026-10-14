@@ -294,6 +294,9 @@ struct ProjectStatus {
     dev_host: String,
     toml_hash: String,
     created_at: String,
+    /// Verdade do ENGINE para o dev (None = sem Docker conectado).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_container_state: Option<String>,
     /// Sono por ambiente (04); `mode: null` = nunca houve sinal.
     sleep: SleepStatus,
     /// Migrations JÁ APLICADAS por ambiente (05). A lista de PENDENTES é
@@ -387,6 +390,16 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
         }
     }
 
+    // Estado REAL do container (engine), separado do modo do sono — a linha
+    // de sleep_state nasce 'awake' por default e NÃO é verdade de container.
+    let dev_container_state = app.docker.as_ref().map(|d| {
+        use crate::decision::HostSource;
+        crate::docker::DockerSource::new(d.clone(), &app.state)
+            .env_state(&name, Env::Dev)
+            .as_str()
+            .to_owned()
+    });
+
     let mut migs = MigrationsStatus {
         dev: Vec::new(),
         prod: Vec::new(),
@@ -417,6 +430,7 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
         dev_host,
         toml_hash: hash,
         created_at: criado,
+        dev_container_state,
         sleep: SleepStatus {
             dev: sleep_dev,
             prod: sleep_prod,

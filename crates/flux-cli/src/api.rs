@@ -123,6 +123,10 @@ pub struct ProjectStatusOut {
     pub dev_host: String,
     pub toml_hash: String,
     pub created_at: String,
+    /// Verdade do ENGINE (None = fluxd sem Docker) — o modo da linha de sono
+    /// nasce 'awake' e NÃO serve de sinal de container no ar.
+    #[serde(default)]
+    pub dev_container_state: Option<String>,
     pub sleep: SleepStatusOut,
     pub migrations: MigrationsStatusOut,
 }
