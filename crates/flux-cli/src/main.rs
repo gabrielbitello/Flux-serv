@@ -747,6 +747,23 @@ async fn up(env: &str, seed: Option<bool>) {
         println!("[4/6] prod não sincroniza do Windows (02) — release vem do deploy (10)");
     }
 
+    // [4.5/6] Overlays (02/06): `[dev] overlays = true` + `.flux/overlays/`
+    // presente → espelha os arquivos por cima do repo NA VM (tar por ssh),
+    // antes do compose/migrate. Repo no Windows NUNCA é tocado; os arquivos
+    // são gitignored e o conteúdo nunca é exibido. Sem flag ou sem dir = nada.
+    if overlays_habilitados(&ctx.toml) {
+        let origem = ctx.dir.join(".flux/overlays");
+        match aplicar_overlays(&origem, &ctx.name) {
+            Ok(n) if n > 0 => println!(
+                "[4.5/6] overlays aplicados na VM: {n} arquivo(s) de .flux/overlays/"
+            ),
+            Ok(_) => println!(
+                "[4.5/6] overlays: flag ligada mas .flux/overlays/ vazio ou ausente — nada a aplicar"
+            ),
+            Err(e) => eprintln!("aviso: overlays não aplicados: {e} — o up seguiu"),
+        }
+    }
+
     // [5/6] Subida: 202 do fluxd + apuração pelo estado do engine.
     let _aceito = match cliente.subir(&ctx.name, &env.to_string()).await {
         Ok(a) => a,
@@ -810,6 +827,72 @@ async fn up(env: &str, seed: Option<bool>) {
         "pronto: https://{} · lease até epoch {}",
         st.dev_host, lease.lease_until
     );
+}
+
+/// `[dev] overlays` ligado no flux.toml do projeto? Parse tolerante: toml
+/// quebrado = false (o register já vai reclamar dele).
+fn overlays_habilitados(toml_src: &str) -> bool {
+    flux_common::config::ProjectToml::parse_str(toml_src)
+        .ok()
+        .and_then(|t| t.dev)
+        .and_then(|d| d.overlays)
+        .unwrap_or(false)
+}
+
+/// Aplica `.flux/overlays/**` sobre o repo NA VM: tar do dir local, pipe por
+/// ssh, extração em `/srv/flux/projects/{name}/`. Devolve quantos arquivos
+/// foram aplicados (contagem local — a lista nunca contém conteúdo, só paths).
+fn aplicar_overlays(origem: &Path, name: &str) -> Result<usize, String> {
+    let mut arquivos = Vec::new();
+    coletar_overlays(origem, &mut arquivos)?;
+    if arquivos.is_empty() {
+        return Ok(0);
+    }
+    let destino = format!("/srv/flux/projects/{name}/");
+    let status = std::process::Command::new("tar")
+        .arg("czf")
+        .arg("-")
+        .arg("-C")
+        .arg(origem)
+        .arg(".")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .and_then(|mut tar| {
+            let mut ssh = std::process::Command::new("ssh")
+                .args([
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    &format!("{}@{}", tunel::VM_USER, tunel::VM_HOST),
+                    &format!("tar xzf - -C {destino}"),
+                ])
+                .stdin(tar.stdout.take().expect("stdout do tar pipado"))
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            tar.wait()?;
+            ssh.wait()
+        })
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("tar/ssh do overlay falhou".to_owned());
+    }
+    Ok(arquivos.len())
+}
+
+/// Walk recursivo simples: só arquivos regulares, paths relativos.
+fn coletar_overlays(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let caminho = entry.path();
+        if caminho.is_dir() {
+            coletar_overlays(&caminho, out)?;
+        } else {
+            out.push(caminho);
+        }
+    }
+    Ok(())
 }
 
 /// Coleta `database/migrations/*.php` do repo ATUAL (o `flux up` roda na

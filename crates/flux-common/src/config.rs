@@ -205,6 +205,12 @@ pub struct HealthSection {
 pub struct DevSection {
     /// Comando de hot reload, executado em `/var/www` do container `app`.
     pub live: Option<String>,
+    /// Overlays de arquivos (02/06): quando `true`, o CLI aplica
+    /// `.flux/overlays/**` por cima do repo NA VM a cada `up` — versões
+    /// locais (gitignored) de arquivos que o dev precisa diferentes do que
+    /// está commitado (ex.: SQL de migration por dialeto de banco). Só faz
+    /// efeito com o dir `.flux/overlays/` presente na pasta do projeto.
+    pub overlays: Option<bool>,
 }
 
 /// Override por projeto da borda (07): rate limit por host.
