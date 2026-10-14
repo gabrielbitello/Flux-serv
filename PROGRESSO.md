@@ -2,6 +2,89 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 14/10/2026 (parte 10) — F4 fechada (rota de deploy + token por projeto) e runner self-hosted buildado na VM
+
+**Intenção** (pedido do Gabriel): rodar o plano orquestrado de runners —
+fechar a F4 do fluxd (rota pública de deploy + token por projeto) e colocar a
+infra do runner self-hosted de pé: repo próprio, snapshot da VM e imagem
+buildada. Escopo do runner foi REDEFINIDO na rodada: em vez da imagem mínima
+da F0 do plano, runner estilo tuxon com imagem quente completa (PHP 8.2–8.5,
+Node 22/24, gcloud, lastpass-cli) no repo `gabrielbitello/flux-runner`.
+
+**F4 — rota de deploy pública** (2 unidades em paralelo no working tree
+compartilhado, nada commitado):
+
+- Unidade a (`deploy.rs`, `router.rs`, `decision.rs`, `lib.rs`,
+  `config.rs`): `POST /api/projects/{name}/deploy` nestada SÓ no host do
+  painel no router :8080 (teste prova rotas de controle da :7420 inalcançáveis
+  pela rota pública), atrás da flag `[deploy].public_route` — default FALSE
+  (fechada); flag desligada = rota some em 404 brandiado (rollback = desligar
+  flag, testado nos dois caminhos). Handler com ordem de fechamento: método
+  ≠ POST → 404 fantasma; rate limit PRÓPRIO por projeto ANTES do auth
+  (bucket dedicado 10/min burst 10 — 429 + Retry-After do 11º em rajada;
+  borda R30 intocada); auth fail-closed contra `deploy_token_hash` (sem
+  Bearer 401 + evento, sem cadastro 503 com comando, token de OUTRO projeto
+  403 com causa, leitura falha 503); corpo estrito `{ref,actor?,run?}` com
+  `ref` = SHA 40 hex (senão 422); 409 para deploy concorrente (guard em
+  memória, solto pelo pipeline em qualquer desfecho); 202 + `tokio::spawn`
+  com rastro obrigatório em `deploy_log` + `events` — nada silencioso.
+  Pipeline declarado como CENÁRIO B: prepara o release-dir imutável
+  `/srv/flux/releases/{name}/{sha}` (`git fetch origin` + guard
+  `merge-base --is-ancestor` recusando SHA órfão + `git worktree add
+  --detach`), mas build `{name}-prod:{sha}` e subida de container NÃO sobem
+  (subida coerente é a blue-green da F10 — subir hoje herdaria
+  `restart: "no"` de dev). `api.rs` ganhou APENAS `pub(crate)` em
+  `bearer_token`/`sha256_hex`/`hash_confere`; `lib.rs:66` atualizado
+  documentando a rota como ÚNICA exceção pública.
+- Unidade b (`state.rs`, `flux-cli/main.rs`): SCHEMA_VERSION 1→2 com tabela
+  `deploy_tokens`, migrador v1→v2 preservando dados com o guard de adulteração
+  intacto; `set_deploy_token_hash`/`deploy_token_hash` fail-closed;
+  `flux project token <nome>` real no lugar do stub — token CSPRNG, sha256
+  lowercase 64 hex gravado via ssh sqlite3, nome validado contra
+  `[a-z0-9-]` antes do ssh, falha de ssh com stderr real e exit ≠ 0, token
+  claro impresso UMA vez, regenerar revoga (INSERT OR REPLACE).
+
+**Testes e portões**: 5 cenários novos em 2 arquivos de teste (auth
+fail-closed via router HTTP real; rate limit com 11 requests reais → 429 do
+11º com Retry-After; 409 concorrente determinístico em runtime
+current-thread, estável em 5 execuções; SHA órfão recusado com git real em
+tempdir + release imutável; migration v1→v2 em banco real preservando dado,
+com adulteração recusada nos dois caminhos do guard). Comando e resultado:
+`cargo test -p fluxd` → **195 passed, 0 failed** (178 unit + 4
+deploy_integration + 8 integration + 1 schema + 1 sleep + 2
+state_migration_integration). Portões: `cargo fmt` + `clippy -D warnings` +
+test (fluxd, flux-cli) verdes; sem dependência nova. Restou 1 warning
+herdado em `state.rs:527` (arquivo da unidade b), fora dos meus arquivos.
+
+**Runner self-hosted**:
+
+- Repo `github.com/gabrielbitello/flux-runner` publicado PRIVADO (Makefile,
+  `image/`, `deploy/`; `deploy/.env` AUSENTE confirmado — só placeholder).
+- Snapshot VirtualBox `pre-flux-runner-build` criado ANTES de mutar a VM.
+- Preflight na VM Flux: `/dev/sda1` com 61G livres (limite 8G), Docker
+  29.9.0. Repo copiado por tar-over-ssh.
+- Tentativa 1 FALHOU no passo gcloud: `E: Package google-cloud-sdk has no
+  installation candidate ... However the following packages replace it:
+  google-cloud-cli` (pacote renomeado upstream). Fix mínimo no HOST em
+  `image/Dockerfile:148` (`google-cloud-sdk` → `google-cloud-cli`, 1 linha,
+  NÃO commitado — decisão de commit fica com o Gabriel) e recopiado via scp.
+- Tentativa 2 verde com cache: `google-cloud-cli` 589.0.0-0 instalado,
+  `lastpass-cli` compilado em `/usr/local/bin/lpass`, zero ERROR no log,
+  `make` encerrado limpo. **Imagem `flux-runner:candidate` presente na VM:
+  4582 MB** (`docker image inspect` = 4805455756 bytes, bate com
+  `make size`). O aviso `AVISO: flux-runner:current ausente no cache local`
+  do `make size` é esperado — promote é proibido nesta execução, tag
+  `current` não existe.
+- Cerca respeitada: nada de `systemctl`, compose, prune ou container tocado
+  na VM que serve prod. Tempo total ~12 min (2 tentativas de ~6 min) contra
+  janela de 75 min.
+
+**Pendente** (nesta ordem): colar PAT real no `deploy/.env` (runner NÃO
+subiu); `make up` (unit systemd) + job de teste executado 5x seguidas; E2E
+F5 (comutar pool → push → 202 pela cadeia pública → release na VM). Lacunas
+R10 registradas no STATUS: blue-green/drain/lock, perfil estático completo,
+rollback comandado, rotação de releases (spec 10:48).
+
 ## 14/10/2026 (parte 9) — WORKFLOW DE 7 FRENTES: ciclo CLI, beat, WAF, observe 24h, live+seed
 
 **Intenção** (pedido do Gabriel): fechar o ciclo de uso diário (1: down/logs/exec),

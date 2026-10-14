@@ -5,9 +5,11 @@ Matriz viva do Flux: cada funcionalidade em escopo com status de implementação
 integração falta. **NÃO** = só na spec.
 
 Atualizar no fim de CADA sessão que mexer em código (mesma cadência do
-[PROGRESSO](../PROGRESSO.md)). Última atualização: **14/10/2026 (madrugada 2)** — workflow de 7 frentes: ciclo CLI completo, beat, WAF 403, observe 24h com perícia de pico, live+seed — TUDO PROVADO AO VIVO.
+[PROGRESSO](../PROGRESSO.md)). Última atualização: **14/10/2026 (manhã)** —
+F4 do plano de runners (rota de deploy pública + token por projeto) e
+consertos de revisão (timeout de 120 s nos comandos git do pipeline de fundo).
 
-Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo dev temporário).
+Placar atual: **11 SIM · 24 PARCIAL · 11 NÃO** (46 itens — entrou o modo dev temporário).
 
 ## Base de plataforma
 
@@ -40,7 +42,7 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 | R7 | Dev reconstrói / prod nunca | **PARCIAL** — regra implementada e testada (fresh+seed em dev, mutação em prod bloqueia); sem banco real ainda |
 | R8 | `flux up/logs/exec/down` no Windows | **SIM** — up COMPLETO + `logs [-f]` (SSE, lease), `exec --` (exit real; truncado = -1), `down`; túnel SSH automático; wizard `-m`; provado ao vivo nos projetos |
 | R9 | Painel web | **PARCIAL** — auth real + dashboard/detalhe/eventos + **/observe (24 h, filtros geral→projeto→container, peaks com snapshot)**; falta SSE de logs e abas (banco/sync/domínios/deploys) |
-| R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **NÃO** — template em `docs/templates/` |
+| R10 | Prod via GitHub Actions + releases imutáveis + blue-green | **PARCIAL** — F4 do plano de runners: rota pública `POST /api/projects/{name}/deploy` (flag `[deploy].public_route`, default FALSE) com Bearer POR projeto (`deploy_tokens` V2, fail-closed, 401/403/503 distintos), rate limit próprio da rota 10/min burst 10 (429 + Retry-After; limiter inline no handler, divergência mecânica do layer registrada no plano F4 ação 3), 409 de concorrência (guard em memória), pipeline de fundo: `git fetch origin` + guard de descendência (SHA órfão recusado) + release-dir IMUTÁVEL `/srv/flux/releases/{name}/{sha}` via `git worktree`, timeout 120 s por comando git, rastro obrigatório deploy_log + events. Runner self-hosted: repo `gabrielbitello/flux-runner` publicado privado, snapshot VirtualBox `pre-flux-runner-build`, imagem `flux-runner:candidate` buildada na VM (4582 MB; `docker image inspect` = 4805455756 bytes, bate com `make size`) com fix de 1 linha `google-cloud-sdk`→`google-cloud-cli` no `image/Dockerfile` (não commitado); PAT ainda placeholder — runner NÃO subiu. Lacunas: subida blue-green de prod com drain/lock (F9/F10), perfil estático completo, rollback comandado, rotação de releases (spec 10:48), cenário B (build da imagem e container NÃO sobem neste corte) |
 | R11 | Limites de recursos + hibernação de prod | **NÃO** — F10; `[queue]`/limites no schema |
 | R12 | Troca de versão invisível + drain | **PARCIAL** — MECANISMO completo e provado ao vivo (bg-test: switch blue→green pelo mesmo domínio, drain `stop -t` da velha, rollback = switch de volta); falta o deploy que SOBE a cor inativa (F9/F10, CI) e a semântica `queue:restart` do worker |
 | R13 | Cota global dev / limite individual prod | **NÃO** — F10 |
@@ -67,6 +69,15 @@ Placar atual: **11 SIM · 23 PARCIAL · 12 NÃO** (46 itens — entrou o modo de
 | R34 | Backup banco prod 48 h/7 d | **NÃO** — F16 |
 
 ## Histórico de atualização
+
+- **14/10/2026 (manhã)** — F4 do plano de runners: rota de deploy pública
+  (`deploy.rs`) com auth por projeto, rate limit próprio, guard de
+  concorrência e pipeline de fundo cenário B (fetch + descendência +
+  release-dir imutável); `flux project token` real com migration V2.
+  Revisão: timeout de 120 s (`kill_on_drop`) nos comandos git do pipeline
+  (git pendurado na rede não segura mais o guard EM_VOO); R10 NÃO → PARCIAL
+  com lacunas listadas; divergência layer→limiter inline registrada no plano
+  (F4 ação 3).
 
 - **14/10/2026 (madrugada 2)** — WORKFLOW dwfrun-5788c36a (7 frentes paralelas +
   integrador + portões cargo + revisão independente com confirmador; 242
