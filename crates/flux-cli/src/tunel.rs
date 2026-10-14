@@ -75,9 +75,12 @@ fn salvar_token_em(caminho: &std::path::Path, novo: &str) -> Result<(), String> 
         .ok()
         .and_then(|t| t.parse().ok())
         .unwrap_or_else(|| toml::Value::Table(Default::default()));
-    let tabela = raiz
-        .as_table_mut()
-        .ok_or_else(|| format!("{} não é um TOML de nível superior válido", caminho.display()))?;
+    let tabela = raiz.as_table_mut().ok_or_else(|| {
+        format!(
+            "{} não é um TOML de nível superior válido",
+            caminho.display()
+        )
+    })?;
     let api = tabela
         .entry("api")
         .or_insert_with(|| toml::Value::Table(Default::default()));
@@ -85,14 +88,12 @@ fn salvar_token_em(caminho: &std::path::Path, novo: &str) -> Result<(), String> 
         .as_table_mut()
         .ok_or_else(|| format!("[api] em {} não é uma tabela", caminho.display()))?;
     api_t.insert("token".to_owned(), toml::Value::String(novo.to_owned()));
-    let serializado = toml::to_string_pretty(&raiz)
-        .map_err(|e| format!("serializar config: {e}"))?;
+    let serializado =
+        toml::to_string_pretty(&raiz).map_err(|e| format!("serializar config: {e}"))?;
     if let Some(pai) = caminho.parent() {
-        std::fs::create_dir_all(pai)
-            .map_err(|e| format!("criar {}: {e}", pai.display()))?;
+        std::fs::create_dir_all(pai).map_err(|e| format!("criar {}: {e}", pai.display()))?;
     }
-    std::fs::write(caminho, serializado)
-        .map_err(|e| format!("escrever {}: {e}", caminho.display()))
+    std::fs::write(caminho, serializado).map_err(|e| format!("escrever {}: {e}", caminho.display()))
 }
 
 fn porta_aberta(port: u16) -> bool {

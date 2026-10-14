@@ -13,6 +13,8 @@ mod api;
 mod sync;
 // Túnel SSH p/ a API de controle + config global do usuário (spec 09).
 mod tunel;
+// Wizard `flux up -m` que gera o flux.toml (spec 06).
+mod wizard;
 
 use std::path::PathBuf;
 
@@ -41,8 +43,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Ciclo completo do dev no repo atual (06).
+    /// Ciclo completo do dev no repo atual (06). -m/--manifest abre o wizard
+    /// que GERA o flux.toml antes de subir.
     Up {
+        #[arg(short = 'm', long = "manifest", default_value_t = false)]
+        manifesto: bool,
         #[arg(default_value = "dev")]
         env: String,
     },
@@ -271,7 +276,25 @@ async fn main() {
     let cli = Cli::parse();
     match cli.cmd {
         // ------- F6: comandos que falam com a API de controle (07) -------
-        Cmd::Up { env } => up(&env).await,
+        Cmd::Up { manifesto, env } => {
+            if manifesto {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let pasta = cwd
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("projeto")
+                    .to_owned();
+                match wizard::gerar(&cwd, &pasta) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => std::process::exit(1),
+                    Err(e) => {
+                        eprintln!("erro no wizard do flux.toml: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            up(&env).await
+        }
         Cmd::Down { env } => ciclo_api("down", &env).await,
         Cmd::Restart { env } => ciclo_api("restart", &env).await,
         Cmd::Status { env } => status(&env).await,
@@ -459,7 +482,14 @@ fn token_generate() {
          settings(k, v) VALUES ('api_token_hash', '{hash}');\""
     );
     let saida = match std::process::Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", &ssh_alvo, &remoto])
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            &ssh_alvo,
+            &remoto,
+        ])
         .output()
     {
         Ok(s) => s,
@@ -483,7 +513,10 @@ fn token_generate() {
             std::process::exit(1);
         }
     };
-    println!("hash gravado na VM ({ssh_alvo}) · config atualizado: {}", caminho.display());
+    println!(
+        "hash gravado na VM ({ssh_alvo}) · config atualizado: {}",
+        caminho.display()
+    );
     println!();
     println!("token (MOSTRA UMA VEZ — guarde no gerenciador de senhas):");
     println!("  {token}");
