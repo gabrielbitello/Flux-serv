@@ -16,6 +16,7 @@ pub mod router;
 pub mod sleep;
 pub mod sqlite_source;
 pub mod state;
+pub mod temporary;
 
 use bollard::Docker;
 use flux_common::config::{DomainConfig, GlobalConfig};
@@ -90,22 +91,35 @@ pub async fn serve(
 
     // Sweep do sleep manager (04): a cada 60 s, re-sincroniza com o Docker e
     // dorme quem estourou ociosidade (com lease/cooldown/CPU como guardas).
+    // No MESMO tick roda a expiração dos dev temporários (14) — docker
+    // opcional: sem engine o teardown ainda limpa dirs + SQLite (compose
+    // é pulado com aviso no evento).
     let shared_for_sweep = std::sync::Arc::clone(&shared);
-    if let Some(d) = &shared.docker {
-        let d = d.clone();
+    {
+        let d = shared.docker.clone();
         let global = global.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             tick.tick().await; // primeiro tick dispara já — pula
             loop {
                 tick.tick().await;
-                let acoes =
-                    sleep::SleepManager::new(d.clone(), &shared_for_sweep.state, global.clone())
-                        .sweep()
-                        .await;
-                for a in acoes {
-                    tracing::info!("{a}");
+                if let Some(d) = &d {
+                    let acoes = sleep::SleepManager::new(
+                        d.clone(),
+                        &shared_for_sweep.state,
+                        global.clone(),
+                    )
+                    .sweep()
+                    .await;
+                    for a in acoes {
+                        tracing::info!("{a}");
+                    }
                 }
+                let agora = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|t| t.as_secs() as i64)
+                    .unwrap_or(0);
+                temporary::expire_check(&shared_for_sweep.state, d.clone(), agora).await;
             }
         });
     }

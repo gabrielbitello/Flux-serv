@@ -26,6 +26,7 @@ pub struct ProjectToml {
     pub sleep: Option<SleepSection>,
     pub resources: Option<ResourcesSection>,
     pub sync: Option<SyncSection>,
+    pub temporary: Option<TemporarySection>,
     pub provision: Option<ProvisionSection>,
     pub branding: Option<BrandingSection>,
     pub shield: Option<ShieldSection>,
@@ -137,6 +138,32 @@ pub struct SyncSection {
     /// Só ADICIONA ao ignore global (02) — nunca restringe o ignore de fábrica
     /// (`.env`, `vendor/`, `node_modules/`, `storage/`).
     pub extra_ignore: Option<Vec<String>>,
+}
+
+/// Modo dev temporário (14): apaga o projeto SOZINHO da VM após TTL sem
+/// interação. Repo no Windows intocado (sync é one-way-replica VM←Windows).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemporarySection {
+    /// Precisa ser dito — default false (nada se autodestrói por acidente).
+    pub enabled: Option<bool>,
+    /// Horas SEM INTERAÇÃO NENHUMA antes do teardown. Default 6 (14).
+    pub ttl_hours: Option<u64>,
+}
+
+impl TemporarySection {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+
+    pub fn ttl_hours(&self) -> u64 {
+        self.ttl_hours.unwrap_or(6)
+    }
+
+    /// TTL em segundos para o sweep do fluxd (satura em vez de estourar i64).
+    pub fn ttl_secs(&self) -> i64 {
+        i64::try_from(self.ttl_hours().saturating_mul(3600)).unwrap_or(i64::MAX)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

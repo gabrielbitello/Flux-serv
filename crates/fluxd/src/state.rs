@@ -212,6 +212,59 @@ impl State {
         })
     }
 
+    /// Relógio da expiração temporária (14): `(last_interaction_dev,
+    /// created_at)`, ambos epoch segundos ou `None`. O sweep usa o que
+    /// existir (interação vence registro) — ambos ausentes = não expira.
+    pub fn temporary_clock(&self, name: &str) -> Result<(Option<i64>, Option<i64>), StateError> {
+        self.with(|c| {
+            let created: Option<i64> = c
+                .query_row(
+                    "SELECT CAST(strftime('%s', created_at) AS INTEGER) FROM projects WHERE name = ?1",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let interacao: Option<i64> = c
+                .query_row(
+                    "SELECT CAST(strftime('%s', last_interaction) AS INTEGER)
+                     FROM sleep_state WHERE project = ?1 AND env = 'dev'",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok((interacao, created))
+        })
+    }
+
+    /// Apaga TODA a trilha do projeto no estado (14, teardown temporário).
+    pub fn purge_project(&self, name: &str) -> Result<(), StateError> {
+        self.with(|c| {
+            for sql in [
+                "DELETE FROM sleep_state WHERE project = ?1",
+                "DELETE FROM migration_state WHERE project = ?1",
+                "DELETE FROM active_color WHERE project = ?1",
+                "DELETE FROM deploy_log WHERE project = ?1",
+                "DELETE FROM projects WHERE name = ?1",
+            ] {
+                c.execute(sql, params![name])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Conteúdo bruto do `flux.toml` registrado (o sweep de temporários
+    /// re-parseia para saber TTL). `None` = projeto não registrado.
+    pub fn project_toml(&self, name: &str) -> Result<Option<String>, StateError> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT toml FROM projects WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     /// Linha de `sleep_state` de um projeto/ambiente — `(last_interaction,
     /// lease_until, cooldown_until, mode)`, tudo como epoch segundos
     /// (`NULL` quando nunca houve sinal).

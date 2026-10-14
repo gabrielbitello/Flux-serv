@@ -133,8 +133,9 @@ Garantias:
   próxima `flux up` do mesmo repo recria tudo do zero (sync fresca + build).
 - Sessão mutagen do projeto fica `halted` no host (beta sumiu) — inofensiva;
   o próximo `flux up` detecta sessão halted/órfã e recria.
-- `last_interaction` ausente/ilegível = NÃO expira (sem dado honesto de
-  tempo, não há teardown — nunca chutar relógio).
+- `last_interaction` ausente (projeto nunca interagiu) = o relógio é o
+  `created_at` do registro — honesto do mesmo jeito. AMBOS ausentes = não
+  expira (sem dado, não há teardown — nunca chutar relógio).
 - Teardown com lease ativo não acontece: lease renova interação (04), então
   projeto em uso não chega ao TTL.
 
