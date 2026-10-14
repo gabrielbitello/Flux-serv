@@ -73,12 +73,21 @@ use std::path::{Path, PathBuf};
 
 use crate::events;
 
-/// Gera o YAML de override para os services dados.
-pub fn override_yaml(services: &[String], env: &str) -> String {
+/// Gera o YAML de override para os services dados. `stripped` = services da
+/// block_list que o flux ASSUME (banco/cache é o flux-db, 05): entram como
+/// `!reset null` (compose v2.24+ remove o service no merge) e os services
+/// vivos ganham `depends_on: !reset null` — dependência de removido morre
+/// junto (pedido do Gabriel: "algo automático que sempre desliga o
+/// depends_on"). A base SEMPRE é a do projeto; o flux só muta isso.
+pub fn override_yaml(services: &[String], env: &str, stripped: &[String]) -> String {
     let mut y = String::from("services:\n");
+    for svc in stripped {
+        y.push_str(&format!("  {svc}: !reset null\n"));
+    }
     for svc in services {
         y.push_str(&format!("  {svc}:\n"));
         y.push_str("    ports: !reset null\n");
+        y.push_str("    depends_on: !reset null\n");
         y.push_str("    restart: \"no\"\n");
         y.push_str("    labels:\n      flux.managed: \"true\"\n");
         y.push_str("    environment:\n      DB_HOST: flux-db\n      DB_PORT: \"3306\"\n");
@@ -87,6 +96,75 @@ pub fn override_yaml(services: &[String], env: &str) -> String {
     y.push_str("networks:\n  flux-net:\n    external: true\n");
     let _ = env; // dev hoje; prod troca restart (F10) — parâmetro reservado
     y
+}
+
+/// Service renderizado do compose efetivo — a fatia que interessa ao flux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceRender {
+    pub name: String,
+    pub image: Option<String>,
+}
+
+/// Parse do `docker compose config --format json` (06/F6): o YAML vira
+/// objeto nas mãos do PRÓPRIO engine — sem parser de YAML aqui.
+pub fn parse_render(json: &str) -> Result<Vec<ServiceRender>, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let svcs = v
+        .get("services")
+        .and_then(|s| s.as_object())
+        .ok_or_else(|| "render sem a chave services".to_owned())?;
+    let mut out: Vec<ServiceRender> = Vec::new();
+    for (name, corpo) in svcs {
+        out.push(ServiceRender {
+            name: name.clone(),
+            image: corpo
+                .get("image")
+                .and_then(|i| i.as_str())
+                .map(ToOwned::to_owned),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Renderiza o compose efetivo do projeto via o engine (só leitura).
+pub async fn render_config(
+    dir: &Path,
+    compose: &Path,
+    projeto: &str,
+) -> Result<Vec<ServiceRender>, String> {
+    let saida = tokio::process::Command::new("docker")
+        .args(["compose", "-p", projeto])
+        .arg("-f")
+        .arg(compose)
+        .args(["config", "--format", "json"])
+        .current_dir(dir)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !saida.status.success() {
+        return Err(format!(
+            "compose config --format json falhou em {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&saida.stderr).trim()
+        ));
+    }
+    parse_render(&String::from_utf8_lossy(&saida.stdout))
+}
+
+/// Services da block_list presentes no render — o flux assume esses
+/// (strip no override). Services só de build (sem `image`) não entram.
+pub fn strip_list(renderizado: &[ServiceRender], block: &[String]) -> Vec<String> {
+    renderizado
+        .iter()
+        .filter(|s| {
+            s.image
+                .as_deref()
+                .map(|i| crate::guard::is_blocked(i, block))
+                .unwrap_or(false)
+        })
+        .map(|s| s.name.clone())
+        .collect()
 }
 
 /// Roda `docker compose config --services` no diretório do projeto
@@ -177,17 +255,21 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
 
     // Guard de imagens (05) no estado ATUAL do repo — o compose pode ter
     // chegado na sync depois do registro. Varre compose*/Dockerfile* até
-    // profundidade 3 da pasta do projeto.
+    // profundidade 3 da pasta do projeto. DESDE o strip automático: Dockerfile
+    // com FROM de banco/cache BLOQUEIA (base de build não sai com override);
+    // imagem de banco em SERVICE de compose NÃO bloqueia — o flux assume o
+    // service (strip no override, render abaixo) e o banco é o flux-db.
     let block: Vec<String> = flux_common::config::ImageGuardSection::default()
         .block_list()
         .to_vec();
     let mut arquivos: Vec<(String, String, String)> = Vec::new();
     coletar_guard(&dir, 0, &mut arquivos);
-    let refs: Vec<(&str, &str, &str)> = arquivos
+    let dockerfile_refs: Vec<(&str, &str, &str)> = arquivos
         .iter()
+        .filter(|(_, kind, _)| *kind == crate::guard::KIND_DOCKERFILE)
         .map(|(f, k, c)| (f.as_str(), k.as_str(), c.as_str()))
         .collect();
-    let violacoes = crate::guard::scan_files(&refs, &block);
+    let violacoes = crate::guard::scan_files(&dockerfile_refs, &block);
     if !violacoes.is_empty() {
         let resumo: Vec<String> = violacoes
             .iter()
@@ -232,6 +314,47 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             return;
         }
     };
+
+    // Render do compose EFETIVO (06/F6) + strip automático (05): service com
+    // imagem da block_list sai do merge via `!reset null`; banco/cache é o
+    // flux-db, nunca container do projeto. A base é sempre a do projeto.
+    let renderizado = match render_config(&dir, &compose_file, &projeto).await {
+        Ok(r) => r,
+        Err(e) => {
+            events::event(st, "error", "up", &format!("{projeto}: render do compose: {e}"));
+            return;
+        }
+    };
+    let strip = strip_list(&renderizado, &block);
+    let services: Vec<String> = services
+        .into_iter()
+        .filter(|s| !strip.contains(s))
+        .collect();
+    if services.is_empty() {
+        events::event(
+            st,
+            "error",
+            "up",
+            &format!(
+                "{projeto}: todos os services eram de infraestrutura assumida ({}) — não sobe \
+                 nada; o projeto precisa de um service de aplicação",
+                strip.join(", ")
+            ),
+        );
+        return;
+    }
+    if !strip.is_empty() {
+        events::event(
+            st,
+            "info",
+            "up",
+            &format!(
+                "{projeto}: flux assumiu services da block_list (strip no override): {} — banco/\
+                 cache é o flux-db (05)",
+                strip.join(", ")
+            ),
+        );
+    }
     let Some(state_dir) = app.state_dir.clone() else {
         events::event(
             st,
@@ -248,7 +371,7 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             return;
         }
     };
-    if let Err(e) = std::fs::write(&override_path, override_yaml(&services, &env)) {
+    if let Err(e) = std::fs::write(&override_path, override_yaml(&services, &env, &strip)) {
         events::event(
             st,
             "error",
@@ -361,33 +484,47 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
     );
 
     // Live server de dev ([dev] live): só com up bem-sucedido e em dev —
-    // qualquer falha aqui é warn, o up já terminou com sucesso.
+    // qualquer falha aqui é warn, o up já terminou com sucesso. Service
+    // principal segue a mesma regra do find_app_container: `app` se existir,
+    // senão o primeiro (vipa usa `php`, presente usa `app`).
     if env == "dev" {
-        subir_live_se_configurado(st, &name, &projeto).await;
+        let principal = if services.iter().any(|s| s == "app") {
+            "app".to_owned()
+        } else {
+            services[0].clone()
+        };
+        subir_live_se_configurado(st, &name, &projeto, &principal).await;
     }
 }
 
 /// Monta os argumentos do live server: `docker compose -p {projeto} exec -d
-/// app sh -c "cd /var/www && {live}"`. Pura, para o teste cobrir a montagem
-/// sem engine (o `-d` solta o processo: exit 0 = "iniciado", não "saudável").
-fn comando_live_args(projeto: &str, live: &str) -> Vec<String> {
+/// {service} sh -c "{live}"`. Pura, para o teste cobrir a montagem sem engine
+/// (o `-d` solta o processo: exit 0 = "iniciado", não "saudável"). O workdir
+/// é o do SERVICE (working_dir declarado ou WORKDIR da imagem) — o flux não
+/// chumba caminho: cada projeto tem o seu (/var/www, /app, ...).
+fn comando_live_args(projeto: &str, service: &str, live: &str) -> Vec<String> {
     vec![
         "compose".to_owned(),
         "-p".to_owned(),
         projeto.to_owned(),
         "exec".to_owned(),
         "-d".to_owned(),
-        "app".to_owned(),
+        service.to_owned(),
         "sh".to_owned(),
         "-c".to_owned(),
-        format!("cd /var/www && {live}"),
+        live.to_owned(),
     ]
 }
 
 /// Dispara o live server de dev quando o flux.toml do projeto (lido do state,
 /// como o temporary lê) declara `[dev] live`. NUNCA falha o up: todo erro é
 /// evento warn com a causa real.
-async fn subir_live_se_configurado(st: &crate::state::State, name: &str, projeto: &str) {
+async fn subir_live_se_configurado(
+    st: &crate::state::State,
+    name: &str,
+    projeto: &str,
+    service: &str,
+) {
     let toml_src = match st.project_toml(name) {
         Ok(Some(t)) => t,
         Ok(None) => return, // projeto sem flux.toml registrado — não pede live
@@ -429,10 +566,10 @@ async fn subir_live_se_configurado(st: &crate::state::State, name: &str, projeto
         st,
         "info",
         "up",
-        &format!("{projeto}: disparando live server de dev: {live}"),
+        &format!("{projeto}: disparando live server de dev ({service}): {live}"),
     );
     match tokio::process::Command::new("docker")
-        .args(comando_live_args(projeto, live))
+        .args(comando_live_args(projeto, service, live))
         .output()
         .await
     {
@@ -690,9 +827,21 @@ mod tests {
 
     #[test]
     fn override_cobre_todos_os_services_com_as_regras_da_06() {
-        let y = override_yaml(&["app".into(), "worker".into()], "dev");
+        let y = override_yaml(
+            &["app".into(), "worker".into()],
+            "dev",
+            &["mysql".into()],
+        );
         assert!(y.contains("  app:\n"));
         assert!(y.contains("  worker:\n"));
+        // strip: service assumido entra como !reset null (remove no merge)
+        assert!(y.contains("  mysql: !reset null\n"));
+        // depends_on de service vivo morre — dependência de removido não sobra
+        assert_eq!(
+            y.matches("depends_on: !reset null").count(),
+            2,
+            "depends_on fora de todos os services vivos"
+        );
         assert_eq!(
             y.matches("ports: !reset null").count(),
             2,
@@ -711,19 +860,53 @@ mod tests {
     }
 
     #[test]
-    fn comando_live_monta_exec_detach_no_app_a_partir_de_var_www() {
-        let args = comando_live_args("flux-vippers-dev", "npm run dev -- --host 0.0.0.0");
+    fn parse_render_extrai_nome_e_imagem_do_json_do_engine() {
+        let json = r#"{
+            "name": "flux-vipa-dev",
+            "services": {
+                "php": {"build": {"context": "docker"}},
+                "mysql": {"image": "mysql:9.3", "depends_on": []}
+            }
+        }"#;
+        let r = parse_render(json).expect("parseia");
+        assert_eq!(r.len(), 2);
+        let mysql = r.iter().find(|s| s.name == "mysql").expect("mysql");
+        assert_eq!(mysql.image.as_deref(), Some("mysql:9.3"));
+        let php = r.iter().find(|s| s.name == "php").expect("php");
+        assert_eq!(php.image, None, "service de build não tem image");
+    }
+
+    #[test]
+    fn strip_list_pega_so_service_com_imagem_bloqueada() {
+        let block = vec!["mysql".into(), "redis".into()];
+        let renderizado = vec![
+            ServiceRender { name: "php".into(), image: None },
+            ServiceRender { name: "mysql".into(), image: Some("mysql:9.3".into()) },
+            ServiceRender { name: "app".into(), image: Some("ghcr.io/projeto/app:dev".into()) },
+        ];
+        assert_eq!(strip_list(&renderizado, &block), vec!["mysql".to_owned()]);
+    }
+
+    #[test]
+    fn comando_live_monta_exec_detach_no_app_sem_chumbar_workdir() {
+        let args = comando_live_args("flux-vipa-dev", "php", "npm run build -- --watch");
         assert_eq!(
             args[..6],
-            ["compose", "-p", "flux-vippers-dev", "exec", "-d", "app"],
-            "exec detached no service app, projeto certo"
+            ["compose", "-p", "flux-vipa-dev", "exec", "-d", "php"],
+            "exec detached no service PRINCIPAL do projeto (app ou primeiro)"
         );
         assert_eq!(args[6], "sh", "shell é sh (paridade com o exec do db.rs)");
         assert_eq!(args[7], "-c");
         assert_eq!(
-            args[8], "cd /var/www && npm run dev -- --host 0.0.0.0",
-            "comando do toml verbatim após o cd /var/www"
+            args[8], "npm run build -- --watch",
+            "comando do toml verbatim — workdir vem do service, não do flux"
         );
+    }
+
+    #[test]
+    fn comando_live_usa_app_quando_existe() {
+        let args = comando_live_args("flux-presente-digital-dev", "app", "npm run build -- --watch");
+        assert_eq!(args[5], "app");
     }
 }
 

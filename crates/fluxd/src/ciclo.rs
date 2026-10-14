@@ -378,6 +378,19 @@ async fn rodar_exec(
     id: &str,
     cmd: &[String],
 ) -> Result<(String, bool, i64), String> {
+    // Workdir do SERVICE, não do flux: o inspect traz o working_dir efetivo
+    // do container (WORKDIR da imagem ou o declarado no compose). Fallback =
+    // convenção histórica /var/www.
+    let workdir = match docker.inspect_container(id, None).await {
+        Ok(info) => info
+            .config
+            .as_ref()
+            .and_then(|c| c.working_dir.as_deref())
+            .filter(|w| !w.is_empty())
+            .unwrap_or(EXEC_WORKDIR)
+            .to_owned(),
+        Err(_) => EXEC_WORKDIR.to_owned(),
+    };
     let exec = docker
         .create_exec(
             id,
@@ -387,7 +400,7 @@ async fn rodar_exec(
                 attach_stderr: Some(true),
                 tty: Some(false),
                 cmd: Some(cmd.to_vec()),
-                working_dir: Some(EXEC_WORKDIR.to_owned()),
+                working_dir: Some(workdir),
                 ..Default::default()
             },
         )
