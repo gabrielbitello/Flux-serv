@@ -11,7 +11,7 @@ use flux_common::protocol::{ContainerState, Env};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Versão do schema guardada em `settings.schema_version`.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
 pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -81,6 +81,27 @@ CREATE TABLE IF NOT EXISTS deploy_tokens(
     project TEXT PRIMARY KEY,
     token_hash TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
+/// v3 (sync do mutagen): estado das sessões do `flux watch` — o watch roda no
+/// HOST Windows, reporta ao fluxd (POST /sync/report) e o painel web lê/limpa
+/// via GET /sync/status. `rescan_requested` é a fila de rescan POR PROJETO:
+/// o painel seta, o watch consome e limpa com `rescan_applied` no relato
+/// seguinte. `updated_at` em RFC3339 UTC (contrato do /sync/status); os
+/// DEFAULT permitem a linha "só com flag" nascer do rescan antes do
+/// primeiro relato do watch.
+const SCHEMA_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS sync_status(
+    project TEXT PRIMARY KEY,
+    session TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'unknown',
+    paused INTEGER NOT NULL DEFAULT 0,
+    files INTEGER,
+    problems INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    rescan_requested INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 "#;
 
@@ -256,6 +277,9 @@ impl State {
                 "DELETE FROM migration_state WHERE project = ?1",
                 "DELETE FROM active_color WHERE project = ?1",
                 "DELETE FROM deploy_log WHERE project = ?1",
+                // Estado de sync do watch (v3) também é trilha: sem isso o
+                // painel mostraria sync de projeto temporário já apagado.
+                "DELETE FROM sync_status WHERE project = ?1",
                 "DELETE FROM projects WHERE name = ?1",
             ] {
                 c.execute(sql, params![name])?;
@@ -517,15 +541,27 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         None => {
             conn.execute_batch(SCHEMA_V1)?;
             conn.execute_batch(SCHEMA_V2)?;
+            conn.execute_batch(SCHEMA_V3)?;
             conn.execute(
                 "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION],
             )?;
         }
-        // v1 → v2 (10): acrescenta `deploy_tokens` sem tocar dado nenhum —
-        // o DDL é só CREATE TABLE IF NOT EXISTS, seguro reexecutar.
+        // v1 → atual (10): acrescenta `deploy_tokens` e o que veio depois sem
+        // tocar dado nenhum — o DDL é só CREATE TABLE IF NOT EXISTS, seguro
+        // reexecutar.
         Some(1) => {
             conn.execute_batch(SCHEMA_V2)?;
+            conn.execute_batch(SCHEMA_V3)?;
+            conn.execute(
+                "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        // v2 → atual (sync): acrescenta `sync_status` do watch; banco que já
+        // tem token de deploy (todo fluxd em produção hoje).
+        Some(2) => {
+            conn.execute_batch(SCHEMA_V3)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -638,11 +674,11 @@ mod tests {
         assert_eq!(mode, "sleeping");
     }
 
-    /// Banco v1 REAL (criado na mão com o DDL antigo) migra para v2 sem
-    /// perder projects/settings — o caso de quem atualizou o fluxd antes do
-    /// `flux project token` existir.
+    /// Banco v1 REAL (criado na mão com o DDL antigo) migra para a versão
+    /// atual sem perder projects/settings — o caso de quem atualizou o fluxd
+    /// antes do `flux project token` (v2) e do sync do watch (v3) existirem.
     #[test]
-    fn migra_v1_para_v2_preservando_projects_e_settings() {
+    fn migra_v1_para_atual_preservando_projects_e_settings() {
         let path = tmp_db("v1-para-v2");
         let _ = std::fs::remove_file(&path);
         {
@@ -674,7 +710,11 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(versao, "2", "versão sobe para a atual");
+        assert_eq!(
+            versao,
+            SCHEMA_VERSION.to_string(),
+            "versão sobe para a atual"
+        );
         let projetos: i64 = st
             .with(|c| c.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)))
             .unwrap();
@@ -699,7 +739,18 @@ mod tests {
             })
             .unwrap();
         assert_eq!(tokens, 1, "deploy_tokens criada pela migração");
-        // Reabertura idempotente: v2 reconhecido sem erro e sem subir mais.
+        let sync_t: i64 = st
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_status'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(sync_t, 1, "sync_status criada pela migração");
+        // Reabertura idempotente: versão atual reconhecida sem erro e sem
+        // subir mais.
         drop(st);
         let st2 = State::open(&path).unwrap();
         let versao2: String = st2
@@ -711,7 +762,70 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(versao2, "2", "reabrir em v2 é no-op");
+        assert_eq!(
+            versao2,
+            SCHEMA_VERSION.to_string(),
+            "reabrir na versão atual é no-op"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Banco v2 REAL (todo fluxd em produção hoje, com deploy_tokens) migra
+    /// para a atual criando `sync_status` — é o caminho que a VM da 07 roda
+    /// quando recebe o fluxd com sync do watch.
+    #[test]
+    fn migra_v2_para_atual_criando_sync_status() {
+        let path = tmp_db("v2-para-atual");
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA_V1).unwrap();
+            c.execute_batch(SCHEMA_V2).unwrap();
+            c.execute(
+                "INSERT INTO settings(k, v) VALUES ('schema_version', '2')",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO projects(name, toml, toml_hash) VALUES ('vipa', 'name = \"vipa\"', 'hash')",
+                [],
+            )
+            .unwrap();
+        }
+        let st = State::open(&path).unwrap();
+        let versao: String = st
+            .with(|c| {
+                c.query_row(
+                    "SELECT v FROM settings WHERE k = 'schema_version'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(versao, SCHEMA_VERSION.to_string(), "v2 sobe para a atual");
+        let projetos: i64 = st
+            .with(|c| c.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(projetos, 1, "projeto do v2 sobrevive");
+        // A tabela nova já aceita gravação (upsert do sync.rs fala com ela).
+        st.with(|c| {
+            c.execute(
+                "INSERT INTO sync_status(project, rescan_requested) VALUES ('vipa', 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let flag: i64 = st
+            .with(|c| {
+                c.query_row(
+                    "SELECT rescan_requested FROM sync_status WHERE project = 'vipa'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(flag, 1, "flag gravada na tabela recém-criada");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

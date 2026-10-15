@@ -22,6 +22,7 @@ pub mod router;
 pub mod sleep;
 pub mod sqlite_source;
 pub mod state;
+pub mod sync;
 pub mod temporary;
 pub mod waf;
 

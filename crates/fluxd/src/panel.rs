@@ -58,18 +58,21 @@ const CURVA_W: u32 = 720;
 const CURVA_H: u32 = 120;
 
 /// Design tokens — CADA cor do light tem par no dark (regra de UI do Gabriel,
-/// herdada do padrão Filament; nenhum token some na troca de tema).
+/// herdada do padrão Filament; nenhum token some na troca de tema). `--attn`
+/// é o par laranja de "atenção" da sessão de sync (erro/pendências).
 const CSS: &str = r#"
 :root{
 --bg:#f1f5f9;--card:#ffffff;--text:#0f172a;--muted:#64748b;--line:#e2e8f0;
 --accent:#2563eb;--accentbg:#dbeafe;--ok:#15803d;--okbg:#dcfce7;
 --warn:#b45309;--warnbg:#fef3c7;--err:#b91c1c;--errbg:#fee2e2;
---info:#0e7490;--infobg:#cffafe;--idle:#475569;--idlebg:#e2e8f0}
+--info:#0e7490;--infobg:#cffafe;--idle:#475569;--idlebg:#e2e8f0;
+--attn:#c2410c;--attnbg:#ffedd5}
 @media (prefers-color-scheme:dark){:root{
 --bg:#0b1220;--card:#121b2f;--text:#e2e8f0;--muted:#94a3b8;--line:#26344f;
 --accent:#93c5fd;--accentbg:#1e3a8a;--ok:#4ade80;--okbg:#14532d;
 --warn:#fbbf24;--warnbg:#451a03;--err:#fca5a5;--errbg:#450a0a;
---info:#67e8f9;--infobg:#164e63;--idle:#94a3b8;--idlebg:#1e293b}}
+--info:#67e8f9;--infobg:#164e63;--idle:#94a3b8;--idlebg:#1e293b;
+--attn:#fb923c;--attnbg:#431407}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
 font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;padding-bottom:3rem}
@@ -89,6 +92,16 @@ border-radius:8px;padding:.55rem .8rem;margin:0 0 1rem;font-size:.88rem}
 a{color:var(--accent)}
 .badge{background:var(--accentbg);color:var(--accent);border-radius:999px;
 padding:.05rem .55rem;font-size:.72rem;font-weight:600}
+/* Badges de estado da sessão de sync — mesmos tokens, um por classe. */
+.sb{display:inline-block;border-radius:999px;padding:.05rem .55rem;
+font-size:.72rem;font-weight:600}
+.sb-ok{background:var(--okbg);color:var(--ok)}
+.sb-warn{background:var(--warnbg);color:var(--warn)}
+.sb-attn{background:var(--attnbg);color:var(--attn)}
+.sb-info{background:var(--infobg);color:var(--info)}
+.sb-idle{background:var(--idlebg);color:var(--idle)}
+.sync{margin:.6rem 0 0;font-size:.82rem}
+.sync table{margin-top:.3rem}
 .dot{display:inline-block;width:.62rem;height:.62rem;border-radius:50%;margin-right:.35rem}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.err{background:var(--err)}
 .dot.info{background:var(--info)}.dot.accent{background:var(--accent)}.dot.idle{background:var(--idle)}
@@ -147,6 +160,8 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
     let protegido = Router::new()
         .route("/", get(dashboard))
         .route("/projects/{name}", get(detalhe_projeto))
+        // Rescan da sessão de sync (flux watch executa): POST → redirect.
+        .route("/projects/{name}/rescan", post(rescan_projeto))
         .route("/events", get(pagina_eventos))
         // Monitor de recursos (13): curvas/picos do observe — o handler extrai
         // `Arc<AppState>` via `FromRef<PanelState>`; auth herdada do guard.
@@ -302,8 +317,18 @@ fn resposta(status: StatusCode, page: String) -> Response {
         .into_response()
 }
 
-async fn dashboard(State(app): State<Arc<AppState>>) -> Response {
-    resposta(StatusCode::OK, render_dashboard(&app))
+async fn dashboard(State(app): State<Arc<AppState>>, RawQuery(q): RawQuery) -> Response {
+    // Confirmação do rescan (post/redirect/get): flag na query, texto na
+    // página — nome de projeto nunca volta na URL.
+    let aviso = if q
+        .as_deref()
+        .is_some_and(|s| s.split('&').any(|p| p == "rescan=1"))
+    {
+        Some("rescan queued — o flux watch executa")
+    } else {
+        None
+    };
+    resposta(StatusCode::OK, render_dashboard(&app, aviso))
 }
 
 async fn detalhe_projeto(State(app): State<Arc<AppState>>, params: RawPathParams) -> Response {
@@ -318,6 +343,46 @@ async fn detalhe_projeto(State(app): State<Arc<AppState>>, params: RawPathParams
 
 async fn pagina_eventos(State(app): State<Arc<AppState>>, RawQuery(q): RawQuery) -> Response {
     resposta(StatusCode::OK, render_eventos(&app, page_de(q.as_deref())))
+}
+
+/// POST /projects/{name}/rescan: pede re-scan da sessão de sync do projeto
+/// (quem executa é o `flux watch`). Padrão post/redirect/get: sucesso volta
+/// ao dashboard com a confirmação na query; erro NÃO redireciona — a página
+/// renderiza com a mensagem real (503, o painel não finge que deu certo).
+/// Todo resultado vira evento — nada silencioso.
+async fn rescan_projeto(State(app): State<Arc<AppState>>, params: RawPathParams) -> Response {
+    // RawPathParams não tem `get` nesta versão do axum: varre os pares.
+    let name = params
+        .iter()
+        .find(|(k, _)| *k == "name")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    match crate::sync::request_rescan(&app, name) {
+        Ok(()) => {
+            crate::events::event(
+                &app.state,
+                "info",
+                "painel",
+                &format!("rescan solicitado pelo painel: {name}"),
+            );
+            Redirect::to("/?rescan=1").into_response()
+        }
+        Err(msg) => {
+            crate::events::event(
+                &app.state,
+                "warn",
+                "painel",
+                &format!("rescan recusado para {name}: {msg}"),
+            );
+            resposta(
+                StatusCode::SERVICE_UNAVAILABLE,
+                render_dashboard(
+                    &app,
+                    Some(&format!("Falha ao pedir rescan de {name}: {msg}")),
+                ),
+            )
+        }
+    }
 }
 
 async fn rota_desconhecida() -> Response {
@@ -567,6 +632,43 @@ fn fmt_utc(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 
+/// Dias desde 1970-01-01 a partir do civil — a INVERSA exata do algoritmo
+/// civil de Hinnant usado em `fmt_utc` (mesma época, mesmo deslocamento).
+fn dias_de_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// "YYYY-MM-DD HH:MM:SS" (formato do SQLite `datetime('now')`, fonte dos
+/// timestamps do estado) e "YYYY-MM-DDTHH:MM:SSZ" (RFC3339 do `updated_at`
+/// do sync) → epoch UTC. O que não parseia (ou está fora do relógio civil)
+/// vira `None` — o chamador mostra o texto cru em vez de inventar hora.
+fn epoch_de(s: &str) -> Option<i64> {
+    let (dia, hora) = s.trim().split_once([' ', 'T'])?;
+    let mut p = dia.split('-');
+    let y: i64 = p.next()?.parse().ok()?;
+    let m: i64 = p.next()?.parse().ok()?;
+    let d: i64 = p.next()?.parse().ok()?;
+    let mut h = hora.trim_end_matches('Z').split(':');
+    let hh: i64 = h.next()?.parse().ok()?;
+    let mi: i64 = h.next()?.parse().ok()?;
+    let ss: i64 = h.next().unwrap_or("0").parse().ok()?;
+    if !((1..=12).contains(&m)
+        && (1..=31).contains(&d)
+        && (0..=23).contains(&hh)
+        && (0..=59).contains(&mi)
+        && (0..=60).contains(&ss))
+    {
+        return None;
+    }
+    Some(dias_de_civil(y, m, d) * 86_400 + hh * 3_600 + mi * 60 + ss)
+}
+
 /// Epoch opcional → "há 5 min" / "em 12 min" com o absoluto UTC no `title`.
 /// `None` → "—" (nunca hora inventada). Passado conta com "há", futuro com
 /// "em"; abaixo de 1 min, segundos.
@@ -620,6 +722,94 @@ fn badge_level(level: &str) -> String {
         _ => "muted",
     };
     format!("<span class=\"{classe}\">{}</span>", esc(level))
+}
+
+/// Estado da sessão de sync → (classe do badge, rótulo). Regra sobre o texto
+/// digerido do mutagen: contém "watching" = saudável (verde); `paused` =
+/// pausada (azul); resto é classe de trabalho (amarelo) — e último erro ou
+/// pendências sobem para atenção (laranja), que sobrepõe as outras. "absent"
+/// é palavra do contrato (CLI api.rs: relato do watch para projeto conhecido
+/// do fluxd SEM sessão local viva) e fica no cinza de "sem sessão" — não é
+/// trabalho. Sem linha no estado = "sem sessão" (cinza): o painel não inventa
+/// sessão.
+fn badge_sync(row: Option<&crate::sync::SyncRow>) -> (&'static str, &'static str) {
+    let Some(r) = row else {
+        return ("sb-idle", "sem sessão");
+    };
+    let base = if r.status.contains("watching") {
+        ("sb-ok", "saudável")
+    } else if r.status.contains("absent") {
+        ("sb-idle", "sem sessão")
+    } else if r.paused {
+        ("sb-info", "pausada")
+    } else {
+        ("sb-warn", "trabalhando")
+    };
+    if r.problems > 0 || r.last_error.is_some() {
+        ("sb-attn", "atenção")
+    } else {
+        base
+    }
+}
+
+/// Linha "Sync" do card do projeto (leitura de `crate::sync`): badge com
+/// cor, texto CRU do mutagen à mostra (honestidade — o rótulo digere, o
+/// dado continua lá), arquivos/pendências, `updated_at` em tempo relativo,
+/// último erro quando existe, badge de rescan pendente e o botão de rescan.
+fn linha_sync(now: i64, row: Option<&crate::sync::SyncRow>, name: &str) -> String {
+    let Some(r) = row else {
+        // Sem relato ainda, o botão FICA: o rescan é fila por projeto no
+        // fluxd — a flag nasce antes do primeiro report e o watch consome
+        // depois (sync.rs, request_rescan).
+        return format!(
+            "<div class=\"sync\"><span class=\"sb sb-idle\">sem sessão</span> \
+             <span class=\"muted\">o flux watch ainda não reportou este projeto</span> \
+             <form method=\"post\" action=\"/projects/{name}/rescan\">\
+             <button type=\"submit\" style=\"background:var(--accentbg);color:var(--accent);\
+             border:1px solid var(--accent);border-radius:6px;padding:.1rem .55rem;cursor:pointer;\
+             font-size:.76rem\">Rescan</button></form></div>",
+            name = esc(name),
+        );
+    };
+    let (classe, rotulo) = badge_sync(Some(r));
+    let arquivos = match r.files {
+        Some(n) => n.to_string(),
+        None => "—".into(),
+    };
+    let pend = if r.problems > 0 {
+        format!("<span class=\"err-t\">{}</span>", r.problems)
+    } else {
+        "0".into()
+    };
+    // Parseável vira tempo relativo com o absoluto no `title`; o que não
+    // parseia aparece CRU — nunca hora inventada.
+    let atualizado = match epoch_de(&r.updated_at) {
+        Some(t) => quando(now, Some(t)),
+        None => esc(&r.updated_at),
+    };
+    let pendente = if r.rescan_requested {
+        "<span class=\"sb sb-warn\">rescan pendente</span>"
+    } else {
+        ""
+    };
+    let erro = match &r.last_error {
+        Some(e) => format!("<p class=\"sync err-t\">último erro: {}</p>", esc(e)),
+        None => String::new(),
+    };
+    format!(
+        "<div class=\"sync\">\
+         <span class=\"sb {classe}\">{rotulo}</span> <span class=\"muted\">{}</span> {pendente}\
+         <table><tr><th>arquivos</th><td>{arquivos}</td>\
+         <th>pendências</th><td>{pend}</td><th>atualizado</th><td>{atualizado}</td></tr></table>\
+         {erro}\
+         <form method=\"post\" action=\"/projects/{}/rescan\">\
+         <button type=\"submit\" style=\"background:var(--accentbg);color:var(--accent);\
+         border:1px solid var(--accent);border-radius:6px;padding:.1rem .55rem;cursor:pointer;\
+         font-size:.76rem\">Rescan</button></form>\
+         </div>",
+        esc(&r.status),
+        esc(name),
+    )
 }
 
 // ------------------------------------------------------------------ layout
@@ -702,8 +892,12 @@ fn linha_estado(e: &PainelEnv) -> String {
 
 // --------------------------------------------------------------- dashboard
 
-fn render_dashboard(app: &AppState) -> String {
+fn render_dashboard(app: &AppState, aviso: Option<&str>) -> String {
     let mut body = String::new();
+    // Aviso de ação (confirmação de rescan, erro real de rescan) no topo.
+    if let Some(msg) = aviso {
+        body.push_str(&format!("<div class=\"aviso\">{}</div>", esc(msg)));
+    }
 
     match projetos(app) {
         Ok(lista) if lista.is_empty() => {
@@ -727,6 +921,9 @@ fn render_dashboard(app: &AppState) -> String {
                     return layout("Flux — painel", &body, true);
                 }
             };
+            // Estados de sync (mutagen) — UMA leitura para todos os cards;
+            // projeto sem linha na lista = "sem sessão" no card.
+            let syncs = crate::sync::sync_states(app);
             body.push_str("<div class=\"cards\">");
             for (name, toml_src) in lista {
                 let dev = ambiente(app, &name, Env::Dev);
@@ -754,6 +951,12 @@ fn render_dashboard(app: &AppState) -> String {
                     dev.aplicadas.len(),
                     linha_estado(&prod),
                     prod.aplicadas.len(),
+                ));
+                // Linha de sync do projeto (badge + contagens + rescan).
+                body.push_str(&linha_sync(
+                    now,
+                    syncs.iter().find(|r| r.project == name),
+                    &name,
                 ));
                 // Sinais de sono (04) quando existem — ausente vira "—".
                 if let (Ok(drow), Ok(prow)) = (&dev.row, &prod.row) {
@@ -1138,6 +1341,33 @@ mod tests {
         pedir(app, router, "GET", uri, Some(&cookie), None).await
     }
 
+    /// POST de verdade: server efêmero + cliente hyper, loga sozinho e faz o
+    /// POST com o cookie da sessão (ações do painel: rescan, logout).
+    async fn post_logado(
+        app: &Arc<AppState>,
+        uri: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        let (router, _dir) = painel_com_auth(app).await;
+        let (_, headers, _) = pedir(
+            app,
+            router.clone(),
+            "POST",
+            "/login",
+            None,
+            Some(format!("password={SENHA_DE_TESTE}")),
+        )
+        .await;
+        let cookie = headers
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("login de teste tem que devolver Set-Cookie")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        pedir(app, router, "POST", uri, Some(&cookie), None).await
+    }
+
     fn noindex_de(headers: &axum::http::HeaderMap) -> String {
         headers
             .get("x-robots-tag")
@@ -1184,6 +1414,171 @@ mod tests {
         assert!(quando(1_000, Some(1_000 - 3_600)).contains("há 1 h"));
         assert!(quando(1_000, Some(1_000 + 1_800)).contains("em 30 min"));
         assert!(quando(1_000, Some(2_000)).contains("em 16 min"));
+    }
+
+    // ---------------------------------------------------------------- sync
+
+    #[test]
+    fn epoch_de_e_a_inversa_de_fmt_utc() {
+        for e in [0i64, 1_000_000_000, 951_782_400, 1_760_000_000] {
+            assert_eq!(epoch_de(&fmt_utc(e)), Some(e), "roundtrip de {e}");
+        }
+        // Separador 'T' (RFC 3339-ish) vale o mesmo que o espaço do SQLite.
+        assert_eq!(
+            epoch_de("2026-10-14T12:00:00"),
+            epoch_de("2026-10-14 12:00:00")
+        );
+        // Formato REAL do `updated_at` do sync.rs: RFC3339 com 'Z' no fim.
+        assert_eq!(
+            epoch_de("2026-10-14T12:00:00Z"),
+            epoch_de("2026-10-14 12:00:00")
+        );
+        // Sem segundos também parseia (o ':00' é assumido).
+        assert_eq!(epoch_de("1970-01-01 00:00"), Some(0));
+        // Lixo e relógio civil inválido NUNCA viram hora.
+        assert_eq!(epoch_de("lixo"), None);
+        assert_eq!(epoch_de("2026-13-01 00:00:00"), None, "mês 13 não existe");
+        assert_eq!(epoch_de("2026-10-14 25:00:00"), None, "hora 25 não existe");
+    }
+
+    /// Matriz do badge de sync: watching=verde, absent=cinza (sem sessão),
+    /// paused=azul, trabalho=amarelo, erro/pendências=laranja (sobrepõe),
+    /// sem linha=cinza.
+    #[test]
+    fn badge_sync_segue_a_regra_do_status_digerido() {
+        let row =
+            |status: &str, paused: bool, problems: u64, erro: Option<&str>| crate::sync::SyncRow {
+                project: "p".into(),
+                status: status.into(),
+                paused,
+                files: None,
+                problems,
+                last_error: erro.map(str::to_owned),
+                updated_at: String::new(),
+                rescan_requested: false,
+            };
+        assert_eq!(badge_sync(None), ("sb-idle", "sem sessão"));
+        assert_eq!(
+            badge_sync(Some(&row("watching", false, 0, None))),
+            ("sb-ok", "saudável")
+        );
+        // "absent" do contrato (watch: projeto sem sessão local) = cinza de
+        // sem sessão — NUNCA o amarelo de trabalho.
+        assert_eq!(
+            badge_sync(Some(&row("absent", false, 0, None))),
+            ("sb-idle", "sem sessão")
+        );
+        assert_eq!(
+            badge_sync(Some(&row("syncing", false, 0, None))),
+            ("sb-warn", "trabalhando")
+        );
+        assert_eq!(
+            badge_sync(Some(&row("scanning", false, 0, None))),
+            ("sb-warn", "trabalhando")
+        );
+        // Status cru (não digerido) sem sinais = classe de trabalho.
+        assert_eq!(
+            badge_sync(Some(&row("algo-estranho", false, 0, None))),
+            ("sb-warn", "trabalhando")
+        );
+        assert_eq!(
+            badge_sync(Some(&row("haltered", true, 0, None))),
+            ("sb-info", "pausada")
+        );
+        // Erro ou pendência sobe para atenção — mesmo com watching.
+        assert_eq!(
+            badge_sync(Some(&row("watching", false, 2, None))),
+            ("sb-attn", "atenção")
+        );
+        assert_eq!(
+            badge_sync(Some(&row("watching", false, 0, Some("conflict")))),
+            ("sb-attn", "atenção")
+        );
+    }
+
+    /// Card sem sessão de sync é honesto ("sem sessão", cinza) e traz o form
+    /// de rescan apontando para o POST certo.
+    #[tokio::test]
+    async fn dashboard_mostra_sem_sessao_e_form_de_rescan() {
+        let app = app_sem_docker();
+        app.state.register_project("vipers", "", "h").unwrap();
+        let (status, _, body) = get(&app, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("sem sessão"),
+            "card sem sync não inventa sessão: {body}"
+        );
+        assert!(
+            body.contains("action=\"/projects/vipers/rescan\""),
+            "botão de rescan aponta para o POST: {body}"
+        );
+    }
+
+    /// Confirmação do rescan chega como aviso no dashboard (`/?rescan=1`).
+    #[tokio::test]
+    async fn dashboard_com_flag_rescan_mostra_confirmacao() {
+        let app = app_sem_docker();
+        let (_, _, body) = get(&app, "/?rescan=1").await;
+        assert!(
+            body.contains("rescan queued — o flux watch executa"),
+            "confirmação na página: {body}"
+        );
+    }
+
+    /// Rescan é rota protegida como qualquer outra: sem sessão, 303 pro login.
+    #[tokio::test]
+    async fn rescan_exige_sessao_como_toda_rota_protegida() {
+        let app = app_sem_docker();
+        let (router, _dir) = painel_com_auth(&app).await;
+        let (status, headers, _) =
+            pedir(&app, router, "POST", "/projects/vipers/rescan", None, None).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+            Some("/login"),
+            "guard de sessão cobre o POST de rescan"
+        );
+    }
+
+    /// Rescan de projeto não registrado: recusa com a mensagem REAL na UI
+    /// (503) — o painel não finge que o pedido entrou na fila.
+    #[tokio::test]
+    async fn rescan_de_projeto_desconhecido_mostra_o_erro_na_ui() {
+        let app = app_sem_docker();
+        let (status, _, body) = post_logado(&app, "/projects/fantasma/rescan").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body.contains("Falha ao pedir rescan de fantasma"),
+            "erro nomeia o projeto na página: {body}"
+        );
+        assert!(
+            body.contains("não registrado"),
+            "mensagem real do sync.rs na página: {body}"
+        );
+    }
+
+    /// Rescan de projeto registrado: post/redirect/get de volta ao dashboard
+    /// com a confirmação — e a flag setada aparece como "rescan pendente".
+    #[tokio::test]
+    async fn rescan_de_projeto_registrado_confirma_e_marca_pendente() {
+        let app = app_sem_docker();
+        app.state.register_project("vipers", "", "h").unwrap();
+        let (status, headers, _) = post_logado(&app, "/projects/vipers/rescan").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+            Some("/?rescan=1"),
+            "redirect de volta ao dashboard"
+        );
+        let (_, _, body) = get(&app, "/?rescan=1").await;
+        assert!(
+            body.contains("rescan queued — o flux watch executa"),
+            "confirmação na página: {body}"
+        );
+        assert!(
+            body.contains("rescan pendente"),
+            "flag do request_rescan vira badge: {body}"
+        );
     }
 
     // ---------------------------------------------------------- integração

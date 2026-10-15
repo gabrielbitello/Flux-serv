@@ -33,6 +33,7 @@ use crate::db::{self, SchemaOutcome};
 use crate::events;
 // O extrator `State` do axum ocupa o nome; o estado do banco entra como DbState.
 use crate::state::State as DbState;
+use crate::sync;
 
 /// Chave em `settings` com o sha256 do token da API (09: hash no SQLite,
 /// token claro só no arquivo do usuário).
@@ -60,6 +61,12 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/projects/{name}/logs", get(ciclo::logs))
         .route("/projects/{name}/exec", post(ciclo::exec))
         .route("/containers", get(listar_containers))
+        // Sync do mutagen (watch no HOST Windows): estado das sessões para o
+        // painel + fila de rescan por projeto. Atrás do gate como as demais
+        // rotas de controle — persistência em sync.rs (tabela sync_status).
+        .route("/sync/report", post(sync_report))
+        .route("/sync/rescan", post(sync_rescan))
+        .route("/sync/status", get(sync_status))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
         // credencial fica invisível, então o gate grava a recusa no `events`
@@ -814,6 +821,75 @@ async fn subir(
     .into_response()
 }
 
+// --------------------------------------------------------------------- sync
+
+/// Corpo do POST /sync/rescan — pedido do painel/CLI ao watch.
+#[derive(Debug, Deserialize)]
+struct RescanBody {
+    project: String,
+}
+
+/// Corpo do GET /sync/status — contrato fixo: lista de linhas por projeto.
+#[derive(Debug, Serialize)]
+struct SyncStatusBody {
+    projects: Vec<sync::SyncRow>,
+}
+
+/// POST /sync/report — upsert do relato de UMA sessão do `flux watch` (HOST)
+/// no estado do fluxd. 204 sem corpo: o watch não lê resposta. `rescan_applied`
+/// = true limpa a flag de rescan do projeto (persistência em sync.rs).
+/// Projeto NÃO registrado é 404 com causa + warn no log do fluxd: linha de
+/// projeto fantasma ficaria invisível no painel (que casa pelo nome
+/// registrado, painel.rs) e sobreviveria a qualquer purge (que apaga pelo
+/// nome exato) — é o mesmo padrão do /sync/rescan ("flag para fantasma o
+/// watch nunca consumiria"). O watch loga o 404 no host; a divergência fica
+/// visível dos dois lados.
+async fn sync_report(
+    State(app): State<Arc<AppState>>,
+    Json(b): Json<sync::SyncReport>,
+) -> Response {
+    if b.project.trim().is_empty() || b.status.trim().is_empty() {
+        return erro(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "sync/report exige project e status não vazios",
+        );
+    }
+    if let Err(r) = garante_projeto(&app, &b.project) {
+        tracing::warn!(
+            "sync: relato descartado — projeto não registrado (project {:?}, session {:?})",
+            b.project,
+            b.session
+        );
+        return *r;
+    }
+    if let Err(e) = sync::upsert_report(&app, &b) {
+        return erro(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// POST /sync/rescan — seta `rescan_requested` do projeto (202). Projeto
+/// desconhecido é 404 com causa: flag para fantasma o watch nunca consumiria.
+async fn sync_rescan(State(app): State<Arc<AppState>>, Json(b): Json<RescanBody>) -> Response {
+    match garante_projeto(&app, &b.project) {
+        Ok(()) => {}
+        Err(r) => return *r,
+    }
+    if let Err(e) = sync::request_rescan(&app, &b.project) {
+        return erro(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// GET /sync/status — estado de sync de todos os projetos que já reportaram
+/// (ou têm rescan pendente), no formato do contrato.
+async fn sync_status(State(app): State<Arc<AppState>>) -> Response {
+    Json(SyncStatusBody {
+        projects: sync::sync_states(&app),
+    })
+    .into_response()
+}
+
 async fn not_implemented() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
@@ -1228,5 +1304,237 @@ mod tests {
         .await;
         assert_eq!(s, 503, "{c}");
         assert!(c.contains("Docker"), "causa: {c}");
+    }
+
+    // ---------------------------------------------------- sync (watch no HOST)
+
+    #[tokio::test]
+    async fn sync_report_e_status_roundtrip() {
+        let (base, _app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+        let _ = registra(&cli, &base, "vipa", "").await;
+
+        let corpo = serde_json::json!({
+            "project": "vipa", "session": "flux-vipa", "status": "watching",
+            "paused": false, "files": 123, "problems": 0,
+            "last_error": null, "rescan_applied": false
+        });
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/report",
+            Some("segredo"),
+            Some(&corpo.to_string()),
+        )
+        .await;
+        assert_eq!(s, 204, "report aceito sem corpo de resposta: {c}");
+
+        let (s, c) = req(&cli, &base, "GET", "/sync/status", Some("segredo"), None).await;
+        assert_eq!(s, 200, "{c}");
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        let rows = v["projects"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "um relato = uma linha: {c}");
+        let row = &rows[0];
+        assert_eq!(row["project"], "vipa");
+        assert_eq!(row["status"], "watching");
+        assert_eq!(row["paused"], false);
+        assert_eq!(row["files"], 123);
+        assert_eq!(row["problems"], 0);
+        assert!(row["last_error"].is_null());
+        assert_eq!(row["rescan_requested"], false);
+        let updated = row["updated_at"].as_str().unwrap();
+        assert!(
+            updated.contains('T') && updated.ends_with('Z'),
+            "updated_at em RFC3339: {updated}"
+        );
+
+        // Segundo relato atualiza a MESMA linha (upsert, não insert).
+        let mut corpo2 = corpo.clone();
+        corpo2["files"] = serde_json::json!(124);
+        corpo2["last_error"] = serde_json::json!("boom");
+        let (s, _c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/report",
+            Some("segredo"),
+            Some(&corpo2.to_string()),
+        )
+        .await;
+        assert_eq!(s, 204);
+        let (_s, c) = req(&cli, &base, "GET", "/sync/status", Some("segredo"), None).await;
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        let rows = v["projects"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "upsert não duplica linha: {c}");
+        assert_eq!(rows[0]["files"], 124);
+        assert_eq!(rows[0]["last_error"], "boom");
+
+        // Report sem project/status → 422 com causa (nada silencioso). O
+        // `session` presente: é o parse do axum que recusa corpo sem ele.
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/report",
+            Some("segredo"),
+            Some(r#"{"project":"","status":"","session":"s"}"#),
+        )
+        .await;
+        assert_eq!(s, 422, "{c}");
+        assert!(c.contains("project"), "causa: {c}");
+
+        // Sessão de worktree deriva projeto que NÃO está registrado
+        // (`flux-vipa-branch` → "vipa-branch"): 404 com causa nomeada e
+        // NENHUMA linha fantasma — o painel casa pelo projeto registrado e o
+        // purge apaga pelo nome exato, então a linha nunca seria vista nem
+        // apagada (o relato é descartado na porta, com log).
+        let corpo_wt = serde_json::json!({
+            "project": "vipa-branch", "session": "flux-vipa-branch", "status": "watching",
+            "paused": false, "files": 1, "problems": 0,
+            "last_error": null, "rescan_applied": false
+        });
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/report",
+            Some("segredo"),
+            Some(&corpo_wt.to_string()),
+        )
+        .await;
+        assert_eq!(s, 404, "{c}");
+        assert!(c.contains("vipa-branch"), "404 nomeia o projeto: {c}");
+        let (_s, c) = req(&cli, &base, "GET", "/sync/status", Some("segredo"), None).await;
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        let rows = v["projects"].as_array().unwrap();
+        assert!(
+            rows.iter().all(|r| r["project"] != "vipa-branch"),
+            "fantasma não cria linha: {c}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_rescan_set_e_clear_da_flag() {
+        let (base, app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+        let _ = registra(&cli, &base, "vipa", "").await;
+
+        // Flag ANTES de qualquer relato: linha nasce só com o pedido — é o
+        // que o watch precisa encontrar no próximo GET /sync/status.
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/rescan",
+            Some("segredo"),
+            Some(r#"{"project":"vipa"}"#),
+        )
+        .await;
+        assert_eq!(s, 202, "{c}");
+        let (_s, c) = req(&cli, &base, "GET", "/sync/status", Some("segredo"), None).await;
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(v["projects"][0]["rescan_requested"], true, "{c}");
+        assert_eq!(
+            v["projects"][0]["status"], "unknown",
+            "sem relato ainda: {c}"
+        );
+
+        // Relato SEM applied NÃO limpa a flag (o pedido sobrevive ao watch).
+        let corpo = serde_json::json!({
+            "project": "vipa", "session": "flux-vipa", "status": "watching",
+            "paused": false, "files": 1, "problems": 0,
+            "last_error": null, "rescan_applied": false
+        });
+        let (s, _c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/report",
+            Some("segredo"),
+            Some(&corpo.to_string()),
+        )
+        .await;
+        assert_eq!(s, 204);
+        let (_s, c) = req(&cli, &base, "GET", "/sync/status", Some("segredo"), None).await;
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(v["projects"][0]["rescan_requested"], true, "{c}");
+
+        // Relato COM applied limpa.
+        let mut aplicado = corpo.clone();
+        aplicado["rescan_applied"] = serde_json::json!(true);
+        let (s, _c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/report",
+            Some("segredo"),
+            Some(&aplicado.to_string()),
+        )
+        .await;
+        assert_eq!(s, 204);
+        let (_s, c) = req(&cli, &base, "GET", "/sync/status", Some("segredo"), None).await;
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(v["projects"][0]["rescan_requested"], false, "{c}");
+
+        // Projeto fantasma → 404 com causa nomeada (rota EXISTE, registro é
+        // que falta — igual ao padrão do lease).
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/rescan",
+            Some("segredo"),
+            Some(r#"{"project":"fantasma"}"#),
+        )
+        .await;
+        assert_eq!(s, 404, "{c}");
+        assert!(c.contains("fantasma"), "404 nomeia o projeto: {c}");
+
+        // Trilha de eventos do sync visível no painel (nada silencioso): 1
+        // rescan pedido + 1 rescan aplicado; o do fantasma não grava (falha
+        // antes da escrita).
+        let n: i64 = app
+            .state
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM events WHERE scope = 'sync'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert!(n >= 2, "eventos do sync gravados (n={n})");
+    }
+
+    #[tokio::test]
+    async fn sync_rotas_bloqueiam_sem_token() {
+        let (base, _app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+        let (s1, c1) = req(&cli, &base, "GET", "/sync/status", None, None).await;
+        assert_eq!(s1, 401, "{c1}");
+        let corpo = serde_json::json!({
+            "project": "vipa", "session": "s", "status": "watching"
+        });
+        let (s2, c2) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/report",
+            None,
+            Some(&corpo.to_string()),
+        )
+        .await;
+        assert_eq!(s2, 401, "{c2}");
+        let (s3, c3) = req(
+            &cli,
+            &base,
+            "POST",
+            "/sync/rescan",
+            None,
+            Some(r#"{"project":"vipa"}"#),
+        )
+        .await;
+        assert_eq!(s3, 401, "{c3}");
     }
 }
