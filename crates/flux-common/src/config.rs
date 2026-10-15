@@ -23,6 +23,7 @@ pub struct ProjectToml {
     pub framework: Option<Framework>,
     pub domains: Option<DomainsSection>,
     pub db: Option<DbSection>,
+    pub build: Option<BuildSection>,
     pub sleep: Option<SleepSection>,
     pub resources: Option<ResourcesSection>,
     pub sync: Option<SyncSection>,
@@ -69,6 +70,14 @@ impl ProjectToml {
             .unwrap_or("/up")
     }
 
+    /// Janela de silêncio do `flux build` (02). Default 180 s.
+    pub fn build_silence_window_secs(&self) -> u64 {
+        self.build
+            .as_ref()
+            .map(|b| b.silence_window_secs())
+            .unwrap_or(180)
+    }
+
     pub fn framework(&self) -> Framework {
         self.framework.unwrap_or_default()
     }
@@ -101,6 +110,50 @@ pub struct DbSection {
     /// pipeline automático (fluxd avisa, nunca silêncio).
     pub migrate_cmd: Option<String>,
     pub image_guard: Option<bool>,
+    /// Janela de silêncio da árvore ANTES da coleta de migrations no `flux up`
+    /// (02): a coleta lê `database/migrations` do disco local e o hash vai
+    /// para o plano de rebuild — coletar no meio de uma escrita diverge do
+    /// que a sync replica. Default 5 s.
+    pub silence_window_secs: Option<u64>,
+}
+
+impl DbSection {
+    /// Janela de silêncio das migrations (02). Default 5 s — migration escrita
+    /// por editor/grupo de trabalho converge em segundos.
+    pub fn silence_window_secs(&self) -> u64 {
+        self.silence_window_secs.unwrap_or(5)
+    }
+}
+
+/// Build de assets do projeto (02, `flux build`): comando rodado DENTRO do
+/// container de dev na VM, precedido da janela de silêncio da árvore no
+/// Windows (a sync precisa convergir antes) e do lock global
+/// `/srv/flux/build.lock` na VM (um build por vez, no fluxd inteiro).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildSection {
+    /// Comando de build de assets (ex.: `npm run build`). Só `laravel` tem
+    /// default; as demais stacks precisam declarar (nada de chute).
+    pub command: Option<String>,
+    /// Service do compose que roda o comando — convenção da plataforma é o
+    /// container `app` (06).
+    pub service: Option<String>,
+    /// Janela de silêncio da árvore no Windows antes do build (02). Default
+    /// 180 s — assets mudam em rajada (vários saves seguidos), bem mais que
+    /// a janela de migrations.
+    pub silence_window_secs: Option<u64>,
+}
+
+impl BuildSection {
+    /// Service efetivo do build (convenção da plataforma: container `app`).
+    pub fn service(&self) -> &str {
+        self.service.as_deref().unwrap_or("app")
+    }
+
+    /// Janela de silêncio do build. Default 180 s (02).
+    pub fn silence_window_secs(&self) -> u64 {
+        self.silence_window_secs.unwrap_or(180)
+    }
 }
 
 /// Hibernação de prod (11): `pause` acorda em < 1 s; worker segue 24/7.
@@ -537,6 +590,112 @@ rate = 500
     fn flux_toml_chave_desconhecida_e_erro() {
         let err = ProjectToml::parse_str("naame = \"vipers\"").unwrap_err();
         assert!(err.to_string().contains("naame"), "mensagem: {err}");
+    }
+
+    /// Chaves novas da 02: `[db].silence_window_secs` (default 5) e a seção
+    /// `[build]` inteira (default 180, service `app`).
+    #[test]
+    fn janelas_de_silencio_parseiam_e_tem_defaults() {
+        let t = ProjectToml::parse_str(
+            "[db]\nsilence_window_secs = 7\n\n[build]\ncommand = \"npm run build\"\nservice = \"web\"\nsilence_window_secs = 60\n",
+        )
+        .unwrap();
+        assert_eq!(
+            t.db.as_ref().unwrap().silence_window_secs(),
+            7,
+            "valor explícito vence o default de 5"
+        );
+        let b = t.build.as_ref().unwrap();
+        assert_eq!(b.command.as_deref(), Some("npm run build"));
+        assert_eq!(b.service(), "web");
+        assert_eq!(t.build_silence_window_secs(), 60);
+    }
+
+    #[test]
+    fn sem_db_e_sem_build_os_defaults_da_plataforma_valem() {
+        let t = ProjectToml::parse_str("").unwrap();
+        assert_eq!(
+            t.db.as_ref().map(|d| d.silence_window_secs()),
+            None,
+            "sem seção [db] não há override"
+        );
+        assert!(t.build.is_none(), "sem seção [build]");
+        assert_eq!(
+            t.build_silence_window_secs(),
+            180,
+            "default do build: 180 s (02)"
+        );
+        // Service efetivo com seção presente mas sem service:
+        let b = ProjectToml::parse_str("[build]\ncommand = \"make\"\n")
+            .unwrap()
+            .build
+            .unwrap();
+        assert_eq!(b.service(), "app", "convenção da plataforma: container app");
+    }
+
+    #[test]
+    fn build_section_chave_desconhecida_e_erro() {
+        let err = ProjectToml::parse_str("[build]\ncomand = \"npm run build\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("comand"),
+            "typo em [build] é erro, nunca ignorado: {err}"
+        );
+    }
+
+    /// O `flux.toml.example` da RAIZ do repo é o contrato user-facing do
+    /// struct: descomentado, TEM de parsear sem erro (deny_unknown_fields
+    /// pega chave a mais) e cobrir as chaves novas da 02. Template e struct
+    /// divergirem = documentation mentindo.
+    #[test]
+    fn flux_toml_example_da_raiz_parseia_inteiro() {
+        let caminho = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../flux.toml.example");
+        let src = std::fs::read_to_string(&caminho)
+            .unwrap_or_else(|e| panic!("lendo {}: {e}", caminho.display()));
+        // Descomenta linha a linha: `#key = v` e `#[section]` viram código;
+        // separadores e prosa ficam de fora (chave candidata TEM de ser uma
+        // chave TOML bare antes do `=` — prosa com "=" não passa).
+        let descomentado = src
+            .lines()
+            .filter_map(|l| {
+                let resto = l.trim().strip_prefix('#')?.trim_start();
+                let codigo = if resto.starts_with('[') {
+                    true
+                } else {
+                    match resto.split_once('=') {
+                        Some((chave, _)) => {
+                            let chave = chave.trim();
+                            !chave.is_empty()
+                                && chave.chars().all(|c| {
+                                    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '"')
+                                })
+                        }
+                        None => false,
+                    }
+                };
+                codigo.then(|| resto.to_owned())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let t = ProjectToml::parse_str(&descomentado)
+            .unwrap_or_else(|e| panic!("template da raiz divergiu do struct: {e}"));
+        assert_eq!(t.name.as_deref(), Some("vippers"));
+        assert_eq!(t.framework(), Framework::Laravel);
+        let db = t.db.as_ref().expect("template documenta [db]");
+        assert_eq!(
+            db.silence_window_secs(),
+            5,
+            "[db] silence_window_secs na 02"
+        );
+        let build = t.build.as_ref().expect("template documenta [build]");
+        assert_eq!(build.command.as_deref(), Some("npm run build"));
+        assert_eq!(build.service(), "app");
+        assert_eq!(
+            t.build_silence_window_secs(),
+            180,
+            "[build] silence_window_secs na 02"
+        );
+        assert!(t.sync.as_ref().unwrap().extra_ignore.is_some());
+        assert!(t.dev.as_ref().unwrap().live.is_some());
     }
 
     #[test]

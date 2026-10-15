@@ -245,6 +245,44 @@ pub struct SchemaOut {
     pub output: String,
 }
 
+/// POST /sync/report (contrato FIXO da 02, serviço `flux watch`): estado de
+/// UMA sessão local para o painel. `status` é o vocabulário do contrato:
+/// "watching" (sessão viva) ou "absent" (projeto conhecido do fluxd sem
+/// sessão local). `rescan_applied=true` é o que LIMPA a flag de rescan do
+/// projeto no fluxd — só vai no report pós-`sync::reset`.
+#[derive(Debug, Serialize)]
+pub struct SyncReportIn {
+    pub project: String,
+    pub session: String,
+    pub status: String,
+    pub paused: bool,
+    /// Arquivos no último snapshot (`None` = sem scan ainda; vai null).
+    pub files: Option<u64>,
+    pub problems: u64,
+    pub last_error: Option<String>,
+    pub rescan_applied: bool,
+}
+
+/// GET /sync/status — espelho do contrato: uma linha por projeto que o fluxd
+/// conhece, com a flag de rescan pedida pelo painel.
+#[derive(Debug, Deserialize)]
+pub struct SyncStatusOut {
+    pub projects: Vec<SyncProjectRowOut>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct SyncProjectRowOut {
+    pub project: String,
+    pub status: String,
+    pub paused: bool,
+    pub files: Option<u64>,
+    pub problems: u64,
+    pub last_error: Option<String>,
+    pub updated_at: String,
+    pub rescan_requested: bool,
+}
+
 /// Payload de uma linha SSE `data: …` (contrato do /logs com follow: cada
 /// evento é `data: <linha crua>` seguido de linha vazia). Aceita `data: X` e
 /// `data:X`; separador vazio, comentário `: ping` e outros campos (`event:`,
@@ -612,6 +650,25 @@ impl ApiClient {
                 truncar(&texto, 2_000)
             ),
         })
+    }
+
+    // ------------------------------------------ sync report/status (02, watch)
+
+    /// POST /sync/report — contrato 204 sem corpo; só o erro classificado
+    /// interessa ao chamador (o watch loga com origem e segue o loop).
+    pub async fn sync_report(&self, r: &SyncReportIn) -> Result<(), ApiError> {
+        let corpo = serde_json::to_string(r).map_err(|e| ApiError::Protocolo {
+            msg: format!("serializando sync report: {e}"),
+        })?;
+        let resposta = self.call("POST", "/sync/report", Some(corpo)).await?;
+        self.decodificar(resposta).map(|_| ())
+    }
+
+    /// GET /sync/status — estado dos projetos no fluxd (flag de rescan
+    /// inclusive).
+    pub async fn sync_status(&self) -> Result<SyncStatusOut, ApiError> {
+        let r = self.call("GET", "/sync/status", None).await?;
+        self.json_out(r)
     }
 
     // ------------------------------------ rotas cujo backend chega em fases

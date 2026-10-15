@@ -1,0 +1,154 @@
+# flux.toml — project manifest for the Flux platform (copy to `flux.toml`
+# at the repo root and keep it versioned; it NEVER carries secrets — 09).
+#
+# Every section is optional: an absent section inherits the platform default
+# stated below. Unknown keys are a PARSE ERROR (strict validation, 06 —
+# "no silent typos"), so this template lists every key ProjectToml supports.
+# The `flux up -m` wizard generates a working file if you prefer.
+
+# ---------------------------------------------------------------------------
+# Identity (06)
+# ---------------------------------------------------------------------------
+
+# Project name. Default: the folder name. Must be [a-z0-9-] (it becomes the
+# compose project `flux-{name}-{env}` and the host `{name}.bitello.xyz`).
+#name = "vippers"
+
+# Stack: laravel | node | rust | static | custom. Default: laravel.
+# Non-laravel stacks must declare [health] path (and usually [db] migrate_cmd).
+#framework = "laravel"
+
+# ---------------------------------------------------------------------------
+# Domains (09). Defaults: `{name}.bitello.xyz` (prod) and
+# `{name}-d.bitello.xyz` (dev).
+# ---------------------------------------------------------------------------
+#[domains]
+#prod = "vippers.bitello.xyz"
+#dev = "vippers-d.bitello.xyz"
+
+# ---------------------------------------------------------------------------
+# Database (05). Prod is NEVER rebuilt — there is no flag for that, by design.
+# ---------------------------------------------------------------------------
+#[db]
+# When to rebuild the dev database on schema change: auto | always | never.
+# Default: auto (rebuild only when a migration is new or mutated).
+#rebuild_policy = "auto"
+# Run seeders after a dev rebuild. Default: false.
+#seed_on_rebuild = false
+# node/rust: schema command run INSIDE the dev container. Empty/absent = no
+# automatic pipeline (fluxd warns, never stays silent).
+#migrate_cmd = "php artisan migrate --force"
+# Refuse compose images from the blocked list (mysql/redis/... by default).
+# Default: true (platform decision 13/10/2026).
+#image_guard = true
+# Seconds the `database/migrations` tree must stay UNCHANGED before `flux up`
+# collects it (silence window, 02) — collecting mid-write would produce a
+# hash that diverges from what the sync replicates. Default: 5.
+#silence_window_secs = 5
+
+# ---------------------------------------------------------------------------
+# Asset build (02, `flux build`). Runs INSIDE the dev container on the VM,
+# under the global lock `/srv/flux/build.lock`, after the file tree on the
+# Windows side went quiet for the whole silence window. Timeout: 1800 s.
+# ---------------------------------------------------------------------------
+#[build]
+# Build command. Only `laravel` has a default ("npm run build"); every other
+# stack must declare it.
+#command = "npm run build"
+# Compose service that runs the command. Default: app (platform convention).
+#service = "app"
+# Seconds the project tree must stay unchanged (Windows side) before the
+# build starts — assets change in bursts, well beyond the migrations window.
+# Default: 180.
+#silence_window_secs = 180
+
+# ---------------------------------------------------------------------------
+# Sleep policy (04/11). Dev sleeps when idle; prod hibernates per mode.
+# ---------------------------------------------------------------------------
+#[sleep]
+# Enable the dev sleep manager. Default: true.
+#dev_enabled = true
+# Minutes of no lease/interaction before dev sleeps. Default: 15.
+#idle_minutes = 15
+# Prod idle behavior: pause (wake < 1 s) | stop | off. Default: pause.
+#prod_mode = "pause"
+# Minutes before prod hibernates. Default: 30.
+#prod_idle_minutes = 30
+# CPU ceiling (%) that counts as "still busy" for the idle timer. Default: 5.0.
+#cpu_percent_teto = 5.0
+
+# ---------------------------------------------------------------------------
+# Per-project prod limits (11).
+# ---------------------------------------------------------------------------
+#[resources]
+#http_memory_mb = 512
+#http_cpus = 1.0
+#worker_memory_mb = 256
+#worker_cpus = 0.5
+
+# ---------------------------------------------------------------------------
+# Sync (02). One-way-replica Windows -> VM, one mutagen session per project.
+# The global ignores are NOT configurable by design (security/stability):
+# .env, .env.*, public/hot, vendor/, node_modules/, public/build/,
+# public/fonts/, public/css/, public/js/, storage/. This section only ADDS.
+# ---------------------------------------------------------------------------
+#[sync]
+# Extra ignore patterns on top of the global list (mutagen/gitignore syntax).
+#extra_ignore = ["resources/svg/**"]
+
+# ---------------------------------------------------------------------------
+# Temporary project (14): tears itself down on the VM after the TTL with no
+# interaction. The repo on Windows is NEVER touched (sync is one-way-replica).
+# ---------------------------------------------------------------------------
+#[temporary]
+# Must be explicit — nothing auto-destructs by accident. Default: false.
+#enabled = false
+# Hours WITHOUT ANY interaction before teardown. Default: 6.
+#ttl_hours = 6
+
+# ---------------------------------------------------------------------------
+# Provisioning (06): command run on wake, inside the container.
+# ---------------------------------------------------------------------------
+#[provision]
+#on_wake = "bash /provision.sh"
+
+# ---------------------------------------------------------------------------
+# Branding (15): client logo on the maintenance page.
+# ---------------------------------------------------------------------------
+#[branding]
+#logo_url = "https://vippers.bitello.xyz/logo.png"
+
+# ---------------------------------------------------------------------------
+# Shield (16): per-project anti-brute-force paths.
+# ---------------------------------------------------------------------------
+#[shield]
+# Auth paths watched by the anti-brute-force. Default: detects the standard
+# login routes of the stack.
+#auth_paths = ["/login"]
+# Tarpit instead of plain ban for offenders. Default: false.
+#tarpit = false
+
+# ---------------------------------------------------------------------------
+# Health check (06). Default: /up (Laravel). node/rust MUST declare it.
+# ---------------------------------------------------------------------------
+#[health]
+#path = "/up"
+
+# ---------------------------------------------------------------------------
+# Dev live server (06/live): hot-reload command run inside the `app`
+# container right after a successful `compose up` in env=dev. Never runs in
+# prod. Toggle at runtime with `flux live` — no down needed.
+# ---------------------------------------------------------------------------
+#[dev]
+#live = "npm run dev -- --host 0.0.0.0"
+# Apply `.flux/overlays/**` on top of the repo ON THE VM at every `up` (02/06):
+# local gitignored variants of files that must differ from what is committed.
+# The repo on Windows is never modified. Default: false.
+#overlays = false
+
+# ---------------------------------------------------------------------------
+# Edge limits per project (07).
+# ---------------------------------------------------------------------------
+#[limits]
+# Rate limit (requests/min) per host. Absent = platform default applies.
+#rate = 500

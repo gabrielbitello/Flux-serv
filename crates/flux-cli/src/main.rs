@@ -7,9 +7,9 @@
 //! projeto = diretório atual (`flux.toml` explícito ou nome da pasta).
 
 mod api;
-// Sync contínua (spec 02): monta argumentos e executa o mutagen — o ciclo
-// `flux up`/`flux sync` consome daqui quando a fase CLI da F2 ligar; o
-// módulo carrega `#![allow(dead_code)]` justificado até esse consumo existir.
+// Sync contínua (spec 02): monta argumentos e executa o mutagen — consumida
+// por `flux sync`, `flux build`, `flux watch` e pelo `flux up` (fase 02
+// ligada; o allow de dead_code do módulo saiu junto com o motivo).
 mod sync;
 // Túnel SSH p/ a API de controle + config global do usuário (spec 09).
 mod tunel;
@@ -119,11 +119,13 @@ enum Cmd {
         #[arg(default_value = "dev")]
         env: String,
     },
-    /// Build das imagens, sem subir.
-    Build {
-        #[arg(default_value = "dev")]
-        env: String,
-    },
+    /// Build de assets DENTRO do container de dev na VM (02): garante a
+    /// sessão de sync, espera a janela de silêncio da árvore no Windows
+    /// ([build].silence_window_secs, default 180 s) e roda [build].command
+    /// (default por framework: laravel = `npm run build`) sob o lock global
+    /// `/srv/flux/build.lock` — com teto próprio de 1800 s (o cap de 120 s
+    /// do exec NÃO vale aqui) e exit code real do comando.
+    Build,
     /// Reativa o release anterior em prod, sem build (10).
     Prod {
         #[command(subcommand)]
@@ -355,7 +357,7 @@ async fn main() {
         } => logs(follow, since, until, service, tail, &env).await,
         Cmd::Exec { command, env } => exec(command, &env).await,
         Cmd::Shell { env } => exec(vec!["bash".to_owned()], &env).await,
-        Cmd::Build { env } => ciclo_api("build", &env).await,
+        Cmd::Build => build_assets().await,
         // ------- fases futuras: recusa com fase e exit ≠ 0 -------
         Cmd::Tool { runtime: _, args } => {
             if args.is_empty() {
@@ -366,7 +368,7 @@ async fn main() {
             }
             stub("fase futura (spec 06) — toolchain sob demanda na VM");
         }
-        Cmd::Watch => stub("fase F2/F11 (specs 02/03) — reporte de branches ao fluxd"),
+        Cmd::Watch => watch().await,
         Cmd::Init { target: _ } => stub("fase F9 (spec 10) — workflow de deploy por push"),
         Cmd::Prod { .. } => stub("fase F9 (spec 10) — prod é git push + rollback"),
         Cmd::Maintenance { .. } => stub("fase F18 (spec 15) — modo manutenção com bypass"),
@@ -407,7 +409,12 @@ async fn main() {
             }
             _ => stub("fase F7+ (spec 05) — banco único e migrations via fluxd"),
         },
-        Cmd::Sync { .. } => stub("fase F2 (spec 02) — sync contínua via mutagen"),
+        Cmd::Sync { cmd } => match cmd {
+            SyncCmd::Status => sync_status_cmd(),
+            SyncCmd::Pause => sync_pause_cmd(),
+            SyncCmd::Resume => sync_resume_cmd(),
+            SyncCmd::Reset => sync_reset_cmd(),
+        },
         Cmd::Env { cmd } => {
             let ctx = contexto_atual();
             match cmd {
@@ -690,6 +697,10 @@ fn project_token(name: &str) {
 async fn up(env: &str, seed: Option<bool>) {
     let env = parse_env(env);
     let ctx = contexto_atual();
+    let cfg = flux_common::config::ProjectToml::parse_str(&ctx.toml).unwrap_or_else(|e| {
+        eprintln!("erro: flux.toml inválido: {e}");
+        std::process::exit(1);
+    });
     let cliente = ApiClient::from_env();
 
     let h = match cliente.health().await {
@@ -763,9 +774,9 @@ async fn up(env: &str, seed: Option<bool>) {
     if overlays_habilitados(&ctx.toml) {
         let origem = ctx.dir.join(".flux/overlays");
         match aplicar_overlays(&origem, &ctx.name) {
-            Ok(n) if n > 0 => println!(
-                "[4.5/6] overlays aplicados na VM: {n} arquivo(s) de .flux/overlays/"
-            ),
+            Ok(n) if n > 0 => {
+                println!("[4.5/6] overlays aplicados na VM: {n} arquivo(s) de .flux/overlays/")
+            }
             Ok(_) => println!(
                 "[4.5/6] overlays: flag ligada mas .flux/overlays/ vazio ou ausente — nada a aplicar"
             ),
@@ -819,17 +830,49 @@ async fn up(env: &str, seed: Option<bool>) {
     // (nome + sha256) e manda no corpo — o contrato é esse (api.rs: "o CLI lê
     // do repo e manda"); o fluxd compara com o hash aplicado: dev novo/mutado
     // reconstrói, prod só aplica. Seed segue a precedência da flag
-    // (--seed/--no-seed vencem o flux.toml).
-    let migrations = coletar_migrations();
-    if migrations.is_empty() {
-        eprintln!("[6/6] banco: nenhuma migration em database/migrations — schema pulado");
-    }
-    match cliente.schema(&ctx.name, &env.to_string(), &migrations, seed).await {
-        Ok(o) => println!(
-            "[6/6] banco: {} · aplicadas {} · fresh {}",
-            o.outcome, o.aplicadas, o.fresh
+    // (--seed/--no-seed vencem o flux.toml). ANTES de coletar, espera a
+    // estabilidade da subárvore de migrations ([db].silence_window_secs,
+    // default 5 s — 02): coleta no meio de uma escrita produz hash que
+    // diverge do que a sync replica, e o plano de rebuild erra por dados
+    // falsos — instável = pipeline PULADO com aviso, nada enviado ao fluxd.
+    let janela_db = cfg
+        .db
+        .as_ref()
+        .map(|d| d.silence_window_secs())
+        .unwrap_or(5);
+    let extra_sync: Vec<String> = cfg
+        .sync
+        .as_ref()
+        .and_then(|s| s.extra_ignore.clone())
+        .unwrap_or_default();
+    match crate::sync::esperar_estabilidade(
+        &ctx.dir,
+        &extra_sync,
+        Some(Path::new("database/migrations")),
+        std::time::Duration::from_secs(janela_db),
+        |msg| println!("      {msg}"),
+    ) {
+        Err(e) => eprintln!(
+            "aviso: migrations instáveis ({e}) — pipeline de schema PULADO, nada enviado ao fluxd; rode `flux up` de novo quando a árvore parar"
         ),
-        Err(e) => eprintln!("aviso: pipeline de migrations falhou: {e} — o resto do up seguiu"),
+        Ok(()) => {
+            let migrations = coletar_migrations();
+            if migrations.is_empty() {
+                eprintln!("[6/6] banco: nenhuma migration em database/migrations — schema pulado");
+            }
+            match cliente
+                .schema(&ctx.name, &env.to_string(), &migrations, seed)
+                .await
+            {
+                Ok(o) => println!(
+                    "[6/6] banco: {} · aplicadas {} · fresh {}",
+                    o.outcome, o.aplicadas, o.fresh
+                ),
+                Err(e) => {
+                    eprintln!("aviso: pipeline de migrations falhou: {e} — o resto do up seguiu")
+                }
+            }
+        }
     }
     imprime_status(&st);
     println!(
@@ -1145,10 +1188,11 @@ async fn down(env: &str) {
     }
 }
 
-/// restart/ps/build — o CLI já fala o protocolo da 07: chama o endpoint do
+/// restart/ps — o CLI já fala o protocolo da 07: chama o endpoint do
 /// projeto, mostra a resposta e sai com exit ≠ 0 enquanto o backend do fluxd
 /// ainda é 501. Quando a fase do backend chegar, o comando funciona sem
-/// mudança aqui. (down saiu daqui: virou contrato real, `down()` acima.)
+/// mudança aqui. (down saiu daqui: virou contrato real, `down()` acima;
+/// build também — virou o `flux build` real da 02, `build_assets()` acima.)
 async fn ciclo_api(acao: &str, env: &str) {
     let env = parse_env(env);
     let ctx = contexto_atual();
@@ -1156,7 +1200,6 @@ async fn ciclo_api(acao: &str, env: &str) {
     let (method, caminho) = match acao {
         "restart" => ("POST", format!("/projects/{}/restart?env={env}", ctx.name)),
         "ps" => ("GET", format!("/projects/{}/ps?env={env}", ctx.name)),
-        "build" => ("POST", format!("/projects/{}/build?env={env}", ctx.name)),
         _ => unreachable!("ação não mapeada: {acao}"),
     };
     match cliente.call_raw(method, &caminho, None).await {
@@ -1395,6 +1438,550 @@ async fn exec(command: Vec<String>, env: &str) {
     }
 }
 
+// ----------------------------------------------- sync contínua (02, F2)
+
+/// Arquivos no status de sessão em formato de linha (`None` = ainda sem
+/// scan — nunca vira "0", que mentiria).
+fn fmt_files(f: Option<u64>) -> String {
+    f.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
+}
+
+/// Sessão de sync do projeto no diretório atual — base de todo `flux sync *`
+/// (02: uma sessão por projeto, `flux-{name}`, ou `flux-{name}-{slug}` na
+/// worktree). Erro de config sai com exit 2 (recusa, não falha de rede).
+fn sync_spec_do_contexto() -> crate::sync::SyncSpec {
+    let ctx = contexto_atual();
+    crate::sync::SyncSpec::for_project(&ctx.dir, crate::sync::vm_beta(&ctx.name, None), None)
+        .unwrap_or_else(|e| {
+            eprintln!("erro: montando sync do projeto: {e}");
+            std::process::exit(2);
+        })
+}
+
+/// `flux sync status` (02): estado da sessão do projeto. Saudável imprime o
+/// marcador do aceite 5 ("ok · sem pendências"); sessão inexistente é erro
+/// com instrução (o caminho de conserto é `flux up`), nunca silêncio.
+fn sync_status_cmd() {
+    let nome = sync_spec_do_contexto().session();
+    let st = match crate::sync::status_of(&nome) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("erro: apurando status da sync: {e}");
+            std::process::exit(1);
+        }
+    };
+    let Some(s) = st else {
+        eprintln!("erro: sessão `{nome}` não existe — `flux up` cria a sync do projeto (02)");
+        std::process::exit(1);
+    };
+    if s.saudavel() {
+        println!("{nome}: ok · sem pendências");
+        return;
+    }
+    println!(
+        "{nome}: {} · pausada: {}",
+        s.status.rotulo(),
+        if s.paused { "sim" } else { "não" }
+    );
+    println!(
+        "  arquivos: alpha {} · beta {}",
+        fmt_files(s.alpha.files),
+        fmt_files(s.beta.files)
+    );
+    println!(
+        "  pendências: alpha scan {} · alpha transição {} · beta scan {} · beta transição {} · conflitos {}",
+        s.alpha.scan_problems,
+        s.alpha.transition_problems,
+        s.beta.scan_problems,
+        s.beta.transition_problems,
+        s.conflicts
+    );
+    match &s.last_error {
+        Some(e) => println!("  last_error: {e}"),
+        None => println!("  last_error: —"),
+    }
+}
+
+fn sync_pause_cmd() {
+    let nome = sync_spec_do_contexto().session();
+    if let Err(e) = crate::sync::pause(&nome) {
+        eprintln!("erro: pausando a sync: {e}");
+        std::process::exit(1);
+    }
+    println!("sync `{nome}` pausada (operador pode trabalhar na VM sem réplica chegando)");
+}
+
+fn sync_resume_cmd() {
+    let nome = sync_spec_do_contexto().session();
+    if let Err(e) = crate::sync::resume(&nome) {
+        eprintln!("erro: retomando a sync: {e}");
+        std::process::exit(1);
+    }
+    println!("sync `{nome}` retomada — o que acumulou converge sozinho");
+}
+
+/// Teto de espera do full rescan do `flux sync reset` (02: "termina sozinho,
+/// mostra progresso"; 10 min acima disso é anomalia visível).
+const TETO_RESET_SECS: u64 = 600;
+
+/// `flux sync reset` (02: "mata sessão e recria com full rescan; termina
+/// sozinho, mostra progresso") — este é o comando de "sync instantânea em
+/// todos os arquivos respeitando as regras": terminate + create força o scan
+/// completo dos dois lados, e o progresso é apurado com `status_of` a cada
+/// 2 s até a sessão voltar a Ociosa. Timeout = erro GRITADO com exit ≠ 0.
+fn sync_reset_cmd() {
+    let spec = sync_spec_do_contexto();
+    let nome = spec.session();
+    println!("reset: terminate + create de `{nome}` (full rescan nos dois lados)…");
+    if let Err(e) = crate::sync::reset(&spec) {
+        eprintln!("erro: {e}");
+        std::process::exit(1);
+    }
+    println!("sessão recriada — esperando o rescan convergir (teto {TETO_RESET_SECS} s)…");
+    let mut esperado = 0u64;
+    let mut ultimo: Option<String> = None;
+    loop {
+        match crate::sync::status_of(&nome) {
+            Ok(Some(s)) => {
+                if s.status == crate::sync::StatusState::Ociosa {
+                    if s.saudavel() {
+                        println!("ok · sem pendências");
+                    } else {
+                        println!(
+                            "ociosa com pendências (pausada: {}) — `flux sync status` detalha",
+                            if s.paused { "sim" } else { "não" }
+                        );
+                    }
+                    return;
+                }
+                let rot = s.status.rotulo();
+                if ultimo.as_deref() != Some(rot.as_str()) {
+                    println!("  … {rot}");
+                    ultimo = Some(rot);
+                }
+            }
+            Ok(None) => {
+                if ultimo.as_deref() != Some("ausente") {
+                    println!("  … sessão ainda não aparece na listagem do mutagen");
+                    ultimo = Some("ausente".to_owned());
+                }
+            }
+            Err(e) => {
+                eprintln!("erro: apurando progresso do reset: {e}");
+                std::process::exit(1);
+            }
+        }
+        if esperado >= TETO_RESET_SECS {
+            eprintln!(
+                "erro: full rescan de `{nome}` não convergiu em {TETO_RESET_SECS} s — `flux sync status` mostra onde travou (erro NUNCA fica silencioso, 02)"
+            );
+            std::process::exit(1);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        esperado += 2;
+    }
+}
+
+// ------------------------------------------------- build de assets (02)
+
+/// Teto próprio do `flux build` (02): build de assets legítimo roda minutos
+/// — o cap de 120 s do `flux exec` NÃO vale aqui.
+const BUILD_TIMEOUT_SECS: u64 = 1800;
+
+/// Default de [build].command por framework (02): só `laravel` tem default;
+/// as demais stacks precisam declarar o comando (nada de chute silencioso).
+fn default_build_command(f: flux_common::framework::Framework) -> Option<String> {
+    match f {
+        flux_common::framework::Framework::Laravel => Some("npm run build".to_owned()),
+        _ => None,
+    }
+}
+
+/// Aspas simples POSIX: fecha a string, escapa a aspa (`'` → `'\''`) e
+/// reabre. O comando vem do flux.toml do próprio dev, mas entra num shell
+/// remoto — aspas corretas são higiene, não confiança.
+fn shell_aspas_simples(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `flux build` (02): sync garantida → janela de silêncio no Windows →
+/// comando no container de dev sob o lock global `/srv/flux/build.lock` →
+/// exit code real do comando. Cada passo anunciado; erro em qualquer um
+/// sai com exit ≠ 0 e a causa.
+async fn build_assets() {
+    let ctx = contexto_atual();
+    let cfg = flux_common::config::ProjectToml::parse_str(&ctx.toml).unwrap_or_else(|e| {
+        eprintln!("erro: flux.toml inválido: {e}");
+        std::process::exit(1);
+    });
+    let build = cfg.build.clone().unwrap_or_default();
+    let servico = build.service().to_owned();
+    let janela = cfg.build_silence_window_secs();
+    let comando = match build
+        .command
+        .clone()
+        .or_else(|| default_build_command(cfg.framework()))
+    {
+        Some(c) if !c.trim().is_empty() => c,
+        Some(_) => {
+            eprintln!(
+                "erro: [build] command vazio no flux.toml — declare o comando ou remova a chave"
+            );
+            std::process::exit(2);
+        }
+        None => {
+            eprintln!(
+                "erro: framework `{}` não tem default de [build] command — declare no flux.toml (ex.: [build] command = \"npm run build\")",
+                cfg.framework()
+            );
+            std::process::exit(2);
+        }
+    };
+
+    // [1/4] Contexto + sessão de sync garantida (create é idempotente por
+    // nome — sessão viva é reuso, nunca erro).
+    println!(
+        "[1/4] projeto {} ({}) — garantindo sessão de sync…",
+        ctx.name,
+        cfg.framework()
+    );
+    let spec =
+        crate::sync::SyncSpec::for_project(&ctx.dir, crate::sync::vm_beta(&ctx.name, None), None)
+            .unwrap_or_else(|e| {
+                eprintln!("erro: montando sync: {e}");
+                std::process::exit(2);
+            });
+    if let Err(e) = crate::sync::create(&spec) {
+        eprintln!("erro: sync: {e}");
+        std::process::exit(1);
+    }
+    println!(
+        "[1/4] sync `{}` ativa — a VM recebe os fontes antes do build",
+        spec.session()
+    );
+
+    // [2/4] Janela de silêncio no lado Windows ([build].silence_window_secs,
+    // default 180 s): build sobre árvore em mudança replica pela metade.
+    println!(
+        "[2/4] janela de silêncio da árvore no Windows ({janela} s; teto {} rodadas)…",
+        crate::sync::TETO_RODADAS_ESTABILIDADE
+    );
+    let extra: Vec<String> = cfg
+        .sync
+        .as_ref()
+        .and_then(|s| s.extra_ignore.clone())
+        .unwrap_or_default();
+    let dir = ctx.dir.clone();
+    if let Err(e) = crate::sync::esperar_estabilidade(
+        &dir,
+        &extra,
+        None,
+        std::time::Duration::from_secs(janela),
+        |msg| println!("      {msg}"),
+    ) {
+        eprintln!("erro: {e}");
+        std::process::exit(1);
+    }
+
+    // [3/4] Build na VM: container resolvido por LABEL (mesmo mecanismo de
+    // resolução do exec no fluxd), comando sob o lock global via flock — um
+    // build por vez no fluxd inteiro. Lease antes (04): o container não dorme
+    // no meio do build.
+    println!(
+        "[3/4] build na VM: lock /srv/flux/build.lock + docker exec no serviço `{servico}` (teto {BUILD_TIMEOUT_SECS} s)…"
+    );
+    let cliente = ApiClient::from_env();
+    match cliente.lease(&ctx.name, "dev", LEASE_UP_SECS).await {
+        Ok(_) => {}
+        Err(e) => falhar(e),
+    }
+    let _guarda = api::manter_lease(
+        cliente.clone(),
+        ctx.name.clone(),
+        "dev".to_owned(),
+        LEASE_UP_SECS,
+    );
+    let Some(container) = container_do_servico(&ctx.name, "dev", &servico) else {
+        eprintln!(
+            "erro: container do serviço `{servico}` não encontrado (compose flux-{}-dev) — o projeto subiu? rode `flux up`",
+            ctx.name
+        );
+        std::process::exit(1);
+    };
+    let code = rodar_build_na_vm(&container, &comando);
+
+    // [4/4] Resultado com exit code real (o CLI repassa o do comando).
+    if code == 0 {
+        println!("[4/4] build concluído (exit 0)");
+    } else {
+        eprintln!("[4/4] build falhou (exit {code}) — saída acima tem a causa");
+    }
+    std::process::exit(code);
+}
+
+/// Roda o comando sob o flock na VM, dentro do container, com stdout/stderr
+/// HERDADOS (progresso ao vivo do build) e teto próprio de
+/// [`BUILD_TIMEOUT_SECS`] — estourou, o ssh é morto e o exit 124 (convenção
+/// do GNU timeout) sinaliza o teto; o flock libera o lock na morte do dono.
+fn rodar_build_na_vm(container: &str, comando: &str) -> i32 {
+    // `cd /var/www` primeiro: é o cwd padrão da plataforma dentro do
+    // container `app` (mesmo mecanismo do live server, 06).
+    let remoto = format!(
+        "flock /srv/flux/build.lock docker exec {container} sh -lc {}",
+        shell_aspas_simples(&format!("cd /var/www && {comando}"))
+    );
+    let mut filho = match std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            &env_ssh_alvo(),
+            &remoto,
+        ])
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("erro: não consegui lançar o ssh para o build: {e}");
+            return 127;
+        }
+    };
+    let inicio = std::time::Instant::now();
+    loop {
+        match filho.try_wait() {
+            Ok(Some(st)) => return st.code().unwrap_or(1),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("erro: esperando o build (ssh): {e}");
+                let _ = filho.kill();
+                let _ = filho.wait();
+                return 1;
+            }
+        }
+        if inicio.elapsed() >= std::time::Duration::from_secs(BUILD_TIMEOUT_SECS) {
+            let _ = filho.kill();
+            let _ = filho.wait();
+            eprintln!(
+                "erro: build estourou o teto de {BUILD_TIMEOUT_SECS} s — processo morto (lock /srv/flux/build.lock liberado pelo flock)"
+            );
+            return 124;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+// ------------------------------------------------- watch (02, serviço)
+
+/// `flux watch` (02): serviço de longa vida que fecha o circuito CLI ↔ painel
+/// — reporta as sessões `flux-*` do mutagen ao fluxd a cada 5 s
+/// (POST /sync/report), aplica o rescan pedido pelo painel (GET /sync/status
+/// → `sync::reset` → report com rescan_applied=true) e marca "absent" os
+/// projetos do fluxd sem sessão local viva. Erro NUNCA derruba o serviço nem
+/// passa em silêncio: loga com a origem e o próximo tick tenta de novo.
+/// Ctrl-C encerra limpo (nenhuma sessão mutagen é tocada).
+async fn watch() {
+    let cliente = ApiClient::from_env();
+    println!(
+        "watch: reportando sessões flux-* ao fluxd ({}) a cada 5 s — Ctrl-C encerra",
+        cliente.base_url()
+    );
+    loop {
+        tick_watch(&cliente).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                println!("watch: encerrado (Ctrl-C) — sessões mutagen intocadas");
+                return;
+            }
+        }
+    }
+}
+
+/// Uma rodada do watch (ver [`watch`]). Retorna sempre — erros viram log com
+/// origem, o loop é do chamador.
+async fn tick_watch(cliente: &ApiClient) {
+    // 1) Sessões locais → report individual ("watching").
+    let sessoes = match crate::sync::status_all() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("watch: status_all do mutagen falhou: {e}");
+            return;
+        }
+    };
+    let vivas: Vec<&crate::sync::SessionStatus> = sessoes
+        .iter()
+        .filter(|s| s.name.starts_with("flux-"))
+        .collect();
+    for s in &vivas {
+        let report = api::SyncReportIn {
+            // Projeto derivado da sessão (`flux-{name}` → {name}; a sessão de
+            // worktree `flux-{name}-{slug}` deriva `{name}-{slug}`, que NÃO é
+            // projeto registrado — o fluxd RECUSA com 404 e loga a
+            // divergência: linha fantasma nunca nasce (o painel casa pelo
+            // projeto registrado e o purge apaga pelo nome exato). O erro
+            // sai no log do watch a cada tick — nada silencioso. O rescan
+            // pedido para o projeto principal ALCANÇA a sessão de worktree:
+            // o tick 2 casa sessão por prefixo `flux-{project}-`.
+            project: s.name.strip_prefix("flux-").unwrap_or(&s.name).to_owned(),
+            session: s.name.clone(),
+            status: "watching".to_owned(),
+            paused: s.paused,
+            files: s.beta.files.or(s.alpha.files),
+            problems: s.alpha.scan_problems
+                + s.alpha.transition_problems
+                + s.beta.scan_problems
+                + s.beta.transition_problems
+                + s.conflicts,
+            last_error: s.last_error.clone(),
+            rescan_applied: false,
+        };
+        if let Err(e) = cliente.sync_report(&report).await {
+            eprintln!("watch: report de `{}`: {e}", s.name);
+        }
+    }
+    // 2) Estado do fluxd: rescan pedido → reset + re-report com
+    // rescan_applied=true; projeto sem sessão local → "absent".
+    let st = match cliente.sync_status().await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("watch: GET /sync/status: {e}");
+            return;
+        }
+    };
+    for p in st.projects {
+        let principal = format!("flux-{}", p.project);
+        let prefixo = format!("flux-{}-", p.project);
+        let locais: Vec<&&crate::sync::SessionStatus> = vivas
+            .iter()
+            .filter(|s| s.name == principal || s.name.starts_with(&prefixo))
+            .collect();
+        if locais.is_empty() {
+            let report = api::SyncReportIn {
+                project: p.project.clone(),
+                session: principal,
+                status: "absent".to_owned(),
+                paused: false,
+                files: None,
+                problems: 0,
+                last_error: None,
+                // NÃO limpa a flag: absent não aplicou rescan nenhum.
+                rescan_applied: false,
+            };
+            if let Err(e) = cliente.sync_report(&report).await {
+                eprintln!("watch: report absent de `{}`: {e}", p.project);
+            }
+            if p.rescan_requested {
+                eprintln!(
+                    "watch: rescan pedido para `{}` sem sessão local viva — a flag segue no fluxd até a sessão voltar",
+                    p.project
+                );
+            }
+            continue;
+        }
+        if p.rescan_requested
+            && let Err(e) = rescan_sessao(cliente, locais[0]).await
+        {
+            eprintln!("watch: rescan de `{}`: {e}", p.project);
+        }
+    }
+}
+
+/// Rescan pedido pelo painel (02): reconstrói a spec a partir da sessão viva
+/// (o mutagen grava alpha e beta na sessão), faz terminate + create (full
+/// rescan) e re-reporta com `rescan_applied=true` — é o que limpa a flag no
+/// fluxd. Erro em qualquer ponto sobe com a causa (o tick loga).
+async fn rescan_sessao(cliente: &ApiClient, s: &crate::sync::SessionStatus) -> Result<(), String> {
+    let spec = spec_da_sessao(s)?;
+    crate::sync::reset(&spec).map_err(|e| e.to_string())?;
+    println!(
+        "watch: rescan aplicado em `{}` (terminate + create)",
+        spec.session()
+    );
+    // Estado fresco pós-recriação — vai estar trabalhando; é o que o painel
+    // vê até o rescan terminar sozinho.
+    let fresco = crate::sync::status_of(&spec.session())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("sessão `{}` sumiu logo após o reset", spec.session()))?;
+    let report = api::SyncReportIn {
+        project: spec.project.clone(),
+        session: fresco.name.clone(),
+        status: "watching".to_owned(),
+        paused: fresco.paused,
+        files: fresco.beta.files.or(fresco.alpha.files),
+        problems: fresco.alpha.scan_problems
+            + fresco.alpha.transition_problems
+            + fresco.beta.scan_problems
+            + fresco.beta.transition_problems
+            + fresco.conflicts,
+        last_error: fresco.last_error.clone(),
+        rescan_applied: true,
+    };
+    cliente
+        .sync_report(&report)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Reconstrói a [`crate::sync::SyncSpec`] de uma sessão viva a partir do que
+/// o mutagen gravou: alpha = path local do endpoint; beta = `user@host:path`
+/// do endpoint remoto; projeto lido do flux.toml da pasta alpha (senão nome
+/// da pasta). O nome da sessão recriada TEM de bater com o original — nome
+/// divergente viraria "outra" sessão para o painel, então reconstrução que
+/// não fecha é ERRO, nunca chute.
+fn spec_da_sessao(s: &crate::sync::SessionStatus) -> Result<crate::sync::SyncSpec, String> {
+    if s.alpha.path.trim().is_empty() {
+        return Err(format!(
+            "sessão `{}` sem path de alpha — impossível reconstruir a spec",
+            s.name
+        ));
+    }
+    let alpha = std::path::PathBuf::from(s.alpha.path.trim());
+    let beta = if s.beta.remote {
+        let (user, host) = s.beta.host.split_once('@').ok_or_else(|| {
+            format!(
+                "beta remoto da sessão `{}` sem `user@host`: `{}`",
+                s.name, s.beta.host
+            )
+        })?;
+        if s.beta.path.trim().is_empty() {
+            return Err(format!(
+                "beta remoto da sessão `{}` sem path — impossível reconstruir",
+                s.name
+            ));
+        }
+        crate::sync::Beta::Ssh {
+            user: user.to_owned(),
+            host: host.to_owned(),
+            path: s.beta.path.trim().to_owned(),
+        }
+    } else {
+        crate::sync::Beta::Local(std::path::PathBuf::from(s.beta.path.trim()))
+    };
+    let base = crate::sync::SyncSpec::for_project(&alpha, beta, None).map_err(|e| e.to_string())?;
+    if s.name == base.session() {
+        return Ok(base);
+    }
+    // Worktree: o slug vive no sufixo do nome da sessão (spec 02) — a pasta
+    // alpha da worktree tem o MESMO project no flux.toml, então o sufixo é
+    // recuperável com determinismo.
+    let prefixo = format!("flux-{}-", base.project);
+    if let Some(slug) = s.name.strip_prefix(&prefixo) {
+        let mut spec = base.clone();
+        spec.branch_slug = Some(slug.to_owned());
+        if spec.session() == s.name {
+            return Ok(spec);
+        }
+    }
+    Err(format!(
+        "sessão `{}` não reconstrói a partir de {} (o alpha da sessão aponta outra pasta?)",
+        s.name,
+        alpha.display()
+    ))
+}
+
 /// `flux env` (02): o `.env` vive SÓ na VM (`/srv/flux/projects/{name}/.env`)
 /// — o repo do Windows NUNCA ganha uma cópia (repo intocado, 02). `push`
 /// envia o `.env` da pasta local (rascunho gitignored) pra VM; `pull` traz o
@@ -1434,9 +2021,7 @@ fn env_pull(name: &str) {
         std::process::exit(1);
     });
     if !gitignored_env() {
-        eprintln!(
-            "aviso: `.env` não está no .gitignore do repo — NUNCA comita esse arquivo (02)"
-        );
+        eprintln!("aviso: `.env` não está no .gitignore do repo — NUNCA comita esse arquivo (02)");
     }
     println!(".env da VM → .env local ({} bytes)", saida.stdout.len());
 }
@@ -1523,7 +2108,10 @@ fn env_edit(name: &str) {
             std::process::exit(127);
         });
     if !status.success() {
-        eprintln!("erro: editor saiu com falha — nada foi enviado; rascunho em {}", temp.display());
+        eprintln!(
+            "erro: editor saiu com falha — nada foi enviado; rascunho em {}",
+            temp.display()
+        );
         std::process::exit(1);
     }
     let corpo = std::fs::read(&temp).unwrap_or_else(|e| {
@@ -1555,11 +2143,10 @@ fn gitignored_env() -> bool {
 fn live_toggle(env: &str) {
     let _ = env; // live é dev-only hoje (gatilho env == "dev" no compose.rs)
     let ctx = contexto_atual();
-    let toml = flux_common::config::ProjectToml::parse_str(&ctx.toml)
-        .unwrap_or_else(|e| {
-            eprintln!("erro: flux.toml inválido: {e}");
-            std::process::exit(1);
-        });
+    let toml = flux_common::config::ProjectToml::parse_str(&ctx.toml).unwrap_or_else(|e| {
+        eprintln!("erro: flux.toml inválido: {e}");
+        std::process::exit(1);
+    });
     let Some(dev) = toml.dev else {
         eprintln!("erro: flux.toml sem seção [dev] — nada para alternar");
         std::process::exit(1);
@@ -1593,7 +2180,14 @@ fn live_toggle(env: &str) {
                  2>/dev/null;; esac; done; rm -f public/hot'"
             );
             let _ = std::process::Command::new("ssh")
-                .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", &env_ssh_alvo(), &remote])
+                .args([
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    &env_ssh_alvo(),
+                    &remote,
+                ])
                 .status();
         }
         println!("live OFF — dev server morto, public/hot limpo; site no manifest (F5)");
@@ -1621,6 +2215,14 @@ fn live_toggle(env: &str) {
 
 /// Nome do container `app` do projeto (compose), via label — primeiro match.
 fn container_do_projeto(name: &str, env: &str) -> Option<String> {
+    container_do_servico(name, env, "app")
+}
+
+/// Nome do container de UM serviço do projeto (compose), via label — o MESMO
+/// mecanismo de resolução do exec no fluxd (labels
+/// `com.docker.compose.project`/`...service`, nunca nome de container), aqui
+/// por `docker ps` na VM por SSH. Primeiro match.
+fn container_do_servico(name: &str, env: &str, service: &str) -> Option<String> {
     let projeto = format!("flux-{name}-{env}");
     let saida = std::process::Command::new("ssh")
         .args([
@@ -1630,7 +2232,8 @@ fn container_do_projeto(name: &str, env: &str) -> Option<String> {
             "ConnectTimeout=8",
             &env_ssh_alvo(),
             &format!(
-                "docker ps --filter label=com.docker.compose.project={projeto} --format {{{{.Names}}}}"
+                "docker ps --filter label=com.docker.compose.project={projeto} \
+                 --filter label=com.docker.compose.service={service} --format {{{{.Names}}}}"
             ),
         ])
         .output()
@@ -1746,11 +2349,7 @@ mod tests {
         set_live_no_toml(&base, Some("npm run build -- --watch"));
         let s = std::fs::read_to_string(base.join("flux.toml")).unwrap();
         assert!(s.contains("live = \"npm run build -- --watch\""));
-        assert_eq!(
-            s.matches("[dev]").count(),
-            1,
-            "toggle não duplica a seção"
-        );
+        assert_eq!(s.matches("[dev]").count(), 1, "toggle não duplica a seção");
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1886,5 +2485,46 @@ mod tests {
             !nome_de_projeto_ok("x'); DROP TABLE projects;--"),
             "injeção no sqlite3 remoto recusada"
         );
+    }
+
+    /// Default de [build].command (02): só laravel tem — as outras stacks
+    /// exigem declaração explícita (recusa com exit 2 no comando).
+    #[test]
+    fn default_de_build_so_laravel_tem() {
+        use flux_common::framework::Framework;
+        assert_eq!(
+            default_build_command(Framework::Laravel).as_deref(),
+            Some("npm run build"),
+            "default da 02 para laravel"
+        );
+        for f in [
+            Framework::Node,
+            Framework::Rust,
+            Framework::Static,
+            Framework::Custom,
+        ] {
+            assert!(
+                default_build_command(f).is_none(),
+                "{f} não tem default — exige [build] command"
+            );
+        }
+    }
+
+    /// Aspas simples POSIX: aspa interna vira a tríade `'\''` — o comando do
+    /// flux.toml entra no shell da VM sem quebrar nem injetar.
+    #[test]
+    fn shell_aspas_simples_escapa_a_aspa_interna() {
+        assert_eq!(shell_aspas_simples("npm run build"), "'npm run build'");
+        assert_eq!(
+            shell_aspas_simples("npm run build -- --mode='prod'"),
+            "'npm run build -- --mode='\\''prod'\\'''"
+        );
+        assert_eq!(shell_aspas_simples(""), "''");
+    }
+
+    #[test]
+    fn files_da_sessao_nunca_vira_zero_sem_scan() {
+        assert_eq!(fmt_files(Some(123)), "123");
+        assert_eq!(fmt_files(None), "—", "None = sem scan; 0 mentiria");
     }
 }
