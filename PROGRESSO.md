@@ -2,6 +2,80 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 14/10/2026 (parte 11) — F2 FECHADA NO USO DIÁRIO: sync/watch/build no CLI, hub de sync no fluxd, card Sync no painel
+
+**Intenção** (pedido do Gabriel): fechar a fase 02 de ponta a ponta — CLI
+conversando com o fluxd sobre o estado do mutagen, build de assets com janela
+de silêncio, `flux watch` como ponte e o painel mostrando e acionando o sync.
+Workflow de 4 frentes paralelas (CLI, fluxd, painel, docs) sobre a árvore
+compartilhada + revisão independente com 317 testes. Gate final
+`cargo test --workspace` ficou para o orquestrador — NÃO rodei nesta entrada.
+
+**CLI** (commit `89886e0`):
+
+- `flux sync status/pause/resume/reset` ligados ao mutagen real: `status`
+  imprime rótulo/pausada/arquivos/pendências alpha-beta/conflitos/last_error
+  e `ok · sem pendências` quando `saudavel()`; `reset` = terminate+create
+  com poll de status a cada 2 s até ociosa (teto 600 s, erro gritado).
+- `flux build` NOVO, em 4 passos (substitui o `Cmd::Build` antigo que batia
+  em rota inexistente do fluxd → 501): [1/4] contexto + `sync::create`
+  idempotente; [2/4] janela de silêncio da árvore por DUPLA leitura de hash
+  (sha256 de caminho+tamanho+mtime, sem ler conteúdo e sem crate de inotify;
+  teto de 3 rodadas); [3/4] lease + SSH DIRETO `flock /srv/flux/build.lock
+  docker exec <ctr> sh -lc 'cd /var/www && cmd'` com teto próprio de 1800 s
+  — direto porque o endpoint de exec do fluxd corta em 120 s server-side
+  (`fluxd/src/ciclo.rs:461-463`); [4/4] exit real (124 no teto, estilo GNU
+  timeout). Default de comando: só laravel (`npm run build`).
+- `flux watch` novo: loop de 5 s, `POST /sync/report` por sessão `flux-*` e
+  `GET /sync/status`; consome a fila de rescan reconstruindo a spec da
+  sessão viva + `sync::reset` + re-report com `rescan_applied=true`; erro
+  sempre logado com origem; contra fluxd morto o ciclo degrada a ~11 s sem
+  perder tick (medição instrumentada, revertida depois).
+- Chaves novas em `flux-common/src/config.rs`: `[db].silence_window_secs`
+  (default 5), `[build] {command, service, silence_window_secs}` (default
+  180, `deny_unknown_fields`); `flux.toml.example` na raiz com teste que
+  descomenta e parseia o arquivo contra o struct.
+
+**fluxd** (commit `66a22e5`): `crates/fluxd/src/sync.rs` novo — upsert de
+relatos em SQLite (tabela `sync_status`, SCHEMA_VERSION 2→3 com migrador v2
+e v1), `POST /sync/report` (204), `POST /sync/rescan` (202; 404 com causa),
+`GET /sync/status` — as três atrás do gate Bearer existente (401 testado);
+eventos scope `sync` em rescan pedido/aplicado; `purge_project` apaga a
+trilha de sync do projeto.
+
+**Painel** (commit `66a22e5`): card Sync no DASHBOARD de cada projeto —
+badge colorido (saudável verde / pausada azul / trabalhando amarela / atenção
+laranja quando há erro ou pendências, sobrepõe as outras / sem sessão cinza),
+arquivos, pendências, updated_at relativo, último erro e badge "rescan
+pendente" — mais botão Rescan (`POST /projects/{name}/rescan` → flag no
+SQLite consumida pelo `flux watch`; post/redirect/get com aviso "rescan
+queued", erro real renderizado).
+
+**Docs**: árvore nova em inglês em `docs/` (13 arquivos) + legado movido
+para `doc-old/` (22 renames) — vão no commit deste diário.
+
+**Achado "critical" da revisão NÃO reproduz**: o revisor apontou que a
+reconstrução do rescan assumiria `user@host` num campo que o mutagen não
+serializa. Na árvore final `endpoint_de` RECOMBINA os campos separados
+`user`+`host` (`crates/flux-cli/src/sync.rs:602-608`) e `spec_da_sessao`
+separa de novo em '@' com erro explícito quando não fecha
+(`crates/flux-cli/src/main.rs:1943`), com teste provando a recombinação
+(`sync.rs:925`). Registro para não re-abrir como bug.
+
+**Verificação**: revisor rodou `cargo test -p flux-common -p flux-cli -p
+fluxd` = **317 passed, 0 failed**; contrato JSON CLI↔fluxd conferido campo a
+campo. Smokes read-only do CLI: `flux sync status` sem flux.toml erra com
+"sessão `flux-Flux` não existe" (exit 1); `flux watch` contra fluxd morto
+descobriu as sessões vivas reais e seguiu de pé. Caminhos mutadores (`flux
+build`, `flux sync reset`, round-trip do Rescan no painel) cobertos por
+unit/wiring — ainda sem testemunha ao vivo na VM.
+
+**O que testar**: (1) `flux sync status` e `flux sync reset` num projeto com
+sessão real; (2) `flux build` no vipa (assets buildados dentro do container,
+exit 0, lock global segurando build paralelo); (3) painel: card Sync verde +
+botão Rescan → aviso "rescan queued" → flag consumida pelo watch; (4) aceite
+1 da 02 com 10 amostras (arquivo salvo no Windows → visível na VM em < 5 s).
+
 ## 14/10/2026 (parte 10) — F4 fechada (rota de deploy + token por projeto) e runner self-hosted buildado na VM
 
 **Intenção** (pedido do Gabriel): rodar o plano orquestrado de runners —
