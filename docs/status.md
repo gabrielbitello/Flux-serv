@@ -40,12 +40,12 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R4 | Never a raw 500/404: waiting page + wake | **PARCIAL** — full public chain proven through the internet (ghost ⇒ branded 404 in ~99 ms; panel ⇒ auth; valid TLS); waiting page for a **real sleeping project** through the internet still to capture |
 | R5 | Windows↔VM sync (mutagen) | **SIM** — real `one-way-replica` sessions; ignores hold (`.env`/`storage`/`vendor` stay VM-side); extended with `flux sync status/pause/resume/reset` + `flux watch` (commit `89886e0`), rescan queue and live panel state, and the `[sync] use_dockerignore` opt-in (2026-10-17) — unit/wiring-verified; the live `terminate + create` rescan round-trip through the panel button is still to be witnessed |
 | R6 | Single DB + migrations + guard | **PARCIAL** — pipeline complete and in the `up` path (real migrations, silence window, guard rescan, seed precedence, never in prod); `fresh` not yet exercised live; `db status/dump/restore/console` pending |
-| R7 | Dev rebuilds / prod never | **PARCIAL** — rule implemented and tested (fresh+seed in dev; mutation blocked in prod); not yet against a large real DB |
+| R7 | Dev rebuilds / prod never | **PARCIAL** — rule implemented and tested (fresh+seed in dev; mutation blocked in prod); `[db] rebuild_policy` (auto/always/never) now honored in dev; not yet against a large real DB |
 | R8 | `flux up/logs/exec/down` on Windows | **SIM** — plus `env pull/push/edit`, `build`, `live` toggle; automatic SSH forward; proven on real projects |
 | R9 | Web panel | **PARCIAL** — auth + dashboard/detail/events + `/observe` (24 h, filters, peak forensics) + live sync state with Rescan button (this session); log SSE view and database/sync/domains tabs pending |
 | R10 | Prod via GitHub Actions + immutable releases + blue-green | **PARCIAL** — public deploy route (default off) with per-project tokens, own rate limit 10/min burst 10, 409 guard, background pipeline (fetch + ancestry guard + immutable release dir via `git worktree`, 120 s git timeouts, full trail). Gaps: CI step that builds the image and raises the inactive color, commanded rollback (`flux prod rollback`), release rotation |
 | R11 | Resource limits + prod hibernation | **NÃO** — F10 |
-| R12 | Invisible version switch + drain | **PARCIAL** — mechanism proven live (blue→green switch on the same domain, `stop -t` drain, switch-back rollback); the CI that raises the inactive color is pending |
+| R12 | Invisible version switch + drain | **PARCIAL** — mechanism proven live (blue→green switch on the same domain, `stop -t` drain, switch-back rollback) and now gated by the REAL `[health] path` probe (switch aborts if the new color does not answer); the CI that raises the inactive color is pending |
 | R13 | Global dev quota / per-project prod limits | **NÃO** — F10 |
 | R14 | Prod sleeps, worker 24/7 | **PARCIAL** — pause/unpause in the sleep manager (`prod_mode`); 24/7 worker handling pending |
 | R15 | Branch routing `{branch}-{name}-d` | **PARCIAL** — parsing implemented/tested; worktrees/watch integration pending |
@@ -91,6 +91,8 @@ These entered the matrix above as **SIM**:
 | `[build]` section + `flux build` (silence window 180 s, global flock on the VM) | commit `89886e0`; [build.md](build.md) |
 | `flux sync status/pause/resume/reset` + `flux watch` (`POST /sync/report`, rescan queue consumer) | commit `89886e0`; [sync.md](sync.md) |
 | Panel: live sync state + Rescan button (`POST /projects/{name}/rescan`) | commit `66a22e5`; [panel.md](panel.md) |
+| `[sync] use_dockerignore` + `dockerignore_path` (opt-in `.dockerignore` in the session ignores) | [sync.md](sync.md) |
+| Dead keys now real: `[domains]` (validated extra host, exact-match routing, state v4), `[db] rebuild_policy` (auto/always/never in dev), `[health] path` (real probe: blue-green gate + `awake` vs `waking` in `flux up`), `[branding] logo_url` (wait/failed pages) | [configuration.md](configuration.md); `acao_dev`/`saude_ok`/`hosts_custom` unit-tested |
 | Documentation rebuilt in English (this docs/ tree; legacy preserved in `doc-old/`) | this file's repo area |
 
 Verification level: the three code fronts land with

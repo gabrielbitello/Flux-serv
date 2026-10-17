@@ -2,6 +2,65 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
+
+**Intenção** (pedido do Gabriel): a auditoria desta sessão mostrou 9 seções do
+exemplo TOML citando feature morta ou parcial; ele escolheu 4 para fechar
+agora — as 4 viraram função de verdade, cada uma com teste.
+
+**`[db] rebuild_policy` (05)**: `acao_dev(policy, mutadas, novas)` pura em
+`fluxd/src/db.rs` decide o braço dev: `never` pula o pipeline com evento
+contando as pendências (e diz como aplicar), `always` reconstrói em TODO dev
+up mesmo com plano limpo, `auto` é o comportamento histórico. `DbSection::
+rebuild_policy()` default `auto` — quem nunca declarou não muda nada.
+`migrate_cmd` (node/rust) não é afetado pela policy.
+
+**`[branding] logo_url` (15)**: `BrandingSection::logo_url()` (vazio = None);
+`pages::html_page` renderiza `<img>` aplicado nas páginas de espera/falha,
+URL escapada; `router.rs` resolve o logo do TOML gravado — parse falho não
+derruba a página (só tira a marca). Páginas de plataforma (404, API) ficam
+sem logo.
+
+**`[health] path` (06 — F9 fechada)**: probe HTTP REAL em dois pontos.
+(1) Gate da troca blue-green (`trocar_cor`): depois de RUNNING, espera o app
+da cor nova responder `GET {health.path}` (30×1 s, timeout 2 s, direto no
+IP:porta do container pela rede docker — mesmo cliente do proxy). Falha
+ABORTA a troca antes do ponteiro se mover. (2) `/status`: container RUNNING
+só merece `"awake"` com o path respondendo; senão `"waking"` — o `flux up`
+continua esperando em vez de celebrar cedo. `docker::alvo_app` resolve o
+alvo; `compose::saude_ok` é o probe unitável.
+
+**`[domains]` (09 — state v4)**: `project_hosts(host, project, dev)` no
+SQLite (SCHEMA_VERSION 3→4 com migrador v3; purge apaga a trilha). Registro
+valida via `ProjectToml::hosts_custom(&domain)` — host TEM de estar dentro da
+zona (o túnel cobre `*.{zone}`; fora dela o erro é explícito na borda), não
+pode ser o painel, não pode começar com `vite-` nem o rótulo terminar com
+`-d`; colisão entre projetos = 422 citando o dono; re-registro do dono
+substitui. Routing: `ManagedHost::Custom { name, dev }` novo, batida EXATA
+antes da derivação (`parse_custom` — `parse` puro continua derivado-only,
+testes antigos intactos); `decision::decide`, `beat`, `host_env` e
+`DockerSource`/`SqliteSource` (`HostSource::host_custom` com default `None`)
+respeitam o ambiente do registro. Exibição (register/list/status/panel)
+mostra o override com fallback na derivação. Hosts derivados CONTINUAM
+routeando — `[domains]` ADICIONA, nunca remove; robots/sitemap seguem na
+derivação (sempre válida). Branch de worktree NÃO se aplica a host custom.
+
+**Verificação**: `cargo clippy --workspace --all-targets -- -D warnings`
+limpo; `cargo test --workspace` = 336 passed, 0 failed (testes novos:
+`acao_dev_segue_a_policy`, logo aplicado/escapado, `hosts_custom_valida_…`,
+`host_custom_vence_a_derivacao_…`, `host_custom_do_domains_resolve_…`,
+`hosts_custom_grava_resolve_e_purga`, `register_com_domains_persiste_…`).
+PENDENTE de smoke na VM real: migrador v3→v4 do fluxd vivo, probe de health
+contra container de verdade, registro com `[domains]` + túnel roteando host
+custom (DNS `*.{zone}` já cobre).
+
+**Docs**: `configuration.md` (4 linhas de tabela viraram verdade + changelog),
+`deploy.md` (health gate antes da troca), `status.md` (R7/R12 + entregas).
+
+**O que NUNCA fazer aqui**: host custom fora da zona (falharia silencioso no
+Cloudflare); RUNNING valendo "awake" (já mentiu uma vez); logo em página de
+plataforma; host custom com branch de worktree.
+
 ## 17/10/2026 — `[sync] use_dockerignore`: opt-in do `.dockerignore` nos ignores da sessão
 
 **Intenção** (pedido do Gabriel): toggle no `flux.toml` para o sync respeitar

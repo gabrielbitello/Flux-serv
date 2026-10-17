@@ -78,8 +78,8 @@ rate = 500                      # per-host rate limit override (edge)
 |---|---|---|
 | `name` | folder name | Compose project `flux-{name}-{env}`, sync session `flux-{name}`, hosts `{name}.bitello.xyz` / `{name}-d.bitello.xyz`. `[a-z0-9-]` only at registration. |
 | `framework` | `laravel` | Validation of `[health] path` (node/rust must declare) and `[db] migrate_cmd` (empty ⇒ warning, never silence). |
-| `domains.prod` / `domains.dev` | derived from global zone | Explicit host override. |
-| `db.rebuild_policy` | `auto` | `auto`: rebuild when the migration hash set changed; `always`: rebuild on every dev up; `never`. There is **no flag that ever rebuilds prod** — by design. |
+| `domains.prod` / `domains.dev` | derived from global zone | Extra host added to the project (the derived hosts KEEP routing — this adds, never removes). Must stay inside `{zone}` (the tunnel covers `*.{zone}`), cannot collide with the panel host, cannot start with `vite-`, and the label cannot end with the `dev_suffix`. Validated at registration (422 with the key named); a host already owned by another project is refused with its owner. Routing is exact-match: worktree branches do not apply to custom hosts. |
+| `db.rebuild_policy` | `auto` | Dev only — prod never rebuilds regardless. `auto`: rebuild when the migration hash set changed; `always`: rebuild on every dev up; `never`: the schema pipeline is skipped with a visible event counting the pending migrations (`flux db fresh` or a policy change applies them). Node/rust `migrate_cmd` is not affected by this policy. |
 | `db.seed_on_rebuild` | `true` | CLI flags `--seed`/`--no-seed` win over this; prod never seeds regardless. |
 | `db.migrate_cmd` | empty | node/rust schema command executed via `docker exec`; empty means no automatic pipeline (fluxd warns). |
 | `db.silence_window_secs` | **5** | Quiet window before the migration pipeline fires: the CLI re-reads the migration-set hash on the Windows side and only proceeds after the window with no change (double-hash read — see [database.md](database.md)). |
@@ -91,9 +91,9 @@ rate = 500                      # per-host rate limit override (edge)
 | `sync.dockerignore_path` | `.dockerignore` | Where the file lives, repo-relative; only read when `use_dockerignore = true`. |
 | `temporary.*` | `false` / 6 h | Teardown removes compose project, `/srv/flux/projects/{name}*` and the SQLite trail — never the Windows repo. |
 | `provision.on_wake` | — | Command run on wake. |
-| `branding.logo_url` | — | Shown on the maintenance page. |
+| `branding.logo_url` | — | Rendered on the wait/failed pages (the maintenance surfaces) — applied in context, never on platform pages (404, panel). Empty string is treated as absent. |
 | `shield.*` | auto-detect | Auth paths for anti-brute-force; `tarpit` toggles the tarpit. |
-| `health.path` | `/up` | The path fluxd polls to declare a container awake. |
+| `health.path` | `/up` | The REAL health gate (06): the blue-green switch only fires after the new color answers `GET {path}`, and `flux up` reports the container as `awake` only when it answers — a RUNNING container that does not answer reports `waking` and the CLI keeps waiting. |
 | `dev.live` | — | Run as `docker compose -p {project} exec -d app sh -c "cd /var/www && {live}"` **only** when `env == dev` and the up succeeded; a live failure is a panel warning and never fails the up. `flux live` toggles it without a down. |
 | `dev.overlays` | `false` | With `.flux/overlays/` present, `flux up` tars it over `/srv/flux/projects/{name}/` via SSH before compose/migrations. |
 | `limits.rate` | global edge default | Per-host token-bucket override. |
@@ -146,3 +146,4 @@ and [`doc-old/specs/06-cli.md`](../doc-old/specs/06-cli.md).
 |---|---|
 | 2026-10-14 | Initial English documentation |
 | 2026-10-17 | `[sync] use_dockerignore` + `sync.dockerignore_path` (opt-in `.dockerignore` support) |
+| 2026-10-17 | Dead keys now real: `[domains]` (exact-match extra host, state v4), `[db] rebuild_policy` (auto/always/never in dev), `[health] path` (real probe in the blue-green gate and in `awake`), `[branding] logo_url` (rendered on wait/failed pages) |

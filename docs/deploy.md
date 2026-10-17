@@ -65,6 +65,11 @@ From `crates/fluxd/src/deploy.rs`:
   out via `git worktree` — releases are never mutated in place; every git
   command runs with a **120 s timeout** (`kill_on_drop`), so a git hung on
   the network cannot hold the concurrency guard forever.
+- **Health gate before the switch** (`[health] path`, 06): RUNNING is not
+  enough — the switch waits until the new color's `app` container actually
+  **answers GET `{health.path}`** (30 × 1 s probes, 2 s timeout each, direct
+  to the container IP over the Docker network). A wrong path or a broken app
+  aborts the switch BEFORE the pointer moves — the old color keeps serving.
 - **Blue-green switch**: the router flips the host to the new color; the old
   color is drained with `docker stop -t` (graceful). Rollback is the same
   mechanism in reverse — switch back to the previous release. The whole path
