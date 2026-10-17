@@ -38,7 +38,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R2 | Docker inside a Debian VM | **SIM** — VirtualBox VM operational, router proxying real containers |
 | R3 | Interaction-based auto-sleep | **SIM** — slept (15 min), woke (~1.1 s), CLI lease, CPU sweep, and the injected `/__flux/beat` overlay (30 s throttle) proven end to end |
 | R4 | Never a raw 500/404: waiting page + wake | **PARCIAL** — full public chain proven through the internet (ghost ⇒ branded 404 in ~99 ms; panel ⇒ auth; valid TLS); waiting page for a **real sleeping project** through the internet still to capture |
-| R5 | Windows↔VM sync (mutagen) | **SIM** — real `one-way-replica` sessions; ignores hold (`.env`/`storage`/`vendor` stay VM-side); extended this session (commit `89886e0`) with `flux sync status/pause/resume/reset`, `flux watch`, rescan queue and live panel state — unit/wiring-verified; the live `terminate + create` rescan round-trip through the panel button is still to be witnessed |
+| R5 | Windows↔VM sync (mutagen) | **SIM** — real `one-way-replica` sessions; ignores hold (`.env`/`storage`/`vendor` stay VM-side); extended with `flux sync status/pause/resume/reset` + `flux watch` (commit `89886e0`), rescan queue and live panel state, and the `[sync] use_dockerignore` opt-in (2026-10-17) — unit/wiring-verified; the live `terminate + create` rescan round-trip through the panel button is still to be witnessed |
 | R6 | Single DB + migrations + guard | **PARCIAL** — pipeline complete and in the `up` path (real migrations, silence window, guard rescan, seed precedence, never in prod); `fresh` not yet exercised live; `db status/dump/restore/console` pending |
 | R7 | Dev rebuilds / prod never | **PARCIAL** — rule implemented and tested (fresh+seed in dev; mutation blocked in prod); not yet against a large real DB |
 | R8 | `flux up/logs/exec/down` on Windows | **SIM** — plus `env pull/push/edit`, `build`, `live` toggle; automatic SSH forward; proven on real projects |
@@ -69,7 +69,13 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R33 | Public status page with classified cause | **NÃO** — `Cause` enum exists; F20 |
 | R34 | Prod DB backup (48 h / 7 d) | **NÃO** — F16 |
 
-## Delivered in this session (2026-10-14)
+## Delivered in this session (2026-10-17)
+
+| Delivery | Where |
+|---|---|
+| `[sync] use_dockerignore` + `sync.dockerignore_path` (opt-in `.dockerignore` in the session ignores; file missing with the toggle on is a hard error) | [sync.md](sync.md); `ignores_do_projeto`, `crates/flux-cli/src/sync.rs` |
+
+## Delivered on 2026-10-14
 
 These entered the matrix above as **SIM**:
 

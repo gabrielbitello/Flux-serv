@@ -50,6 +50,27 @@ session is idempotent: `flux up` on an existing session reuses it and warns
 that new `extra_ignore` entries require `flux sync reset` to take effect —
 never a silent no-op.
 
+## The `.dockerignore` opt-in
+
+Sync does **not** read `.dockerignore` by default. Opt in per project:
+
+```toml
+[sync]
+use_dockerignore    = true              # default false — nothing changes unasked
+dockerignore_path   = ".dockerignore"   # repo-relative; default is the Docker convention
+```
+
+When enabled, patterns from the file are **added** to `extra_ignore` (never
+to the mandatory globals), after stripping comments and blank lines. The
+patterns pass through **verbatim** to mutagen (sessions) and to the
+platform's stability checker — the exact dockerignore semantics
+(last-match-wins, `!` exception precedence) are **not** reproduced, so exotic
+Docker patterns may behave differently; plain path/glob patterns are the
+supported subset. Toggle on with the file missing is a **hard error**
+(`ignores_do_projeto`, `crates/flux-cli/src/sync.rs`) — declared config never
+falls back silently. Like `extra_ignore`, changes reach a live session only
+via `flux sync reset`.
+
 ## The `.env` is exclusive to the VM
 
 `.env` is in the mandatory ignores, so the VM copy is the only live one. The

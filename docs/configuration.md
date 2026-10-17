@@ -44,6 +44,8 @@ worker_cpus      = 0.5
 
 [sync]
 extra_ignore = ["resources/svg/**"]   # ADDS to the mandatory global ignores
+use_dockerignore    = false           # also apply patterns from .dockerignore
+dockerignore_path   = ".dockerignore" # where that file lives (repo-relative)
 
 [temporary]                    # self-destructing dev project
 enabled   = false              # default false — nothing self-destructs by accident
@@ -85,6 +87,8 @@ rate = 500                      # per-host rate limit override (edge)
 | `sleep.*` | dev on, 15 min; prod `pause`, 30 min | Enforced by the sleep manager's 60 s sweep; signals: proxied request, CLI/panel lease, CPU above `cpu_percent_teto`, browser beat. |
 | `resources.*` | platform defaults | Prod container limits (dev is unlimited today). |
 | `sync.extra_ignore` | — | **Only adds** to the mandatory global ignores; it can never re-include `.env`, `vendor/`, etc. New entries reach a live session only via `flux sync reset`. |
+| `sync.use_dockerignore` | `false` | Opt-in: adds the patterns of `.dockerignore` to the session ignores (verbatim, comments stripped; exact Docker semantics not reproduced — see [sync.md](sync.md)). File missing with the toggle on is a hard error. |
+| `sync.dockerignore_path` | `.dockerignore` | Where the file lives, repo-relative; only read when `use_dockerignore = true`. |
 | `temporary.*` | `false` / 6 h | Teardown removes compose project, `/srv/flux/projects/{name}*` and the SQLite trail — never the Windows repo. |
 | `provision.on_wake` | — | Command run on wake. |
 | `branding.logo_url` | — | Shown on the maintenance page. |
@@ -141,3 +145,4 @@ and [`doc-old/specs/06-cli.md`](../doc-old/specs/06-cli.md).
 | Date | Change |
 |---|---|
 | 2026-10-14 | Initial English documentation |
+| 2026-10-17 | `[sync] use_dockerignore` + `sync.dockerignore_path` (opt-in `.dockerignore` support) |

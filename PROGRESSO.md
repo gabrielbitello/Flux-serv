@@ -2,6 +2,44 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 17/10/2026 — `[sync] use_dockerignore`: opt-in do `.dockerignore` nos ignores da sessão
+
+**Intenção** (pedido do Gabriel): toggle no `flux.toml` para o sync respeitar
+o `.dockerignore`, com chave para dizer onde o arquivo está. Auditoria prévia
+desta sessão mostrou que a sync lia só `GLOBAL_IGNORES` + `extra_ignore` —
+zero menção a `.dockerignore` no código.
+
+**O que entrou**:
+
+- `crates/flux-common/src/config.rs`: `[sync] use_dockerignore` (default
+  **false** — nada muda sem decisão explícita) e `[sync] dockerignore_path`
+  (default `.dockerignore`, relativo à raiz do projeto), com acessores e
+  testes de parse/default.
+- `crates/flux-cli/src/sync.rs`: `ignores_do_projeto(dir, sync)` — junta
+  `extra_ignore` + padrões do `.dockerignore` (comentários `#` e linhas
+  vazias fora, dedup, append-only: nunca re-inclui globais). Toggle ligado e
+  arquivo ausente = ERRO com caminho na mensagem. `SyncSpec::for_project`
+  integra — então sync start, watch, status/pause/resume/reset e os dois
+  pontos de estabilidade (`flux up` em `main.rs`, `flux build`) herdam.
+- Testes novos: 4 unitários do helper + 1 de integração do `for_project`
+  (globais na frente intocados). Gate local: `cargo clippy --workspace
+  --all-targets -- -D warnings` verde, `cargo test --workspace` = 329 passed,
+  0 failed.
+
+**Limitação declarada** (doc, não silêncio): os padrões passam VERBATIM ao
+mutagen e ao `caminho_ignorado` da plataforma — a semântica exata do
+dockerignore (last-match-wins, precedência das exceções `!`) NÃO é
+reproduzida. Subconjunto suportado = padrões simples de caminho/glob.
+
+**Docs**: `docs/sync.md` (seção "The `.dockerignore` opt-in"),
+`docs/configuration.md` (exemplo + 2 linhas de tabela + changelog),
+`docs/STATUS.md` (R5 atualizada + entrega desta sessão), `flux.toml.example`
+(seção `[sync]` documentada; teste de parse da raiz verde).
+
+**O que NUNCA fazer aqui**: ler o `.dockerignore` por default (quem nunca
+declarou a chave não pode ter o sync mudado); traduzir semântica do Docker
+para mutagen em silêncio; deixar arquivo ausente virar fallback calado.
+
 ## 14/10/2026 (parte 11) — F2 FECHADA NO USO DIÁRIO: sync/watch/build no CLI, hub de sync no fluxd, card Sync no painel
 
 **Intenção** (pedido do Gabriel): fechar a fase 02 de ponta a ponta — CLI

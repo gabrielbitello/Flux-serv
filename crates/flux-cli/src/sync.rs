@@ -46,7 +46,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use flux_common::config::ProjectToml;
+use flux_common::config::{ProjectToml, SyncSection};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -65,7 +65,8 @@ pub const VM_PROJECTS_ROOT: &str = "/srv/flux/projects";
 
 /// Excludes GLOBAIS, verbatim da spec 02 ("Padrão global, não configurável por
 /// segurança/estabilidade"). O projeto SÓ ADICIONA ignores via `flux.toml`
-/// (`[sync].extra_ignore`); remover daqui é impossível pela API do módulo —
+/// (`[sync].extra_ignore` e, opt-in, o `.dockerignore` — `ignores_do_projeto`);
+/// remover daqui é impossível pela API do módulo —
 /// é o que protege o container de perder estado a cada sync (spec 02, "o que
 /// NUNCA fazer": nunca sincronizar storage/, vendor/, node_modules/, artefatos
 /// de build).
@@ -200,6 +201,47 @@ pub fn branch_slug(branch: &str) -> Result<String, SyncError> {
     Ok(slug)
 }
 
+/// Ignores de projeto do `[sync]` do `flux.toml`: `extra_ignore` + padrões do
+/// `.dockerignore` quando `use_dockerignore = true` (append-only — nunca
+/// re-inclui os globais). Comentários `#` e linhas vazias do arquivo caem
+/// fora; os padrões passam VERBATIM — a semântica exata do dockerignore
+/// (last-match-wins, exceções `!` com precedência própria) NÃO é reproduzida:
+/// quem interpreta é o ignore do mutagen (sessão) e o `caminho_ignorado` da
+/// plataforma (estabilidade), então padrões exóticos do Docker podem divergir.
+/// Toggle ligado e arquivo ausente é ERRO — config declarada nunca vira
+/// fallback silencioso.
+pub fn ignores_do_projeto(dir: &Path, sync: Option<&SyncSection>) -> Result<Vec<String>, String> {
+    let Some(sync) = sync else {
+        return Ok(Vec::new());
+    };
+    let mut todos: Vec<String> = sync
+        .extra_ignore
+        .iter()
+        .flatten()
+        .map(|i| i.trim().to_owned())
+        .filter(|i| !i.is_empty())
+        .collect();
+    if sync.use_dockerignore() {
+        let caminho = dir.join(sync.dockerignore_path());
+        let conteudo = std::fs::read_to_string(&caminho).map_err(|e| {
+            format!(
+                "[sync] use_dockerignore ligado mas {} não lê: {e}",
+                caminho.display()
+            )
+        })?;
+        for linha in conteudo.lines() {
+            let linha = linha.trim();
+            if linha.is_empty() || linha.starts_with('#') {
+                continue;
+            }
+            if !todos.iter().any(|g| g == linha) {
+                todos.push(linha.to_owned());
+            }
+        }
+    }
+    Ok(todos)
+}
+
 // ------------------------------------------------------------------ SyncSpec
 
 /// Especificação de uma sessão de sync de projeto (spec 02): quem é a sessão,
@@ -244,9 +286,10 @@ impl SyncSpec {
     }
 
     /// Especificação lida da pasta do projeto: nome efetivo do `flux.toml`
-    /// (senão o nome da pasta, spec 06) e `[sync].extra_ignore`. `flux.toml`
-    /// ausente é suportado (defaults da plataforma); presente e quebrado é
-    /// ERRO — nunca fallback silencioso.
+    /// (senão o nome da pasta, spec 06) e ignores do `[sync]` — `extra_ignore`
+    /// mais `.dockerignore` quando ligado, via `ignores_do_projeto`.
+    /// `flux.toml` ausente é suportado (defaults da plataforma); presente e
+    /// quebrado é ERRO — nunca fallback silencioso.
     pub fn for_project(dir: &Path, beta: Beta, branch: Option<&str>) -> Result<Self, SyncError> {
         let pasta = dir
             .file_name()
@@ -257,11 +300,7 @@ impl SyncSpec {
             let t = ProjectToml::load(&toml_path).map_err(|e| SyncError::Config(e.to_string()))?;
             let nome = t.effective_name(&pasta).to_owned();
             let mut s = Self::new(&nome, dir.to_path_buf(), beta, branch)?;
-            s.extra_ignore = t
-                .sync
-                .as_ref()
-                .and_then(|s| s.extra_ignore.clone())
-                .unwrap_or_default();
+            s.extra_ignore = ignores_do_projeto(dir, t.sync.as_ref()).map_err(SyncError::Config)?;
             s
         } else {
             Self::new(&pasta, dir.to_path_buf(), beta, branch)?
@@ -875,6 +914,118 @@ pub fn esperar_estabilidade(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Toggle OFF: só `extra_ignore`, `.dockerignore` nem é lido.
+    #[test]
+    fn ignores_do_projeto_sem_toggle_so_extras() {
+        let dir = std::env::temp_dir();
+        let sync = SyncSection {
+            extra_ignore: Some(vec!["resources/svg/**".into()]),
+            use_dockerignore: Some(false),
+            dockerignore_path: None,
+        };
+        let got = ignores_do_projeto(&dir, Some(&sync)).unwrap();
+        assert_eq!(got, vec!["resources/svg/**".to_string()]);
+        // Seção ausente: nada a adicionar.
+        assert!(ignores_do_projeto(&dir, None).unwrap().is_empty());
+    }
+
+    /// Toggle ON: comentários e vazios caem fora, padrões passam verbatim
+    /// (inclusive exceção `!`), extras vêm primeiro, duplicata some.
+    #[test]
+    fn ignores_do_projeto_soma_padroes_do_dockerignore() {
+        let base = std::env::temp_dir().join(format!("flux-dockerignore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join(".dockerignore"),
+            "# dependências\n\
+             \n\
+             node_modules\n\
+             **/dist\n\
+             tests/\n\
+             !tests/keep.txt\n",
+        )
+        .unwrap();
+        let sync = SyncSection {
+            extra_ignore: Some(vec!["resources/svg/**".into(), "**/dist".into()]),
+            use_dockerignore: Some(true),
+            dockerignore_path: None,
+        };
+        let got = ignores_do_projeto(&base, Some(&sync)).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "resources/svg/**".to_string(),
+                "**/dist".to_string(),
+                "node_modules".to_string(),
+                "tests/".to_string(),
+                "!tests/keep.txt".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Caminho custom (`dockerignore_path`) resolve relativo à raiz.
+    #[test]
+    fn ignores_do_projeto_respeita_dockerignore_path() {
+        let base =
+            std::env::temp_dir().join(format!("flux-dockerignore-path-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("config")).unwrap();
+        std::fs::write(base.join("config").join("ctx.dockerignore"), b"docs/\n").unwrap();
+        let sync = SyncSection {
+            extra_ignore: None,
+            use_dockerignore: Some(true),
+            dockerignore_path: Some("config/ctx.dockerignore".into()),
+        };
+        let got = ignores_do_projeto(&base, Some(&sync)).unwrap();
+        assert_eq!(got, vec!["docs/".to_string()]);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Toggle ON e arquivo ausente é ERRO com o caminho na mensagem — config
+    /// declarada nunca vira fallback silencioso.
+    #[test]
+    fn ignores_do_projeto_com_toggle_e_sem_arquivo_e_erro() {
+        let base =
+            std::env::temp_dir().join(format!("flux-dockerignore-ausente-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sync = SyncSection {
+            extra_ignore: None,
+            use_dockerignore: Some(true),
+            dockerignore_path: None,
+        };
+        let err = ignores_do_projeto(&base, Some(&sync)).unwrap_err();
+        assert!(
+            err.contains("use_dockerignore") && err.contains(".dockerignore"),
+            "erro cita toggle e arquivo: {err}"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `for_project` integra os padrões do `.dockerignore` no spec da sessão.
+    #[test]
+    fn for_project_carrega_dockerignore_no_spec() {
+        if !git_disponivel() {
+            eprintln!("git indisponível — teste pulado");
+            return;
+        }
+        let base = repo_temp("dockerignore-spec");
+        std::fs::write(base.join("flux.toml"), b"[sync]\nuse_dockerignore = true\n").unwrap();
+        std::fs::write(base.join(".dockerignore"), b"docs/\n**/target\n").unwrap();
+        let spec = SyncSpec::for_project(&base, Beta::Local(base.join("replica")), None).unwrap();
+        let ig = spec.ignores();
+        for esperado in ["docs/", "**/target"] {
+            assert!(
+                ig.iter().any(|g| g == esperado),
+                "{esperado} tem de entrar no spec: {ig:?}"
+            );
+        }
+        // Globais OBRIGATÓRIOS continuam na frente, intocados.
+        assert_eq!(ig.first(), Some(&".env".to_string()));
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// Git no PATH? Os testes de árvore precisam de `git ls-files`; sem git,
     /// passam vazios (mesma convenção dos testes gated por `MUTAGEN_BIN`).

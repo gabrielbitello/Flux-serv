@@ -840,11 +840,11 @@ async fn up(env: &str, seed: Option<bool>) {
         .as_ref()
         .map(|d| d.silence_window_secs())
         .unwrap_or(5);
-    let extra_sync: Vec<String> = cfg
-        .sync
-        .as_ref()
-        .and_then(|s| s.extra_ignore.clone())
-        .unwrap_or_default();
+    let extra_sync: Vec<String> = crate::sync::ignores_do_projeto(&ctx.dir, cfg.sync.as_ref())
+        .unwrap_or_else(|e| {
+            eprintln!("erro: {e}");
+            std::process::exit(1);
+        });
     match crate::sync::esperar_estabilidade(
         &ctx.dir,
         &extra_sync,
@@ -1666,11 +1666,11 @@ async fn build_assets() {
         "[2/4] janela de silêncio da árvore no Windows ({janela} s; teto {} rodadas)…",
         crate::sync::TETO_RODADAS_ESTABILIDADE
     );
-    let extra: Vec<String> = cfg
-        .sync
-        .as_ref()
-        .and_then(|s| s.extra_ignore.clone())
-        .unwrap_or_default();
+    let extra: Vec<String> = crate::sync::ignores_do_projeto(&ctx.dir, cfg.sync.as_ref())
+        .unwrap_or_else(|e| {
+            eprintln!("erro: {e}");
+            std::process::exit(1);
+        });
     let dir = ctx.dir.clone();
     if let Err(e) = crate::sync::esperar_estabilidade(
         &dir,

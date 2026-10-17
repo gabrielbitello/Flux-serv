@@ -192,6 +192,25 @@ pub struct SyncSection {
     /// Só ADICIONA ao ignore global (02) — nunca restringe o ignore de fábrica
     /// (`.env`, `vendor/`, `node_modules/`, `storage/`).
     pub extra_ignore: Option<Vec<String>>,
+    /// Soma os padrões do `.dockerignore` aos ignores da sessão (02). Default
+    /// false — quem nunca ouviu falar no `.dockerignore` não pode ter o sync
+    /// mudado por baixo.
+    pub use_dockerignore: Option<bool>,
+    /// Onde está o arquivo, relativo à raiz do projeto. Só tem efeito com
+    /// `use_dockerignore = true`.
+    pub dockerignore_path: Option<String>,
+}
+
+impl SyncSection {
+    /// Toggle desligado por default (mesma filosofia do `[temporary]`).
+    pub fn use_dockerignore(&self) -> bool {
+        self.use_dockerignore.unwrap_or(false)
+    }
+
+    /// Convenção do Docker: arquivo na raiz do contexto de build.
+    pub fn dockerignore_path(&self) -> &str {
+        self.dockerignore_path.as_deref().unwrap_or(".dockerignore")
+    }
 }
 
 /// Modo dev temporário (14): apaga o projeto SOZINHO da VM após TTL sem
@@ -550,6 +569,8 @@ worker_cpus = 0.5
 
 [sync]
 extra_ignore = ["resources/svg/**"]
+use_dockerignore = true
+dockerignore_path = "config/.dockerignore"
 
 [provision]
 on_wake = "bash /provision.sh"
@@ -576,6 +597,9 @@ rate = 500
             t.db.as_ref().unwrap().rebuild_policy,
             Some(RebuildPolicy::Auto)
         );
+        let sync = t.sync.as_ref().unwrap();
+        assert!(sync.use_dockerignore());
+        assert_eq!(sync.dockerignore_path(), "config/.dockerignore");
     }
 
     #[test]
@@ -584,6 +608,11 @@ rate = 500
         assert_eq!(t.effective_name("pedi"), "pedi");
         assert_eq!(t.health_path(), "/up");
         assert_eq!(t.framework(), Framework::Laravel);
+        // [sync] ausente: toggle do .dockerignore desligado, caminho na
+        // convenção do Docker — o sync de quem nunca declarou a chave não
+        // pode mudar de comportamento.
+        assert!(!SyncSection::default().use_dockerignore());
+        assert_eq!(SyncSection::default().dockerignore_path(), ".dockerignore");
     }
 
     #[test]

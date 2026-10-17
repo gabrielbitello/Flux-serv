@@ -95,6 +95,15 @@
 #[sync]
 # Extra ignore patterns on top of the global list (mutagen/gitignore syntax).
 #extra_ignore = ["resources/svg/**"]
+# Also apply the patterns of `.dockerignore` (opt-in; default false). The
+# patterns are ADDED verbatim after stripping comments/blank lines — the
+# exact dockerignore semantics (last-match-wins, `!` exception precedence)
+# are NOT reproduced, so plain path/glob patterns are the supported subset.
+# Toggle on with the file missing is a hard error. A live session only picks
+# new ignores after `flux sync reset`.
+#use_dockerignore = true
+# Where the file lives, relative to the project root. Default: ".dockerignore".
+#dockerignore_path = ".dockerignore"
 
 # ---------------------------------------------------------------------------
 # Temporary project (14): tears itself down on the VM after the TTL with no
