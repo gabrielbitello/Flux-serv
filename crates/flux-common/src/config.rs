@@ -123,6 +123,12 @@ impl DbSection {
     pub fn silence_window_secs(&self) -> u64 {
         self.silence_window_secs.unwrap_or(5)
     }
+
+    /// Política de rebuild do banco DEV (05). Default `auto` — quem nunca
+    /// declarou a chave mantém o comportamento de sempre.
+    pub fn rebuild_policy(&self) -> RebuildPolicy {
+        self.rebuild_policy.unwrap_or_default()
+    }
 }
 
 /// Build de assets do projeto (02, `flux build`): comando rodado DENTRO do
@@ -250,6 +256,17 @@ pub struct ProvisionSection {
 pub struct BrandingSection {
     /// Logo do cliente na página de manutenção (15).
     pub logo_url: Option<String>,
+}
+
+impl BrandingSection {
+    /// URL declarada e não vazia; `Some("")` é typo e vira None com aviso do
+    /// chamador — nunca `<img src="">` na página.
+    pub fn logo_url(&self) -> Option<&str> {
+        self.logo_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -407,6 +424,72 @@ impl DomainConfig {
 
     pub fn dev_host(&self, name: &str) -> String {
         format!("{name}{}.{}", self.dev_suffix, self.zone)
+    }
+}
+
+impl ProjectToml {
+    /// Hosts custom de `[domains]` (09), validados e em minúsculas:
+    /// `(prod, dev)`. Regras — o host PRECISA terminar com `.{zone}` (o túnel
+    /// cobre `*.{zone}`; host fora da zona nunca rotearia, e aí a falha seria
+    /// silenciosa na borda do Cloudflare), não pode ser o painel, não pode
+    /// começar com `vite-` (prefixo reservado do dev server) nem o rótulo
+    /// terminar com o `dev_suffix` (colide com a derivação de dev). Charset
+    /// de host legal. Erro SEMPRE cita a chave. Os hosts derivados continuam
+    /// valendo — `[domains]` ADICIONA, nunca remove.
+    pub fn hosts_custom(
+        &self,
+        domain: &DomainConfig,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        let validar = |valor: Option<&String>, chave: &str| -> Result<Option<String>, String> {
+            let Some(h) = valor else {
+                return Ok(None);
+            };
+            let h = h.trim().to_ascii_lowercase();
+            let zona = format!(".{}", domain.zone);
+            let Some(rotulo) = h.strip_suffix(&zona) else {
+                return Err(format!(
+                    "[domains] {chave} = \"{h}\" está fora da zona .{} — a plataforma só \
+                     roteia hosts dentro da zona (o túnel cobre *.{}); host externo precisa \
+                     de DNS/ingress próprios e NÃO é suportado",
+                    domain.zone, domain.zone
+                ));
+            };
+            if rotulo.is_empty() {
+                return Err(format!(
+                    "[domains] {chave} é a zona pelada — falta o rótulo"
+                ));
+            }
+            if h == domain.panel_host {
+                return Err(format!(
+                    "[domains] {chave} = \"{h}\" colide com o host do painel — escolha outro"
+                ));
+            }
+            if rotulo.starts_with("vite-") {
+                return Err(format!(
+                    "[domains] {chave}: prefixo \"vite-\" é reservado do dev server (06)"
+                ));
+            }
+            if rotulo.ends_with(domain.dev_suffix.as_str()) {
+                return Err(format!(
+                    "[domains] {chave}: rótulo termina com \"{}\" — colide com a derivação \
+                     de dev; escolha um rótulo sem o sufixo",
+                    domain.dev_suffix
+                ));
+            }
+            if !h
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+            {
+                return Err(format!(
+                    "[domains] {chave} = \"{h}\" tem caractere fora de [a-z0-9-.]"
+                ));
+            }
+            Ok(Some(h))
+        };
+        let domains = self.domains.as_ref();
+        let prod = validar(domains.and_then(|d| d.prod.as_ref()), "prod")?;
+        let dev = validar(domains.and_then(|d| d.dev.as_ref()), "dev")?;
+        Ok((prod, dev))
     }
 }
 
@@ -600,6 +683,47 @@ rate = 500
         let sync = t.sync.as_ref().unwrap();
         assert!(sync.use_dockerignore());
         assert_eq!(sync.dockerignore_path(), "config/.dockerignore");
+    }
+
+    /// `[domains]` (09): validação dos hosts custom na borda do registro.
+    #[test]
+    fn hosts_custom_valida_zona_reservas_e_charset() {
+        let domain = DomainConfig::default();
+        let parse = |src: &str| ProjectToml::parse_str(src).unwrap();
+
+        // Ambos válidos: vêm em minúsculas, host inteiro.
+        let (prod, dev) =
+            parse("[domains]\nprod = \"VIP.bitello.xyz\"\ndev = \"Vip-Dev.bitello.xyz\"")
+                .hosts_custom(&domain)
+                .unwrap();
+        assert_eq!(prod.as_deref(), Some("vip.bitello.xyz"));
+        assert_eq!(dev.as_deref(), Some("vip-dev.bitello.xyz"));
+
+        // Sem seção: nada a validar.
+        let (prod, dev) = parse("").hosts_custom(&domain).unwrap();
+        assert_eq!(prod, None);
+        assert_eq!(dev, None);
+
+        // Fora da zona (inclui a zona pelada — sufixo não casa): erro com a
+        // chave na mensagem.
+        for (src, parte) in [
+            ("[domains]\nprod = \"vippers.com.br\"", "fora da zona"),
+            ("[domains]\nprod = \"bitello.xyz\"", "fora da zona"),
+        ] {
+            let err = parse(src).hosts_custom(&domain).unwrap_err();
+            assert!(err.contains(parte), "caso {src}: {err}");
+        }
+
+        // Painel, prefixo vite-, sufixo de dev, charset.
+        for (src, parte) in [
+            ("[domains]\nprod = \"flux.bitello.xyz\"", "painel"),
+            ("[domains]\ndev = \"vite-x.bitello.xyz\"", "vite-"),
+            ("[domains]\nprod = \"x-d.bitello.xyz\"", "-d\""),
+            ("[domains]\nprod = \"a_b.bitello.xyz\"", "[a-z0-9-.]"),
+        ] {
+            let err = parse(src).hosts_custom(&domain).unwrap_err();
+            assert!(err.contains(parte), "caso {src}: {err}");
+        }
     }
 
     #[test]

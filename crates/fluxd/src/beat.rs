@@ -47,12 +47,16 @@ pub async fn beat(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         Some(d) => DockerSource::new(d.clone(), &app.state).project_exists(n),
         None => SqliteSource::new(&app.state).project_exists(n),
     };
-    match ManagedHost::parse(host_raw, &app.domain, &is_project) {
-        ManagedHost::Prod { name } => tocar(&app.state, &name, Env::Prod),
-        // Vite (dev server, 06/live) mantém o MESMO container acordado.
-        ManagedHost::Dev { name, .. } | ManagedHost::Vite { name, .. } => {
-            tocar(&app.state, &name, Env::Dev)
+    let host_custom = |h: &str| SqliteSource::new(&app.state).host_custom(h);
+    match ManagedHost::parse_custom(host_raw, &app.domain, &is_project, &host_custom) {
+        ManagedHost::Prod { name } | ManagedHost::Custom { name, dev: false } => {
+            tocar(&app.state, &name, Env::Prod)
         }
+        // Vite (dev server, 06/live) mantém o MESMO container acordado; host
+        // custom de dev ([domains], 09) idem.
+        ManagedHost::Dev { name, .. }
+        | ManagedHost::Vite { name, .. }
+        | ManagedHost::Custom { name, dev: true } => tocar(&app.state, &name, Env::Dev),
         // Painel e desconhecido não têm container de app para manter acordado.
         ManagedHost::Panel | ManagedHost::Unknown(_) => StatusCode::NOT_FOUND.into_response(),
     }

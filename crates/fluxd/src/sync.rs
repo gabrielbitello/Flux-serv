@@ -66,7 +66,12 @@ pub fn upsert_report(state: &AppState, report: &SyncReport) -> Result<(), String
             )
             .optional()
         })
-        .map_err(|e| format!("sync: falha lendo flag de rescan de {:?}: {e}", report.project))?
+        .map_err(|e| {
+            format!(
+                "sync: falha lendo flag de rescan de {:?}: {e}",
+                report.project
+            )
+        })?
         .map(|v| v != 0)
         .unwrap_or(false);
     state
@@ -102,7 +107,12 @@ pub fn upsert_report(state: &AppState, report: &SyncReport) -> Result<(), String
             )?;
             Ok(())
         })
-        .map_err(|e| format!("sync: falha gravando relato de sync de {:?}: {e}", report.project))?;
+        .map_err(|e| {
+            format!(
+                "sync: falha gravando relato de sync de {:?}: {e}",
+                report.project
+            )
+        })?;
     if report.rescan_applied && flag_antes {
         events::event(
             &state.state,

@@ -117,6 +117,23 @@ pub fn proxy_target_from(c: &ContainerInspectResponse) -> Option<String> {
     Some(format!("{ip}:{port}"))
 }
 
+/// Alvo HTTP (IP:porta) do container `app` do projeto compose — para o probe
+/// de saúde (`[health] path`, 06). `None` = container ausente ou sem rede;
+/// erro = falha de inspect (grita com origem).
+pub async fn alvo_app(docker: &Docker, projeto: &str) -> Result<Option<String>, String> {
+    let Some(c) = find_app_container(docker, projeto).await else {
+        return Ok(None);
+    };
+    let Some(id) = c.id else {
+        return Ok(None);
+    };
+    let inspected = docker
+        .inspect_container(&id, None)
+        .await
+        .map_err(|e| format!("inspect {id} ({projeto}): {e}"))?;
+    Ok(proxy_target_from(&inspected))
+}
+
 /// Fonte de verdade: Docker (estado/alvo) + SQLite (projetos/flags de release).
 pub struct DockerSource<'a> {
     docker: Docker,
@@ -273,6 +290,18 @@ impl HostSource for DockerSource<'_> {
     fn branch_exists(&self, _name: &str, _branch: &str) -> bool {
         // Registro de branches chega do `flux watch` (02) na F11.
         true
+    }
+
+    /// Hosts custom de `[domains]` (09): consulta SQLite direta (a engine não
+    /// participa — host é registro do estado).
+    fn host_custom(&self, host: &str) -> Option<(String, bool)> {
+        match self.sqlite.host_custom(host) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("consulta de host custom {host:?} falhou: {e}");
+                None
+            }
+        }
     }
 
     fn proxy_target(&self, name: &str, env: Env) -> Option<String> {

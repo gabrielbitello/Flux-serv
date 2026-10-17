@@ -234,10 +234,50 @@ async fn register(State(app): State<Arc<AppState>>, Json(b): Json<RegisterBody>)
             ),
         );
     }
+    // [domains] (09): validação na borda do registro — host inválido é 422
+    // com a chave na mensagem, nunca host morto gravado.
+    let (host_prod, host_dev) = match parsed.hosts_custom(&app.domain) {
+        Ok(h) => h,
+        Err(e) => {
+            return erro(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("flux.toml de {nome}: {e}"),
+            );
+        }
+    };
+    // Colisão explícita: host custom já pertence a OUTRO projeto = 422 com o
+    // dono na mensagem (o PK do SQLite pegaria, mas o erro seria críptico).
+    for host in host_prod.iter().chain(host_dev.iter()) {
+        match app.state.host_custom(host) {
+            Err(e) => return erro(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            Ok(Some((dono, _))) if dono != nome => {
+                return erro(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "[domains] host \"{host}\" já pertence ao projeto \"{dono}\" — \
+                         um host custom pertence a um projeto só"
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
     if let Err(e) = app.state.register_project(nome, &b.toml, &b.toml_hash) {
         return erro(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("falha gravando {nome} no estado: {e}"),
+        );
+    }
+    // Hosts custom gravados DEPOIS da linha do projeto (re-registro substitui).
+    let hosts: Vec<(String, bool)> = host_prod
+        .iter()
+        .map(|h| (h.clone(), false))
+        .chain(host_dev.iter().map(|h| (h.clone(), true)))
+        .collect();
+    if let Err(e) = app.state.set_project_hosts(nome, &hosts) {
+        return erro(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("falha gravando [domains] de {nome} no estado: {e}"),
         );
     }
     events::event(
@@ -249,8 +289,8 @@ async fn register(State(app): State<Arc<AppState>>, Json(b): Json<RegisterBody>)
     Json(ProjectSummary {
         name: nome.to_owned(),
         framework: parsed.framework().to_string(),
-        prod_host: app.domain.prod_host(nome),
-        dev_host: app.domain.dev_host(nome),
+        prod_host: host_prod.unwrap_or_else(|| app.domain.prod_host(nome)),
+        dev_host: host_dev.unwrap_or_else(|| app.domain.dev_host(nome)),
     })
     .into_response()
 }
@@ -268,11 +308,15 @@ async fn list_projects(State(app): State<Arc<AppState>>) -> Response {
     };
     let resumo: Vec<ProjectSummary> = nomes
         .iter()
-        .map(|n| ProjectSummary {
-            name: n.clone(),
-            framework: framework_label(&app, n),
-            prod_host: app.domain.prod_host(n),
-            dev_host: app.domain.dev_host(n),
+        .map(|n| {
+            // [domains] (09): override quando gravado; derivação como fallback.
+            let (prod, dev) = app.state.project_hosts(n).unwrap_or((None, None));
+            ProjectSummary {
+                name: n.clone(),
+                framework: framework_label(&app, n),
+                prod_host: prod.unwrap_or_else(|| app.domain.prod_host(n)),
+                dev_host: dev.unwrap_or_else(|| app.domain.dev_host(n)),
+            }
         })
         .collect();
     Json(resumo).into_response()
@@ -413,13 +457,45 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
 
     // Estado REAL do container (engine), separado do modo do sono — a linha
     // de sleep_state nasce 'awake' por default e NÃO é verdade de container.
-    let dev_container_state = app.docker.as_ref().map(|d| {
-        use crate::decision::HostSource;
-        crate::docker::DockerSource::new(d.clone(), &app.state)
-            .env_state(&name, Env::Dev)
-            .as_str()
-            .to_owned()
-    });
+    // E RUNNING deixa de valer "awake" (06, fecha o F9): só merece "awake"
+    // com o `[health] path` RESPONDENDO; app no ar sem responder = "waking" —
+    // o `flux up` continua esperando em vez de celebrar cedo.
+    let dev_container_state = match app.docker.as_ref() {
+        Some(d) => Some({
+            use crate::decision::HostSource;
+            let estado =
+                crate::docker::DockerSource::new(d.clone(), &app.state).env_state(&name, Env::Dev);
+            if estado == flux_common::protocol::ContainerState::Awake {
+                let saudavel = match crate::docker::alvo_app(
+                    d,
+                    &crate::docker::compose_project(&name, Env::Dev),
+                )
+                .await
+                {
+                    Ok(Some(target)) => {
+                        let path = app
+                            .state
+                            .project_toml(&name)
+                            .ok()
+                            .flatten()
+                            .and_then(|s| ProjectToml::parse_str(&s).ok())
+                            .map(|t| t.health_path().to_owned())
+                            .unwrap_or_else(|| "/up".into());
+                        crate::compose::saude_ok(&app.http, &target, &path).await
+                    }
+                    _ => false,
+                };
+                if saudavel {
+                    "awake".to_owned()
+                } else {
+                    "waking".to_owned()
+                }
+            } else {
+                estado.as_str().to_owned()
+            }
+        }),
+        None => None,
+    };
 
     let mut migs = MigrationsStatus {
         dev: Vec::new(),
@@ -442,8 +518,12 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
         }
     }
 
-    // Hosts derivados ANTES de mover `name` para o corpo (ordem de campos).
-    let (prod_host, dev_host) = (app.domain.prod_host(&name), app.domain.dev_host(&name));
+    // Hosts efetivos ([domains], 09): override gravado, senão derivação.
+    let (override_prod, override_dev) = app.state.project_hosts(&name).unwrap_or((None, None));
+    let (prod_host, dev_host) = (
+        override_prod.unwrap_or_else(|| app.domain.prod_host(&name)),
+        override_dev.unwrap_or_else(|| app.domain.dev_host(&name)),
+    );
     Json(ProjectStatus {
         name,
         framework,
@@ -1184,6 +1264,59 @@ mod tests {
         .await;
         assert_eq!(s, 503, "{c}");
         assert!(c.contains("Docker"), "causa: {c}");
+    }
+
+    /// `[domains]` (09): registro persiste os hosts custom (resumo mostra o
+    /// override), host inválido é 422 com a chave, colisão entre projetos é
+    /// 422 com o dono.
+    #[tokio::test]
+    async fn register_com_domains_persiste_valida_e_detecta_colisao() {
+        let (base, _app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+
+        // Válido: resposta do registro JÁ mostra os hosts declarados.
+        let (s, c) = registra(
+            &cli,
+            &base,
+            "com-domains",
+            "[domains]\nprod = \"vip.bitello.xyz\"\ndev = \"vip-dev.bitello.xyz\"",
+        )
+        .await;
+        assert_eq!(s, 200, "{c}");
+        assert!(c.contains("\"vip.bitello.xyz\""), "{c}");
+        assert!(c.contains("\"vip-dev.bitello.xyz\""), "{c}");
+
+        // Inválido: fora da zona → 422 com a chave na mensagem.
+        let (s, c) = registra(
+            &cli,
+            &base,
+            "domains-ruim",
+            "[domains]\nprod = \"vippers.com.br\"",
+        )
+        .await;
+        assert_eq!(s, 422, "{c}");
+        assert!(c.contains("[domains] prod"), "{c}");
+
+        // Colisão: host do 1º projeto pertence a ele; 2º projeto recebe 422
+        // com o dono na mensagem. O PRÓPRIO dono re-registrando passa (replace).
+        let (s, c) = registra(
+            &cli,
+            &base,
+            "colidente",
+            "[domains]\ndev = \"vip-dev.bitello.xyz\"",
+        )
+        .await;
+        assert_eq!(s, 422, "{c}");
+        assert!(c.contains("com-domains"), "erro cita o dono: {c}");
+
+        let (s, _c) = registra(
+            &cli,
+            &base,
+            "com-domains",
+            "[domains]\nprod = \"vip.bitello.xyz\"",
+        )
+        .await;
+        assert_eq!(s, 200, "dono re-registrando substitui: {_c}");
     }
 
     #[tokio::test]

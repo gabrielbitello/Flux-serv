@@ -16,12 +16,22 @@ main{max-width:640px;padding:2rem}h1{font-size:1.4rem;font-weight:600;margin:0 0
 p{color:#94a3b8;margin:.4rem 0;line-height:1.5}code{color:#7dd3fc;font-size:.95em}\
 footer{margin-top:2.5rem;font-size:.8rem;color:#64748b;letter-spacing:.08em}";
 
-fn html_page(title: &str, heading: &str, body_html: &str, dev: bool) -> String {
+fn html_page(title: &str, heading: &str, body_html: &str, dev: bool, logo: Option<&str>) -> String {
     let robots = if dev {
         r#"<meta name="robots" content="noindex, nofollow">"#
     } else {
         ""
     };
+    // Marca do projeto (`[branding] logo_url`, 15) aplicada NA página — nunca
+    // isolada. URL escapa aspas; ausente = página fica como sempre foi.
+    let marca = logo
+        .map(|url| {
+            format!(
+                r#"<img src="{}" alt="" style="width:96px;height:96px;object-fit:contain;margin-bottom:1rem">"#,
+                html_escape(url)
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"<!doctype html>
 <html lang="pt-br">
@@ -35,6 +45,7 @@ fn html_page(title: &str, heading: &str, body_html: &str, dev: bool) -> String {
 </head>
 <body>
 <main>
+{marca}
 <h1>{heading}</h1>
 {body_html}
 <footer>FLUX</footer>
@@ -48,8 +59,9 @@ fn html_response(status: StatusCode, page: String) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], Html(page)).into_response()
 }
 
-/// Página de espera — sempre HTTP 200, auto-refresh a cada 3 s (03).
-pub fn wait(name: &str, phase: WaitPhase, dev: bool) -> Response {
+/// Página de espera — sempre HTTP 200, auto-refresh a cada 3 s (03). O logo
+/// do projeto (`[branding] logo_url`) entra quando declarado.
+pub fn wait(name: &str, phase: WaitPhase, dev: bool, logo: Option<&str>) -> Response {
     let (heading, detail) = match phase {
         WaitPhase::Waking => (
             format!("Acordando {name}…"),
@@ -67,12 +79,13 @@ pub fn wait(name: &str, phase: WaitPhase, dev: bool) -> Response {
             &heading,
             &format!("<p>{detail}</p>"),
             dev,
+            logo,
         ),
     )
 }
 
 /// Página de estado "falhou" — 200 honesta, com apontamento para o painel (03).
-pub fn failed(name: &str, dev: bool) -> Response {
+pub fn failed(name: &str, dev: bool, logo: Option<&str>) -> Response {
     let body = format!(
         "<p><code>{name}</code> não subiu após o timeout de health.</p>\
 <p>As últimas linhas de log do container aparecem aqui quando o módulo de \
@@ -85,12 +98,13 @@ Docker estiver no ar; o diagnóstico completo é no painel.</p>"
             &format!("{name} não subiu"),
             &body,
             dev,
+            logo,
         ),
     )
 }
 
 /// Branch de worktree não existe localmente (03): página brandiada com a saída.
-pub fn branch_missing(name: &str, branch: &str, dev: bool) -> Response {
+pub fn branch_missing(name: &str, branch: &str, dev: bool, logo: Option<&str>) -> Response {
     let body = format!(
         "<p>A branch <code>{branch}</code> do projeto <code>{name}</code> não \
 está baixada localmente no Windows.</p>\
@@ -104,6 +118,7 @@ está baixada localmente no Windows.</p>\
             "Branch não encontrada localmente",
             &body,
             dev,
+            logo,
         ),
     )
 }
@@ -121,6 +136,7 @@ pub fn not_found(host: &str) -> Response {
             "Host desconhecido",
             &body,
             false,
+            None,
         ),
     )
 }
@@ -199,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn espera_tem_refresh_3s_no_store_e_noindex_em_dev() {
-        let r = wait("vipers", WaitPhase::Waking, true);
+        let r = wait("vipers", WaitPhase::Waking, true, None);
         assert_eq!(r.status(), StatusCode::OK);
         let body =
             String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
@@ -213,10 +229,33 @@ mod tests {
 
     #[tokio::test]
     async fn espera_fora_de_dev_nao_leva_noindex() {
-        let r = wait("vipers", WaitPhase::Waking, false);
+        let r = wait("vipers", WaitPhase::Waking, false, None);
         let body =
             String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
         assert!(!body.contains("noindex"), "body: {body}");
+    }
+
+    /// `[branding] logo_url` (15) aparece APLICADO na página de espera e a URL
+    /// escapa aspas — decoração nunca quebra o HTML.
+    #[tokio::test]
+    async fn espera_leva_o_logo_do_projeto_e_escapa_a_url() {
+        let r = wait(
+            "vipers",
+            WaitPhase::Waking,
+            false,
+            Some(r#"https://x.bitello.xyz/l.png?v="1""#),
+        );
+        let body =
+            String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(
+            body.contains(r#"<img src="https://x.bitello.xyz/l.png?v=&quot;1&quot;""#),
+            "logo aplicado e escapado: {body}"
+        );
+        // Sem logo declarado: nenhuma tag <img> — página como sempre foi.
+        let r = wait("vipers", WaitPhase::Waking, false, None);
+        let body =
+            String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(!body.contains("<img"), "body: {body}");
     }
 
     #[tokio::test]

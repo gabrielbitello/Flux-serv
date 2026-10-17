@@ -935,8 +935,10 @@ fn render_dashboard(app: &AppState, aviso: Option<&str>) -> String {
                         esc(&e.to_string())
                     ),
                 };
-                let dev_host = app.domain.dev_host(&name);
-                let prod_host = app.domain.prod_host(&name);
+                // [domains] (09): override gravado, senão derivação.
+                let (ov_prod, ov_dev) = app.state.project_hosts(&name).unwrap_or((None, None));
+                let dev_host = ov_dev.unwrap_or_else(|| app.domain.dev_host(&name));
+                let prod_host = ov_prod.unwrap_or_else(|| app.domain.prod_host(&name));
                 body.push_str(&format!(
                     "<article class=\"card\"><h3><a href=\"/projects/{}\">{}</a>{framework}</h3>\
                      <table>\
@@ -1064,8 +1066,10 @@ fn render_detalhe(app: &AppState, name: &str) -> String {
             esc(&e.to_string())
         ),
     };
-    let dev_host = app.domain.dev_host(name);
-    let prod_host = app.domain.prod_host(name);
+    // [domains] (09): override gravado, senão derivação.
+    let (ov_prod, ov_dev) = app.state.project_hosts(name).unwrap_or((None, None));
+    let dev_host = ov_dev.unwrap_or_else(|| app.domain.dev_host(name));
+    let prod_host = ov_prod.unwrap_or_else(|| app.domain.prod_host(name));
     body.push_str(&format!(
         "<h1>{} {framework}</h1>\
          <p class=\"urls\">dev <a href=\"https://{dev_host}\">{dev_host}</a> · \

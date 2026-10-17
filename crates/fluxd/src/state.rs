@@ -11,7 +11,7 @@ use flux_common::protocol::{ContainerState, Env};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Versão do schema guardada em `settings.schema_version`.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
 pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS sync_status(
     rescan_requested INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
+"#;
+
+/// v4 ([domains], 09): hosts custom declarados no `flux.toml` — o ManagedHost
+/// resolve o header `Host` aqui ANTES da derivação `{name}{suffix}.{zone}`.
+/// `dev` = host de dev (sufixo -d). Um host por linha; re-registro substitui
+/// as linhas do projeto (transação em `set_project_hosts`).
+const SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS project_hosts(
+    host TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    dev INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_hosts_project ON project_hosts(project);
 "#;
 
 #[derive(Debug, thiserror::Error)]
@@ -280,11 +293,75 @@ impl State {
                 // Estado de sync do watch (v3) também é trilha: sem isso o
                 // painel mostraria sync de projeto temporário já apagado.
                 "DELETE FROM sync_status WHERE project = ?1",
+                // Hosts custom ([domains], v4): host órfão nunca pode continuar
+                // resolvendo para projeto que não existe mais.
+                "DELETE FROM project_hosts WHERE project = ?1",
                 "DELETE FROM projects WHERE name = ?1",
             ] {
                 c.execute(sql, params![name])?;
             }
             Ok(())
+        })
+    }
+
+    /// Grava os hosts custom de `[domains]` (09, v4) — substitui as linhas do
+    /// projeto no re-registro (delete+insert sob o MESMO lock do estado).
+    /// Lista vazia = sem override (linhas apagadas).
+    pub fn set_project_hosts(
+        &self,
+        name: &str,
+        hosts: &[(String, bool)],
+    ) -> Result<(), StateError> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM project_hosts WHERE project = ?1",
+                params![name],
+            )?;
+            for (host, dev) in hosts {
+                c.execute(
+                    "INSERT INTO project_hosts(host, project, dev) VALUES (?1, ?2, ?3)",
+                    params![host, name, *dev as i64],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// `(prod, dev)` overrides do projeto (09) — `None` no lado sem override
+    /// (a exibição cai na derivação `{name}{suffix}.{zone}`).
+    pub fn project_hosts(
+        &self,
+        name: &str,
+    ) -> Result<(Option<String>, Option<String>), StateError> {
+        self.with(|c| {
+            let mut prod = None;
+            let mut dev = None;
+            let mut stmt = c.prepare("SELECT host, dev FROM project_hosts WHERE project = ?1")?;
+            let mut rows = stmt.query(params![name])?;
+            while let Some(r) = rows.next()? {
+                let host: String = r.get(0)?;
+                let is_dev: i64 = r.get(1)?;
+                if is_dev != 0 {
+                    dev = Some(host);
+                } else {
+                    prod = Some(host);
+                }
+            }
+            Ok((prod, dev))
+        })
+    }
+
+    /// Resolve host custom EXATO (09): header `Host` cru (minúsculo, sem
+    /// porta) → `(projeto, dev)`. Consulta do `ManagedHost::parse` — só bate
+    /// exato; derivação por sufixo continua valendo para os demais hosts.
+    pub fn host_custom(&self, host: &str) -> Result<Option<(String, bool)>, StateError> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT project, dev FROM project_hosts WHERE host = ?1",
+                params![host],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
         })
     }
 
@@ -542,6 +619,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V1)?;
             conn.execute_batch(SCHEMA_V2)?;
             conn.execute_batch(SCHEMA_V3)?;
+            conn.execute_batch(SCHEMA_V4)?;
             conn.execute(
                 "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION],
@@ -553,6 +631,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         Some(1) => {
             conn.execute_batch(SCHEMA_V2)?;
             conn.execute_batch(SCHEMA_V3)?;
+            conn.execute_batch(SCHEMA_V4)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -562,6 +641,15 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         // tem token de deploy (todo fluxd em produção hoje).
         Some(2) => {
             conn.execute_batch(SCHEMA_V3)?;
+            conn.execute_batch(SCHEMA_V4)?;
+            conn.execute(
+                "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        // v3 → atual ([domains]): acrescenta `project_hosts`.
+        Some(3) => {
+            conn.execute_batch(SCHEMA_V4)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -592,6 +680,54 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fluxd-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("state.sqlite3")
+    }
+
+    /// `[domains]` (09, v4): gravação substitui, consulta exata resolve,
+    /// purge apaga a trilha — host órfão nunca resolve.
+    #[test]
+    fn hosts_custom_grava_resolve_e_purga() {
+        let path = tmp_db("hosts-custom");
+        let _ = std::fs::remove_file(&path);
+        let st = State::open(&path).unwrap();
+        st.register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+
+        st.set_project_hosts(
+            "vipers",
+            &[
+                ("vip.bitello.xyz".into(), false),
+                ("vip-dev.bitello.xyz".into(), true),
+            ],
+        )
+        .unwrap();
+        let (prod, dev) = st.project_hosts("vipers").unwrap();
+        assert_eq!(prod.as_deref(), Some("vip.bitello.xyz"));
+        assert_eq!(dev.as_deref(), Some("vip-dev.bitello.xyz"));
+        assert_eq!(
+            st.host_custom("vip.bitello.xyz").unwrap(),
+            Some(("vipers".into(), false))
+        );
+        assert_eq!(
+            st.host_custom("vip-dev.bitello.xyz").unwrap(),
+            Some(("vipers".into(), true))
+        );
+        assert_eq!(st.host_custom("outro.bitello.xyz").unwrap(), None);
+
+        // Re-registro SUBSTITUI: dev some, prod troca.
+        st.set_project_hosts("vipers", &[("novo.bitello.xyz".into(), false)])
+            .unwrap();
+        assert_eq!(st.host_custom("vip.bitello.xyz").unwrap(), None);
+        assert_eq!(st.host_custom("vip-dev.bitello.xyz").unwrap(), None);
+        assert_eq!(
+            st.host_custom("novo.bitello.xyz").unwrap(),
+            Some(("vipers".into(), false))
+        );
+
+        // Purge: nada de host apontando para projeto apagado.
+        st.purge_project("vipers").unwrap();
+        assert_eq!(st.host_custom("novo.bitello.xyz").unwrap(), None);
+        assert_eq!(st.project_hosts("vipers").unwrap(), (None, None));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

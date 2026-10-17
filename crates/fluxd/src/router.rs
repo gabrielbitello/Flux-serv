@@ -9,7 +9,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, header};
 use axum::response::Response;
 use axum::routing::post;
-use flux_common::config::GlobalConfig;
+use flux_common::config::{GlobalConfig, ProjectToml};
 use tower::ServiceExt;
 
 use crate::AppState;
@@ -158,7 +158,11 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                     if wants_json {
                         pages::api_failed()
                     } else {
-                        pages::failed(&name, host.is_dev())
+                        pages::failed(
+                            &name,
+                            host.is_dev(),
+                            logo_do_projeto(&app.state, &name).as_deref(),
+                        )
                     }
                 }
             }
@@ -189,12 +193,24 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                     }
                 });
             }
-            pages::wait(&name, phase, host.is_dev())
+            pages::wait(
+                &name,
+                phase,
+                host.is_dev(),
+                logo_do_projeto(&app.state, &name).as_deref(),
+            )
         }
-        Action::Failed { name } => pages::failed(&name, host.is_dev()),
-        Action::BranchMissing { name, branch } => {
-            pages::branch_missing(&name, &branch, host.is_dev())
-        }
+        Action::Failed { name } => pages::failed(
+            &name,
+            host.is_dev(),
+            logo_do_projeto(&app.state, &name).as_deref(),
+        ),
+        Action::BranchMissing { name, branch } => pages::branch_missing(
+            &name,
+            &branch,
+            host.is_dev(),
+            logo_do_projeto(&app.state, &name).as_deref(),
+        ),
         Action::ApiWaking { retry_after } => pages::api_waking(retry_after),
         Action::ApiFailed => pages::api_failed(),
         Action::NotFound => pages::not_found(&host_raw),
@@ -244,9 +260,24 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
 
 /// Ambiente da ação corrente — só chega aqui para hosts gerenciados
 /// (Prod/Dev); painel e desconhecido não tomam caminho de proxy/wake.
+/// `[branding] logo_url` do TOML gravado (15) para as páginas de espera/falha.
+/// TOML ausente, quebrado ou sem logo = None — a página segue sem marca, o
+/// erro real de parse já vive no registro/painel (nunca 500 por causa de
+/// decoração).
+fn logo_do_projeto(state: &crate::state::State, name: &str) -> Option<String> {
+    let src = state.project_toml(name).ok().flatten()?;
+    ProjectToml::parse_str(&src)
+        .ok()?
+        .branding?
+        .logo_url()
+        .map(str::to_owned)
+}
+
 fn host_env(host: &flux_common::host::ManagedHost) -> flux_common::protocol::Env {
     match host {
         flux_common::host::ManagedHost::Dev { .. } => flux_common::protocol::Env::Dev,
+        // Host custom de `[domains]` (09) carrega o próprio ambiente.
+        flux_common::host::ManagedHost::Custom { dev: true, .. } => flux_common::protocol::Env::Dev,
         _ => flux_common::protocol::Env::Prod,
     }
 }

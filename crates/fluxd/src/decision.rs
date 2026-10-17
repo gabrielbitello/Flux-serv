@@ -81,6 +81,12 @@ pub trait HostSource {
     /// Flags do release ATIVO (10): `(has_robots, has_sitemap)` — detecção é
     /// no DEPLOY, nunca por request (03).
     fn release_flags(&self, name: &str) -> (bool, bool);
+    /// Hosts custom de `[domains]` (09): host exato → `(projeto, dev)`.
+    /// Default `None` — fontes sem a tabela de hosts (testes, beat) não
+    /// precisam saber dela.
+    fn host_custom(&self, _host: &str) -> Option<(String, bool)> {
+        None
+    }
 }
 
 /// `Retry-After` do 503 de API acordando (12).
@@ -99,7 +105,9 @@ pub fn decide(
     domain: &DomainConfig,
     src: &dyn HostSource,
 ) -> Decision {
-    let host = ManagedHost::parse(host_raw, domain, &|n| src.project_exists(n));
+    let host = ManagedHost::parse_custom(host_raw, domain, &|n| src.project_exists(n), &|h| {
+        src.host_custom(h)
+    });
     let action = match &host {
         ManagedHost::Panel => match rota_deploy(path) {
             Some(name) => Action::Deploy { name },
@@ -114,6 +122,10 @@ pub fn decide(
         ManagedHost::Dev { name, branch } => {
             dev_action(name, branch.as_deref(), path, wants_json, src)
         }
+        // Host custom de `[domains]` (09): mesmo tratamento do derivado, SEM
+        // branch de worktree (host custom é de UMA pasta por registro).
+        ManagedHost::Custom { name, dev: true } => dev_action(name, None, path, wants_json, src),
+        ManagedHost::Custom { name, dev: false } => prod_action(name, path, wants_json, src),
         ManagedHost::Vite { name, branch } => {
             vite_action(name, branch.as_deref(), path, wants_json, src)
         }
@@ -289,6 +301,7 @@ mod tests {
         targets: HashMap<(String, Env), String>,
         flags: HashMap<String, (bool, bool)>,
         branches: Vec<(String, String)>,
+        custom: Vec<(String, String, bool)>,
     }
 
     impl Default for Mock {
@@ -299,6 +312,7 @@ mod tests {
                 targets: HashMap::new(),
                 flags: HashMap::new(),
                 branches: Vec::new(),
+                custom: Vec::new(),
             }
         }
     }
@@ -321,6 +335,11 @@ mod tests {
 
         fn branch(mut self, name: &str, b: &str) -> Self {
             self.branches.push((name.into(), b.into()));
+            self
+        }
+
+        fn custom_host(mut self, host: &str, name: &str, dev: bool) -> Self {
+            self.custom.push((host.into(), name.into(), dev));
             self
         }
 
@@ -348,6 +367,46 @@ mod tests {
         fn release_flags(&self, name: &str) -> (bool, bool) {
             self.flags.get(name).copied().unwrap_or((false, false))
         }
+        fn host_custom(&self, host: &str) -> Option<(String, bool)> {
+            self.custom
+                .iter()
+                .find(|(h, _, _)| h == host)
+                .map(|(_, n, d)| (n.clone(), *d))
+        }
+    }
+
+    /// `[domains]` (09): host custom resolve com o ambiente que o registro
+    /// declarou; host fora da tabela continua Unknown — batida EXATA.
+    #[test]
+    fn host_custom_do_domains_resolve_e_respeita_ambiente() {
+        let m = Mock::default()
+            .custom_host("vip.bitello.xyz", "vipers", false)
+            .custom_host("vip-dev.bitello.xyz", "vipers", true)
+            .st("vipers", Env::Prod, ContainerState::Awake)
+            .target("vipers", Env::Prod, "127.0.0.1:9000")
+            .st("vipers", Env::Dev, ContainerState::Awake)
+            .target("vipers", Env::Dev, "127.0.0.1:9001");
+        assert_eq!(
+            m.decide("vip.bitello.xyz", "/", false),
+            Action::Proxy {
+                name: "vipers".into(),
+                env: Env::Prod,
+                target: "127.0.0.1:9000".into()
+            }
+        );
+        assert_eq!(
+            m.decide("vip-dev.bitello.xyz", "/", false),
+            Action::Proxy {
+                name: "vipers".into(),
+                env: Env::Dev,
+                target: "127.0.0.1:9001".into()
+            }
+        );
+        // Prefixo/sufixo inventado NÃO vira projeto — a batida é do host todo.
+        assert_eq!(
+            m.decide("outro-vip.bitello.xyz", "/", false),
+            Action::NotFound
+        );
     }
 
     #[test]

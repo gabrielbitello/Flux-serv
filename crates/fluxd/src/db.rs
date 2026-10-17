@@ -14,13 +14,52 @@
 
 use bollard::Docker;
 use bollard::exec::CreateExecOptions;
-use flux_common::config::ProjectToml;
+use flux_common::config::{ProjectToml, RebuildPolicy};
 use flux_common::protocol::Env;
 use futures_util::StreamExt;
 
 use crate::docker::{self, find_app_container};
 use crate::events;
 use crate::state::State;
+
+/// Ação de schema no DEV, decidida por `[db] rebuild_policy` + plano de
+/// migrations (05). PROD nunca passa por aqui — lá o pipeline é incremental
+/// e migration mutada bloqueia. Pura, testável sem Docker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcaoDevSchema {
+    /// `migrate:fresh` — banco descartado e reconstruído.
+    Reconstruir { motivo: String },
+    /// `migrate` incremental com as migrations novas.
+    Migrar,
+    /// Nada a fazer (plano vazio, policy auto).
+    Nada,
+    /// Pipeline pulado por `rebuild_policy = never` — evento explícito.
+    Pulado,
+}
+
+/// Decisão do dev (05): `never` pula tudo (aviso com o número de migrations
+/// pendentes na mão do chamador); `always` reconstrói em TODO dev up, plano
+/// limpo ou não; `auto` é o comportamento histórico — mutada reconstrói,
+/// nova migra, vazio não faz nada.
+pub fn acao_dev(policy: RebuildPolicy, mutadas: usize, novas: usize) -> AcaoDevSchema {
+    match policy {
+        RebuildPolicy::Never => AcaoDevSchema::Pulado,
+        RebuildPolicy::Always => AcaoDevSchema::Reconstruir {
+            motivo: "rebuild_policy = always".into(),
+        },
+        RebuildPolicy::Auto => {
+            if mutadas > 0 {
+                AcaoDevSchema::Reconstruir {
+                    motivo: "migration aplicada foi mutada".into(),
+                }
+            } else if novas > 0 {
+                AcaoDevSchema::Migrar
+            } else {
+                AcaoDevSchema::Nada
+            }
+        }
+    }
+}
 
 /// Diff do estado aplicado vs. o que está no disco agora (laravel).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -108,10 +147,15 @@ pub async fn ensure_schema_com_seed(
     let framework = toml.framework();
     let seed_on_rebuild = resolver_seed(seed, toml.db.as_ref().and_then(|d| d.seed_on_rebuild));
     let migrate_cmd = toml.db.as_ref().and_then(|d| d.migrate_cmd.clone());
+    let policy = toml
+        .db
+        .as_ref()
+        .map(|d| d.rebuild_policy())
+        .unwrap_or_default();
 
     match framework {
         flux_common::framework::Framework::Laravel => {
-            ensure_laravel(docker, st, name, env, files, seed_on_rebuild).await
+            ensure_laravel(docker, st, name, env, files, seed_on_rebuild, policy).await
         }
         _ => match migrate_cmd {
             Some(cmd) if !cmd.is_empty() => {
@@ -147,6 +191,7 @@ async fn ensure_laravel(
     env: Env,
     files: &[(String, String)],
     seed_on_rebuild: bool,
+    policy: RebuildPolicy,
 ) -> Result<SchemaOutcome, String> {
     let applied = st.migration_rows(name, env).map_err(|e| e.to_string())?;
     let plan = plan_migrations(&applied, files);
@@ -203,91 +248,116 @@ async fn ensure_laravel(
             })
         }
         Env::Dev => {
-            if !plan.mutated.is_empty() {
-                // Banco dev é descartável por definição: reconstrói (05).
-                // Seed é exec SEPARADO (`db:seed --force`) e não a flag
-                // `--seed` do fresh, para a saída do seeder aparecer no
-                // evento — e para falha de seed não ficar engolida no exit
-                // code do migrate:fresh (nada silencioso).
-                let (_, code) =
-                    exec_in_container(docker, name, env, "php artisan migrate:fresh --force")
-                        .await?;
-                if code != 0 {
-                    return Err(format!("{name}/dev: migrate:fresh falhou (exit {code})"));
+            // [db] rebuild_policy decide (05); mutação do plano segue valendo
+            // em auto — a decisão pura está em `acao_dev`, testada sem Docker.
+            match acao_dev(policy, plan.mutated.len(), plan.to_apply.len()) {
+                AcaoDevSchema::Pulado => {
+                    events::event(
+                        st,
+                        "info",
+                        "db",
+                        &format!(
+                            "{name}/dev: pipeline de schema PULADO (rebuild_policy = never): \
+                             {} nova(s), {} mutada(s) não aplicadas — rode `flux db fresh` \
+                             ou troque a policy para aplicar",
+                            plan.to_apply.len(),
+                            plan.mutated.len()
+                        ),
+                    );
+                    Ok(SchemaOutcome::NoPipeline)
                 }
-                let mut saida_seed = String::new();
-                if seed_on_rebuild {
-                    let (out, code) =
-                        exec_in_container(docker, name, env, "php artisan db:seed --force").await?;
-                    if code != 0 {
-                        return Err(format!(
-                            "{name}/dev: db:seed falhou após o fresh (exit {code}): {out}"
-                        ));
-                    }
-                    saida_seed = out;
-                }
-                st.clear_migrations(name, env).map_err(|e| e.to_string())?;
-                for (f, sha) in files {
-                    st.record_migration(name, env, f, sha)
-                        .map_err(|e| e.to_string())?;
-                }
-                // Saída do seeder vai no evento (linha única — o painel é
-                // log); sem seed não há o que anexar.
-                let cauda_seed = saida_seed
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                let sufixo_seed = if cauda_seed.is_empty() {
-                    String::new()
-                } else {
-                    format!("; saída: {cauda_seed}")
-                };
-                events::event(
-                    st,
-                    "info",
-                    "db",
-                    &format!(
-                        "{name}/dev: banco reconstruído (mutação em {:?}; seed={seed_on_rebuild}{sufixo_seed})",
-                        plan.mutated
-                    ),
-                );
-                return Ok(SchemaOutcome::LaravelRan {
-                    fresh: true,
-                    aplicadas: files.len(),
-                });
-            }
-            if plan.to_apply.is_empty() {
-                return Ok(SchemaOutcome::LaravelRan {
+                AcaoDevSchema::Nada => Ok(SchemaOutcome::LaravelRan {
                     fresh: false,
                     aplicadas: 0,
-                });
-            }
-            let (_, code) =
-                exec_in_container(docker, name, env, "php artisan migrate --force").await?;
-            if code != 0 {
-                return Err(format!("{name}/dev: migrate falhou (exit {code})"));
-            }
-            for f in &plan.to_apply {
-                if let Some((_, sha)) = files.iter().find(|(cf, _)| cf == f) {
-                    st.record_migration(name, env, f, sha)
-                        .map_err(|e| e.to_string())?;
+                }),
+                AcaoDevSchema::Reconstruir { motivo } => {
+                    // Banco dev é descartável por definição: reconstrói (05).
+                    // Seed é exec SEPARADO (`db:seed --force`) e não a flag
+                    // `--seed` do fresh, para a saída do seeder aparecer no
+                    // evento — e para falha de seed não ficar engolida no exit
+                    // code do migrate:fresh (nada silencioso).
+                    let (_, code) =
+                        exec_in_container(docker, name, env, "php artisan migrate:fresh --force")
+                            .await?;
+                    if code != 0 {
+                        return Err(format!("{name}/dev: migrate:fresh falhou (exit {code})"));
+                    }
+                    let mut saida_seed = String::new();
+                    if seed_on_rebuild {
+                        let (out, code) =
+                            exec_in_container(docker, name, env, "php artisan db:seed --force")
+                                .await?;
+                        if code != 0 {
+                            return Err(format!(
+                                "{name}/dev: db:seed falhou após o fresh (exit {code}): {out}"
+                            ));
+                        }
+                        saida_seed = out;
+                    }
+                    st.clear_migrations(name, env).map_err(|e| e.to_string())?;
+                    for (f, sha) in files {
+                        st.record_migration(name, env, f, sha)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // Saída do seeder vai no evento (linha única — o painel é
+                    // log); sem seed não há o que anexar. O motivo da
+                    // reconstrução distingue policy always de mutação real.
+                    let cauda_seed = saida_seed
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let sufixo_seed = if cauda_seed.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; saída: {cauda_seed}")
+                    };
+                    let causa = if plan.mutated.is_empty() {
+                        motivo
+                    } else {
+                        format!("{motivo}: {:?}", plan.mutated)
+                    };
+                    events::event(
+                        st,
+                        "info",
+                        "db",
+                        &format!(
+                            "{name}/dev: banco reconstruído ({causa}; seed={seed_on_rebuild}{sufixo_seed})"
+                        ),
+                    );
+                    Ok(SchemaOutcome::LaravelRan {
+                        fresh: true,
+                        aplicadas: files.len(),
+                    })
+                }
+                AcaoDevSchema::Migrar => {
+                    let (_, code) =
+                        exec_in_container(docker, name, env, "php artisan migrate --force").await?;
+                    if code != 0 {
+                        return Err(format!("{name}/dev: migrate falhou (exit {code})"));
+                    }
+                    for f in &plan.to_apply {
+                        if let Some((_, sha)) = files.iter().find(|(cf, _)| cf == f) {
+                            st.record_migration(name, env, f, sha)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    events::event(
+                        st,
+                        "info",
+                        "db",
+                        &format!(
+                            "{name}/dev: {} migration(ns) aplicadas",
+                            plan.to_apply.len()
+                        ),
+                    );
+                    Ok(SchemaOutcome::LaravelRan {
+                        fresh: false,
+                        aplicadas: plan.to_apply.len(),
+                    })
                 }
             }
-            events::event(
-                st,
-                "info",
-                "db",
-                &format!(
-                    "{name}/dev: {} migration(ns) aplicadas",
-                    plan.to_apply.len()
-                ),
-            );
-            Ok(SchemaOutcome::LaravelRan {
-                fresh: false,
-                aplicadas: plan.to_apply.len(),
-            })
         }
     }
 }
@@ -404,6 +474,38 @@ mod tests {
         v.iter()
             .map(|(a, b)| (a.to_string(), b.to_string()))
             .collect()
+    }
+
+    /// `[db] rebuild_policy` decide a ação do dev SEM tocar no plano além do
+    /// que o auto já fazia (05).
+    #[test]
+    fn acao_dev_segue_a_policy() {
+        use RebuildPolicy::{Always, Auto, Never};
+        // auto (default): comportamento histórico intacto.
+        assert_eq!(acao_dev(Auto, 0, 0), AcaoDevSchema::Nada);
+        assert_eq!(acao_dev(Auto, 0, 2), AcaoDevSchema::Migrar);
+        assert_eq!(
+            acao_dev(Auto, 1, 0),
+            AcaoDevSchema::Reconstruir {
+                motivo: "migration aplicada foi mutada".into()
+            }
+        );
+        // always: reconstrói mesmo com plano limpo.
+        assert_eq!(
+            acao_dev(Always, 0, 0),
+            AcaoDevSchema::Reconstruir {
+                motivo: "rebuild_policy = always".into()
+            }
+        );
+        assert_eq!(
+            acao_dev(Always, 0, 3),
+            AcaoDevSchema::Reconstruir {
+                motivo: "rebuild_policy = always".into()
+            }
+        );
+        // never: pula tudo — novas e mutadas ficam pendentes, com aviso.
+        assert_eq!(acao_dev(Never, 0, 0), AcaoDevSchema::Pulado);
+        assert_eq!(acao_dev(Never, 2, 5), AcaoDevSchema::Pulado);
     }
 
     #[test]

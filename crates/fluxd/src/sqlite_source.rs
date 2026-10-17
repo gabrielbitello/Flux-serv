@@ -63,6 +63,17 @@ impl HostSource for SqliteSource<'_> {
         true
     }
 
+    /// Hosts custom de `[domains]` (09): batida exata na tabela `project_hosts`.
+    fn host_custom(&self, host: &str) -> Option<(String, bool)> {
+        match self.st.host_custom(host) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("consulta de host custom {host:?} falhou: {e}");
+                None
+            }
+        }
+    }
+
     fn proxy_target(&self, name: &str, env: Env) -> Option<String> {
         match self.st.with(|c| {
             c.query_row(

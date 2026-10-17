@@ -24,23 +24,50 @@ pub enum ManagedHost {
         name: String,
         branch: Option<String>,
     },
+    /// Host EXATO declarado em `[domains]` do `flux.toml` (09): override da
+    /// derivação. `dev` diz o ambiente — branch de worktree NÃO se aplica a
+    /// host custom (um host custom é de UMA pasta por registro).
+    Custom { name: String, dev: bool },
     /// Fora da zona ou não gerenciado — 404 brandiado, único 404 da matriz (03).
     Unknown(String),
 }
 
 impl ManagedHost {
     pub fn is_dev(&self) -> bool {
-        matches!(self, Self::Dev { .. } | Self::Vite { .. })
+        matches!(
+            self,
+            Self::Dev { .. } | Self::Vite { .. } | Self::Custom { dev: true, .. }
+        )
     }
 
     /// Decodifica o header `Host` (host:port e caixa alta tolerados).
     /// `is_project` consulta os projetos registrados no estado do fluxd.
+    /// Derivação PURA — sem consulta de hosts custom (09); para o router
+    /// real, use `parse_custom`.
     pub fn parse(raw: &str, domain: &DomainConfig, is_project: &impl Fn(&str) -> bool) -> Self {
+        Self::parse_custom(raw, domain, is_project, &|_| None)
+    }
+
+    /// Como `parse`, com a consulta de hosts custom de `[domains]` (09):
+    /// `host_custom(host) → Some((projeto, dev))` vence ANTES da derivação por
+    /// zona — o painel e a zona derivada continuam intocados.
+    pub fn parse_custom(
+        raw: &str,
+        domain: &DomainConfig,
+        is_project: &impl Fn(&str) -> bool,
+        host_custom: &impl Fn(&str) -> Option<(String, bool)>,
+    ) -> Self {
         let host = raw.trim().to_ascii_lowercase();
         let host = host.split(':').next().unwrap_or("").trim();
 
         if host == domain.panel_host {
             return Self::Panel;
+        }
+
+        // [domains] (09): batida EXATA do host inteiro declarado no registro.
+        // Exata de propósito — prefixo/sufixo inventado não vira projeto.
+        if let Some((name, dev)) = host_custom(host) {
+            return Self::Custom { name, dev };
         }
 
         let zone_dot = format!(".{}", domain.zone);
@@ -118,6 +145,53 @@ mod tests {
             ManagedHost::Prod {
                 name: "vipers".into()
             }
+        );
+    }
+
+    /// `[domains]` (09): `parse_custom` resolve o host EXATO da tabela ANTES
+    /// da derivação; `parse` puro ignora a tabela (derivação só).
+    #[test]
+    fn host_custom_vence_a_derivacao_so_no_parse_custom() {
+        let custom = |h: &str| {
+            (h == "vip.bitello.xyz")
+                .then(|| ("vipers".to_owned(), false))
+                .or_else(|| (h == "vip-dev.bitello.xyz").then(|| ("vipers".to_owned(), true)))
+        };
+        let h = ManagedHost::parse_custom("vip.bitello.xyz", &domain(), &known, &custom);
+        assert_eq!(
+            h,
+            ManagedHost::Custom {
+                name: "vipers".into(),
+                dev: false
+            }
+        );
+        assert!(!h.is_dev());
+        let h = ManagedHost::parse_custom("vip-dev.bitello.xyz", &domain(), &known, &custom);
+        assert_eq!(
+            h,
+            ManagedHost::Custom {
+                name: "vipers".into(),
+                dev: true
+            }
+        );
+        assert!(h.is_dev(), "custom dev conta como dev");
+        // Host fora da tabela: Unknown mesmo com tabela populada.
+        assert_eq!(
+            ManagedHost::parse_custom("outro-vip.bitello.xyz", &domain(), &known, &custom),
+            ManagedHost::Unknown("outro-vip.bitello.xyz".into())
+        );
+        // E o parse puro NÃO consulta custom — router real usa parse_custom.
+        assert_eq!(
+            ManagedHost::parse("vip.bitello.xyz", &domain(), &known),
+            ManagedHost::Unknown("vip.bitello.xyz".into())
+        );
+        // Painel segue na frente de tudo.
+        assert_eq!(
+            ManagedHost::parse_custom("flux.bitello.xyz", &domain(), &known, &|_| Some((
+                "outro".into(),
+                false
+            ))),
+            ManagedHost::Panel
         );
     }
 
