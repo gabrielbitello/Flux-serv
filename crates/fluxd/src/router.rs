@@ -139,30 +139,6 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
     let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
     let method = parts.method.clone();
 
-    // Redirect estático de host (`[redirects.hosts]` do config global): host
-    // declarado NUNCA chega à decisão de projeto — 302 pro destino, sem
-    // lookup de Docker/SQLite. Chave em minúsculas e sem porta (o Host da
-    // request pode trazer porta; o lookup normaliza). 302 e não 301: trocar
-    // o destino no TOML não pode ficar preso no cache de browser.
-    let host_chave = host_raw.to_ascii_lowercase();
-    let host_chave = host_chave
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(&host_chave);
-    if let Some(destino) = app.redirects.get(host_chave) {
-        tracing::info!(host = %host_raw, destino = %destino, path, "redirect de host");
-        let resp = pages::redirect(destino);
-        events::access(
-            &app.state,
-            &host_raw,
-            method.as_str(),
-            &path,
-            resp.status().as_u16(),
-            started.elapsed().as_millis(),
-        );
-        return resp;
-    }
-
     let src = match &app.docker {
         Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
         None => Source::Sqlite(SqliteSource::new(&app.state)),
@@ -411,62 +387,6 @@ mod tests {
             .header(header::ACCEPT, "application/json")
             .body(Body::empty())
             .unwrap()
-    }
-
-    /// `[redirects.hosts]` (config global): host declarado responde 302 com
-    /// Location ANTES da decisão de projeto (sem registro, sem Docker); host
-    /// fora da tabela segue pro 404 brandiado como sempre.
-    #[tokio::test]
-    async fn redirect_de_host_configurado_vem_antes_da_decisao() {
-        let config = GlobalConfig::parse_str(
-            "[redirects.hosts]\n\
-             \"bitello.xyz\" = \"https://github.com/gabrielbitello\"\n\
-             \"www.bitello.xyz\" = \"https://github.com/gabrielbitello\"\n",
-        )
-        .unwrap();
-        let app = Arc::new(AppState::new(State::in_memory().unwrap(), &config, None));
-        let router = router_com(&app);
-
-        let r = router
-            .clone()
-            .oneshot(req("bitello.xyz", "/qualquer/coisa"))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), StatusCode::FOUND);
-        assert_eq!(
-            r.headers().get(header::LOCATION).unwrap(),
-            "https://github.com/gabrielbitello"
-        );
-
-        let r = router
-            .clone()
-            .oneshot(req("www.bitello.xyz", "/"))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), StatusCode::FOUND);
-        assert_eq!(
-            r.headers().get(header::LOCATION).unwrap(),
-            "https://github.com/gabrielbitello"
-        );
-
-        // Host fora da tabela: comportamento de sempre (404 brandiado).
-        let r = router.oneshot(req("outro.bitello.xyz", "/")).await.unwrap();
-        assert_eq!(r.status(), StatusCode::NOT_FOUND);
-    }
-
-    /// Redirect casa com Host em maiúsculas e com porta (lookup normaliza) —
-    /// o `Host` da request não é confiável no formato.
-    #[tokio::test]
-    async fn redirect_normaliza_host_da_request() {
-        let config = GlobalConfig::parse_str(
-            "[redirects.hosts]\n\"bitello.xyz\" = \"https://github.com/gabrielbitello\"\n",
-        )
-        .unwrap();
-        let app = Arc::new(AppState::new(State::in_memory().unwrap(), &config, None));
-        let router = router_com(&app);
-
-        let r = router.oneshot(req("BITELLO.xyz:8443", "/")).await.unwrap();
-        assert_eq!(r.status(), StatusCode::FOUND);
     }
 
     /// `POST /__flux/beat` é rota REAL: vence o fallback e o host gerenciado

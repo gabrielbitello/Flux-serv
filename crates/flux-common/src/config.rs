@@ -329,7 +329,6 @@ pub struct GlobalConfig {
     pub status: Option<StatusSection>,
     pub tools: Option<ToolsSection>,
     pub deploy: Option<DeploySection>,
-    pub redirects: Option<RedirectsSection>,
 }
 
 impl GlobalConfig {
@@ -385,18 +384,6 @@ impl GlobalConfig {
             .and_then(|d| d.public_route)
             .unwrap_or(false)
     }
-
-    /// Map host → destino dos redirects (`[redirects.hosts]`). Hosts em
-    /// MINÚSCULAS — o router normaliza a request pra minúsculas, chave
-    /// maiúscula nunca casa. Sem seção = map vazio: nenhum host muda de
-    /// comportamento pra quem nunca declarou a chave.
-    pub fn redirects(&self) -> &BTreeMap<String, String> {
-        static VAZIO: OnceLock<BTreeMap<String, String>> = OnceLock::new();
-        self.redirects
-            .as_ref()
-            .and_then(|r| r.hosts.as_ref())
-            .unwrap_or(VAZIO.get_or_init(BTreeMap::new))
-    }
 }
 
 /// Rota pública de deploy (10/F4): `POST /api/projects/{name}/deploy` no host
@@ -408,19 +395,6 @@ pub struct DeploySection {
     /// `true` = rota responde (com auth por projeto + rate limit próprio);
     /// ausente/`false` = o path não existe para o router (404 brandiado).
     pub public_route: Option<bool>,
-}
-
-/// Redirects estáticos de host (config global): host público inteiro → URL
-/// de destino. O router responde 302 ANTES da decisão de projeto — host com
-/// redirect nunca é gerenciado nem vira 404. Uso: domínio apex/www que o
-/// túnel cobre mas nenhum projeto serve (a validação de `[domains]` barra a
-/// zona pelada pra PROJETO; aqui é config global, sem projeto por trás).
-/// O destino não é validado — URL errada é erro do declarante, visível no
-/// browser.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RedirectsSection {
-    pub hosts: Option<BTreeMap<String, String>>,
 }
 
 /// Domínios gerenciados (09 [domain]): `{name}.bitello.xyz` prod,
@@ -966,34 +940,6 @@ node = "node:22"
         // Chave desconhecida na seção continua ERRO (validação estrita, 06).
         let err = GlobalConfig::parse_str("[deploy]\npublic_rout = true\n").unwrap_err();
         assert!(err.to_string().contains("public_rout"), "erro: {err}");
-    }
-
-    /// `[redirects.hosts]`: map host → destino, default vazio, typo é erro.
-    #[test]
-    fn redirects_hosts_parseiam_e_default_vazio() {
-        let c = GlobalConfig::parse_str(
-            "[redirects.hosts]\n\
-             \"bitello.xyz\" = \"https://github.com/gabrielbitello\"\n\
-             \"www.bitello.xyz\" = \"https://github.com/gabrielbitello\"\n",
-        )
-        .unwrap();
-        assert_eq!(
-            c.redirects().get("bitello.xyz").map(String::as_str),
-            Some("https://github.com/gabrielbitello")
-        );
-        assert_eq!(c.redirects().len(), 2, "os dois hosts declarados");
-
-        let vazio = GlobalConfig::parse_str("").unwrap();
-        assert!(
-            vazio.redirects().is_empty(),
-            "sem [redirects] nenhum host muda de comportamento"
-        );
-
-        let err = GlobalConfig::parse_str("[redirects]\nhostz = {}\n").unwrap_err();
-        assert!(
-            err.to_string().contains("hostz"),
-            "typo em [redirects] é erro (validação estrita, 06): {err}"
-        );
     }
 
     #[test]

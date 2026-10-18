@@ -123,7 +123,6 @@ Same strictness. The CLI reads `[api]`; fluxd reads the whole file via
 | `status.external_witness` | — | External uptime monitor probing `/healthz`; never used to wake anything. |
 | `tools.images` | — | Pinned images for `flux tool` (not implemented yet). |
 | `deploy.public_route` | **false** | `true` makes `POST /api/projects/{name}/deploy` exist on the panel host; absent/false ⇒ the path 404s. Everything is born closed — no new public surface without an explicit decision. |
-| `redirects.hosts` | — (empty) | Static host redirects, e.g. `"bitello.xyz" = "https://github.com/gabrielbitello"`. Keys are full hostnames **in lowercase**; the router answers `302` + `Location` (`Cache-Control: no-store`) BEFORE the project decision — a redirected host is never managed, never a branded 404. Use for zone apex/`www` (the `*.{zone}` CNAME covers subdomains; `[domains]` refuses the bare zone for *projects*). Changing the map requires a fluxd restart (config is read at boot). |
 
 ## Editing rules
 
@@ -148,4 +147,3 @@ and [`doc-old/specs/06-cli.md`](../doc-old/specs/06-cli.md).
 | 2026-10-14 | Initial English documentation |
 | 2026-10-17 | `[sync] use_dockerignore` + `sync.dockerignore_path` (opt-in `.dockerignore` support) |
 | 2026-10-17 | Dead keys now real: `[domains]` (exact-match extra host, state v4), `[db] rebuild_policy` (auto/always/never in dev), `[health] path` (real probe in the blue-green gate and in `awake`), `[branding] logo_url` (rendered on wait/failed pages) |
-| 2026-10-18 | `[redirects.hosts]`: static host → URL redirects answered before the project decision (apex/`www` landing on the tunnel) |

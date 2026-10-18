@@ -59,20 +59,6 @@ fn html_response(status: StatusCode, page: String) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], Html(page)).into_response()
 }
 
-/// Redirect estático de host (`[redirects.hosts]` do config global): 302 com
-/// Location, corpo vazio — o browser segue direto. `no-store`: trocar o
-/// destino no TOML surte efeito sem cache de browser preso no destino antigo.
-pub fn redirect(destino: &str) -> Response {
-    (
-        StatusCode::FOUND,
-        [
-            (header::LOCATION, destino.to_owned()),
-            (header::CACHE_CONTROL, "no-store".to_owned()),
-        ],
-    )
-        .into_response()
-}
-
 /// Página de espera — sempre HTTP 200, auto-refresh a cada 3 s (03). O logo
 /// do projeto (`[branding] logo_url`) entra quando declarado.
 pub fn wait(name: &str, phase: WaitPhase, dev: bool, logo: Option<&str>) -> Response {
@@ -295,19 +281,6 @@ mod tests {
             String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
         assert!(body.contains("zzz.bitello.xyz"), "body: {body}");
         assert!(body.contains("Host desconhecido"));
-    }
-
-    /// Redirect de host (`[redirects.hosts]`): 302 + Location exato + no-store
-    /// (trocar o destino no TOML não pode ficar preso em cache de browser).
-    #[tokio::test]
-    async fn redirect_tem_location_e_no_store() {
-        let r = redirect("https://github.com/gabrielbitello");
-        assert_eq!(r.status(), StatusCode::FOUND);
-        assert_eq!(
-            r.headers().get(header::LOCATION).unwrap(),
-            "https://github.com/gabrielbitello"
-        );
-        assert_eq!(r.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
     }
 
     #[tokio::test]
