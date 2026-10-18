@@ -162,6 +162,22 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                         .set_cooldown(&name, env, crate::sleep::WAKE_COOLDOWN_SECS);
                 }
             }
+            // X-Forwarded (03): o forward reescreve o HOST para o IP do
+            // container — sem o original em X-Forwarded-Host, o Laravel
+            // monta url()/rotas com o IP interno (http://172.18.0.4/signin)
+            // que o browser do dev não alcança. O projeto confia no proxy
+            // (trustProxies) e usa o host público. Proto é sempre https:
+            // na frente do fluxd só existe o TLS do Caddy.
+            if let Ok(hv) = HeaderValue::from_str(&host_raw) {
+                parts.headers.insert(
+                    axum::http::header::HeaderName::from_static("x-forwarded-host"),
+                    hv,
+                );
+                parts.headers.insert(
+                    axum::http::header::HeaderName::from_static("x-forwarded-proto"),
+                    HeaderValue::from_static("https"),
+                );
+            }
             // Live same-origin (06/live, método do devserver velho): com o
             // dev server de pé (`public/hot` é o contrato do Vite — nasce
             // com ele, o wrapper do compose apaga na morte), os prefixos do
