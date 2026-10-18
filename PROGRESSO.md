@@ -199,10 +199,15 @@ verificado: `env` e `config('vite.asset_url')` = `https://vippers-d.
 bitello.xyz` no container; kill real do vite → `/@vite/client` 404 do
 frankenphp + hot limpo → `flux up` ressuscita (client 200).
 
-**Aberto (spec)**: o Host reescrito afeta `url()` de ROTAS também
-(`http://172.18.0.4/signin` no HTML) — conserto estrutural = fluxd
-preservar Host / injetar `X-Forwarded-Host`/`-Proto` + `TrustProxies` no
-projeto. Família das specs 18/19, não feito.
+**E o "aberto" acima fechou no mesmo dia** (commit seguinte, deployado):
+o lado Laravel já estava pronto — o vippers tem
+`trustProxies(at: '*')` no `bootstrap/app.php` — faltava só o fluxd
+injetar `X-Forwarded-Host` (host original) + `X-Forwarded-Proto: https`
+no forward. Validado: zero `172.18` no HTML, `signin` =
+`https://vippers-d.bitello.xyz/signin`. Com isso rotas, assets e Livewire
+montam URL pública em QUALQUER modo (live ou build), sem patch por
+projeto e sem depender de `ASSET_URL` — que segue de pé como cinto e
+suspenders.
 
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 
