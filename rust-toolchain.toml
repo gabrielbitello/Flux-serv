@@ -1,0 +1,5 @@
+# Toolchain pinada (L0.1): stable móvel quebrou fmt/clippy 3× sem mudança de
+# código (commits b435ca4, 8658935, 0529f7a — rustfmt/clippy 1.92 divergiram do
+# stable que o CI rodava por último). Bump de Rust = PR que muda ESTE arquivo.
+[toolchain]
+channel = "1.92.0"
