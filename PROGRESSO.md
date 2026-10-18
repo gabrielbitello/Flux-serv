@@ -2,6 +2,56 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 18/10/2026 — zcode-api no flux (LAN-only, sem Cloudflare) + RAM 6,5 GB + hold de API
+
+**Pedido**: subir o zcode-proxy (`TriDefender/zcode-api`) DENTRO do flux na VM,
+exposto pro PC só na LAN; dormir podendo, mas dormir = demorar pra responder,
+nunca recusar (IDEs quebram); acordar rápido; responder no formato Anthropic;
++500 MB de RAM; spec atualizada depois da migrate; após isso, VM congelada
+até ordem.
+
+**Entregue**:
+
+- **Patch `feat(fluxd): [sleep] api_hold`** (default OFF — nenhum projeto
+  muda sem a flag): projeto dormindo/subindo com `api_hold = true` no TOML NÃO
+  devolve página de espera/503; o router (`router.rs`) segura a request,
+  emite `docker start`, polla estado + porta TCP (mesmo probe do live) e
+  re-decide; teto de 90 s e fallback honesto. 34 (common) + 222 (fluxd, 2
+  testes novos) verdes no host.
+- **Projeto `zcode-api`** (`Documents/Projetos/zcode-api`, repo próprio:
+  `33a9b15`+`fd92398`): imagem `ghcr.io/tridefender/zcode-proxy:latest`,
+  `provider: zai`, `plan: coding-plan` (expõe `/v1/messages` formato
+  Anthropic → `api.z.ai/api/anthropic`), `[sleep] idle_minutes = 10,
+  api_hold = true`, health `/health`, sem `ZCODE_PROXY_API_KEY` (LAN-only —
+  chave quebraria o health probe do flux, ver NUNCA fazer). Secret de
+  credenciais em `.env` (gitignored, `flux env push`).
+- **RAM 6144 → 6644 MB** (`modifyvm` com a VM desligada; poweroff→modifyvm→
+  start). Spec 01 atualizada.
+- **Caddy**: bloco `http://zcode-api-d.bitello.xyz → 127.0.0.1:8080`
+  (HTTP puro, LAN-only; `cloudflared` segue inativo). Wildcard HTTPS e os
+  demais hosts intocados (`vippers-d` continua 308 → HTTPS, controle OK).
+- **fluxd novo deployado** na VM (41 s de build; backup
+  `/usr/local/bin/fluxd.bak-20261018-preapihold`) e `flux.exe` rebuilt no
+  host (precisa parsear `api_hold`).
+- **Hold provado em runtime**: request com o projeto em crash-loop segurou
+  exatamente os 90 s do teto e caiu no fallback (200 página de espera — o
+  cliente curl era browser). Journal: `hold: porta de zcode-api
+  (172.21.0.2:8080) não abriu em tempo — segue fluxo normal`.
+
+**Pendente (com o Gabriel)**: OAuth `auth login zai` (link expira em 5 min —
+comando pronto no projeto), linha `192.168.140.2 zcode-api-d.bitello.xyz` no
+hosts do Windows (precisa admin), depois `flux up` e a medição do wake real
+(espera: 1–3 s; o teto é 90 s).
+
+**O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
+dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
+create failed` (por isso o `.gitkeep` em `dados/credenciais/`);
+`systemctl reload caddy` com `admin off` no Caddyfile (reload usa a API
+`:2019`, que está morta — usar `restart`, ~1 s de interrupção); subir
+`ZCODE_PROXY_API_KEY` sem antes resolver o `/health` que o fluxd sonda sem
+credencial (401 → projeto eternamente "falho" no painel); `flux env push`
+antes do diretório do projeto existir na VM (o push não cria pasta).
+
 ## 18/10/2026 (parte 7) — redirects estáticos de host: entregues e DESLIGADOS no mesmo dia
 
 **Intenção** (pedido do Gabriel): DNS de `bitello.xyz` e `www.bitello.xyz`
