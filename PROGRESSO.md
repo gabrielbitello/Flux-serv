@@ -139,6 +139,39 @@ chega pelo pipeline de módulos; inofensivo.
 que "não aparece na VM" = "não está no repo" — diff `git ls-files` vs
 árvore da VM antes de culpar a sync.
 
+## 18/10/2026 (parte 5) — live idempotente: fim do dev server duplicado e do hot órfão que apagava o CSS
+
+**Intenção** (ok do Gabriel sobre a proposta do incidente): o dev server
+do vite morreu silenciosamente no meio da tarde (SIGKILL sem rastro —
+sem OOM no dmesg, container sem restart; dado não encontrado), o hot
+file ficou órfão e o `/@vite` devolveu página failed em HTML — MIME
+text/html derrubou CSS e Alpine de uma vez. E cada `flux up` re-disparava
+`npm run dev` SEM dedup: segundo nascia de "Port in use" na 5174,
+invisível ao roteamento.
+
+**Resultado real**: commits `523e656` (feat) + `10a008e` (clippy). No up,
+`decidir_live` (puro, testado) decide sobre DUAS fontes — hot file +
+TCP connect na :5173 do container: ambas vivas = evento "live server já
+ativo" e NADA é re-disparado; qualquer caída = remove hot órfão, mata
+zumbis de vite (loop `/proc` sem depender de ps/pkill — o sh/npm do
+wrapper sobrevive e completa o `rm -f public/hot` do contrato) e sobe de
+novo. No router, hot órfão EM TEMPO REAL: path do vite com live_ativo
+mas :5173 morta limpa o hot e cai pro FRANKENPHP (build) — página failed
+num path de módulo nunca mais. 205 testes do fluxd verdes (1 novo),
+clippy -D warnings limpo.
+
+**Validado na VM com o ambiente real**: up duplo = UM dev server (3
+listeners, sem 5174); kill -9 no vite → `/@vite/client` 404 do
+frankenphp + home apontando `/build/` (site vivo com build); `flux up`
+seguinte ressuscita (hot recriado, client 200 JS). Nota que o fallback
+expôs: os assets do build de hoje carregam URL absoluta com IP de
+container (`http://172.18.0.4/build/…`) — build gerado dentro do
+container sem ASSET_URL correto; latente do modo build, não do fallback.
+
+**O que NUNCA fazer**: confiar no wrapper sozinho para limpar hot —
+com SIGKILL no sh o `rm` não roda; a limpeza precisa existir fora do
+processo moribundo (up idempotente + fallback por request).
+
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 
 **Intenção** (pedido do Gabriel): a auditoria desta sessão mostrou 9 seções do
