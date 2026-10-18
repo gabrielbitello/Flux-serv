@@ -64,10 +64,18 @@ contexto / 128K de saída**; glm-5.3-flash = 300K. Fix: env
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` no `settings.json` (vale pra IDs
 custom, que não começam com `claude-`) — o aviso de "assumes 200k" sumiu;
 resta só a tag `[claude-code:unrecognized_model]` (reconhecimento, sem efeito).
-Sufixo `glm-5.3[1m]` também funciona ponta a ponta (testado). NÃO setado
-`CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000`: vale pra TODOS os IDs custom
-incluído o flash (cap de saída dele desconhecido) — risco de quebrar as
-chamadas de fundo; default do CLI (~32k) funciona pros dois.
+Sufixo `glm-5.3[1m]` também funciona ponta a ponta (testado).
+
+**Verificação a pedido do Gabriel (19/10) — teto real medido na API**: a
+doc do z.ai lida DIRETO (não snippet) confirma 1M/128K pro 5.3; e o próprio
+upstream DECLARA o teto no erro 1210: `max_tokens ... 限制数值范围[1,131072]`
+— **131072 aceito e 200000 rejeitado, no glm-5.3 E no glm-5.3-flash**
+(128K da doc = 131072 binário). Com o cap do flash conhecido e IGUAL,
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS=131072` setado e testado — ganho real pro
+5.3 always-thinking (thinking conta no `max_tokens`; o 1º teste cortou no
+`max_tokens=16`). Contexto de 1M NÃO foi testado de verdade (1M de input
+queima cota) — é claim da doc. Se o Gabriel viu 300K, era o CONTEXTO do
+flash; 200K é o default do Claude Code pra modelo desconhecido.
 
 **O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
 dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
