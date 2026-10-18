@@ -2,6 +2,29 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 18/10/2026 (parte 7) — redirects estáticos de host: apex e www respondem no flux
+
+**Intenção** (pedido do Gabriel): o DNS de `bitello.xyz` e `www.bitello.xyz`
+passou a apontar pro túnel da VM — ele quer que o flux responda mandando
+pro GitHub dele (`https://github.com/gabrielbitello`) em vez do 404
+brandiado de host desconhecido.
+
+**Resultado real**: commits `redirect-hosts`. Nova seção no config global,
+`[redirects.hosts]`, map host → destino (chaves em minúsculas). O router
+consulta o map ANTES da decisão de projeto — host com redirect nunca é
+gerenciado, nunca faz lookup de Docker/SQLite, responde `302` + `Location`
+com `Cache-Control: no-store` (trocar o destino no TOML não fica preso em
+cache de browser; mudança exige restart do fluxd, o config é lido no boot).
+302 e não 301 de propósito. 4 testes novos: parse/default vazio/typo é erro
+(`config.rs`), redirect antes da decisão + host fora da tabela segue 404 e
+normalização de `Host` com porta/maiúsculas (`router.rs`), Location +
+no-store (`pages.rs`). 34 testes do `flux-common` e 208 do `fluxd` verdes.
+
+**Mecânica**: `[domains]` de projeto barra a zona pelada — apex/`www` não
+podem ser projetos; redirects é config global, sem projeto por trás. Host
+fora da tabela continua no comportamento de sempre (404 brandiado). Docs:
+`docs/configuration.md` (tabela + changelog), `docs/STATUS.md` (+1 SIM).
+
 ## 18/10/2026 — fix da coleta de migrations (estado não mente mais sobre arquivo fora da sync) + reparo real da homolog vippers
 
 **Intenção** (pedido do Gabriel): durante o reparo da homolog do vippers
