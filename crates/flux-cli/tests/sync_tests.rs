@@ -139,18 +139,42 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
     // 18/10: public/{fonts,css,js} saíram — asset publicado commitado no repo
     // (filament:assets do vippers) precisa sincronizar; artefato de build vive
     // em public/build/, que continua ignorado.
+    // 18/10 parte 2: vendor/, node_modules/ e storage/ ancorados na raiz —
+    // padrão solto casava qualquer nível e engolia
+    // resources/views/vendor/ (override de blade Laravel oficial).
     assert_eq!(
         sync::GLOBAL_IGNORES,
         &[
             ".env",
             ".env.*",
             "public/hot",
-            "vendor/",
-            "node_modules/",
+            "/vendor/",
+            "/node_modules/",
             "public/build/",
-            "storage/",
+            "/storage/",
         ]
     );
+}
+
+#[test]
+fn dirs_gerados_da_raiz_nao_engolem_aninhados() {
+    // resources/views/vendor/ é override de blade Laravel oficial: o segmento
+    // "vendor" aninhado TEM que sincronizar — o ignore vale pro dir da raiz.
+    let mut spec = SyncSpec::new(
+        "vippers",
+        PathBuf::from("a"),
+        Beta::Local(PathBuf::from("b")),
+        None,
+    )
+    .unwrap();
+    let ignores = spec.ignores();
+    assert!(!crate::sync::caminho_ignorado(
+        "resources/views/vendor/filament-tables/index.blade.php",
+        &ignores
+    ));
+    assert!(crate::sync::caminho_ignorado("vendor/laravel/framework", &ignores));
+    assert!(crate::sync::caminho_ignorado("storage/framework/views/x.php", &ignores));
+    assert!(!crate::sync::caminho_ignorado("app/Support/storage-notes.md", &ignores));
 }
 
 #[test]

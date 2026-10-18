@@ -75,14 +75,19 @@ pub const VM_PROJECTS_ROOT: &str = "/srv/flux/projects";
 /// de `filament:assets` + estáticos do app): asset trackeado pelo git é fonte
 /// da verdade e TEM que sincronizar; artefato de build do vite vive em
 /// `public/build/`, que continua ignorado. Ignorado ≠ commitado.
+/// 18/10 (parte 2): `vendor/`, `node_modules/` e `storage/` ficaram
+/// ANCORADOS na raiz (`/vendor/` etc.) — padrão solto casa o segmento em
+/// QUALQUER nível e engolia `resources/views/vendor/` (override de blade
+/// LARAVEL OFICIAL, 4 arquivos trackeados no vippers: o tema custom inteiro
+/// nunca chegava à VM). Dir gerado é o da RAIZ; aninhado é código.
 pub const GLOBAL_IGNORES: &[&str] = &[
     ".env",
     ".env.*",
     "public/hot",
-    "vendor/",
-    "node_modules/",
+    "/vendor/",
+    "/node_modules/",
     "public/build/",
-    "storage/",
+    "/storage/",
 ];
 
 /// Template que transforma `mutagen sync list` em JSON Lines — um objeto de
