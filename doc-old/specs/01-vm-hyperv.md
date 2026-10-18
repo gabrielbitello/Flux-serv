@@ -44,8 +44,12 @@ Motivo: VHDX/VDI de 80 GB não é coisa para o disco do sistema.
 
 - VirtualBox ≥ 7.2 instalado (`VBoxManage` acessível).
 - Disco: ≥ 40 GB livres; RAM: a VM usa alocação **FIXA** (o VBox não tem a
-  memória dinâmica do Hyper-V) — default 4 GB, ajustável até 8 GB; host tem
-  32 GB, ociosidade custa os 4 GB parados (trade-off aceito e registrado).
+  memória dinâmica do Hyper-V) — default de provisionamento 4 GB, ajustável
+  até 8 GB; host tem 32 GB, ociosidade custa os GB parados (trade-off aceito
+  e registrado). **Atual (18/10/2026): 6644 MB** — os 6144 MB anteriores
+  ganharam +500 MB de folga para o projeto `zcode-api` (zcode-proxy/bun);
+  alteração feita com a VM desligada (`modifyvm --memory`), procedure
+  poweroff→modifyvm→start.
 
 ### Rede
 
