@@ -58,6 +58,17 @@ cosmético de contexto desconhecido — assume 200k). Nota: `claim` automático
 do proxy falha preview com `(3001) parameter error` e re-tenta em 600 s —
 erro do endpoint de promoção upstream, sem impacto no proxy.
 
+**Janela de contexto configurada (19/10)**: docs do Claude Code
+(`code.claude.com/docs/en/model-config`) + docs do z.ai: GLM-5.3 = **1M de
+contexto / 128K de saída**; glm-5.3-flash = 300K. Fix: env
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` no `settings.json` (vale pra IDs
+custom, que não começam com `claude-`) — o aviso de "assumes 200k" sumiu;
+resta só a tag `[claude-code:unrecognized_model]` (reconhecimento, sem efeito).
+Sufixo `glm-5.3[1m]` também funciona ponta a ponta (testado). NÃO setado
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000`: vale pra TODOS os IDs custom
+incluído o flash (cap de saída dele desconhecido) — risco de quebrar as
+chamadas de fundo; default do CLI (~32k) funciona pros dois.
+
 **O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
 dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
 create failed` (por isso o `.gitkeep` em `dados/credenciais/`);
