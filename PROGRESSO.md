@@ -77,6 +77,13 @@ upstream DECLARA o teto no erro 1210: `max_tokens ... 限制数值范围[1,13107
 queima cota) — é claim da doc. Se o Gabriel viu 300K, era o CONTEXTO do
 flash; 200K é o default do Claude Code pra modelo desconhecido.
 
+**Doc complementar (19/10, ok do Gabriel)**: `flux.toml.example` documenta
+`[sleep] api_hold` (`258db66`); spec 03 ganhou o padrão "host LAN-only sem
+Cloudflare = bloco `http://` por host no Caddy" com a prova do não-vazamento
+(`973b177`); plano da auditoria (`audit/modularizacao`) ganhou seção
+"Delta 19/10" registrando o código pós-auditoria — `api_hold` no
+`router.rs`/`config.rs` — e que nenhuma proposta ficou obsoleta (`15c40c2`).
+
 **O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
 dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
 create failed` (por isso o `.gitkeep` em `dados/credenciais/`);
