@@ -468,7 +468,7 @@ mod tests {
         let out = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(out.contains("oi"), "corpo do upstream passa: {out}");
         assert!(
-            !out.contains(&crate::beat::SCRIPT),
+            !out.contains(crate::beat::SCRIPT),
             "forward_ws não injeta overlay: {out}"
         );
     }
