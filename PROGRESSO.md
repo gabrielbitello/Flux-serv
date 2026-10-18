@@ -2,6 +2,41 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 18/10/2026 — fix da coleta de migrations (estado não mente mais sobre arquivo fora da sync) + reparo real da homolog vippers
+
+**Intenção** (pedido do Gabriel): durante o reparo da homolog do vippers
+(CMS) ele aprovou o fix do buraco apontado na investigação — o `[6/6]` do
+`flux up` coletava `database/migrations/*.php` do disco LOCAL sem filtrar
+`extra_ignore`, e o fluxd gravava hash de migration "aplicada" que o
+`php artisan migrate` nunca via (o arquivo não sincroniza).
+
+**Resultado real**: commit `44f7373`. `coletar_migrations` recebe agora o
+mesmo `extra_sync` da janela de estabilidade e filtra com o matcher que já
+existia (`caminho_ignorado`, promoted a `pub(crate)`); helper puro
+`filtra_migrations_ignoradas` para testar sem chdir. 85 testes do
+`flux-cli` verdes (teste novo: `coletor_filtra_migrations_fora_da_sync`),
+clippy limpo. Efeito colateral esperado: projeto que JÁ tinha hash fantasma
+gravado passa a ver o aviso único "migrations apagadas do disco (estado
+mantém hash)" no próximo `up` — o estado mantém o registro, só deixa de
+mentir para o plano.
+
+**Contexto do reparo** (ops na VM, sem mudança no repo): homolog vippers
+voltou com `DB_CONNECTION=mariadb` (o `.env` da VM tinha `mysql` e as
+migrations espaciais caíam no ramo MySQL-only), database/user `vippers`
+criados no `flux-db` na mão, `storage/framework` recriado (GLOBAL_IGNORES
+nunca sincroniza), 3 migrations de view `professional_lives` com
+`LEFT JOIN LATERAL` impossíveis em MariaDB (registradas sem executar —
+decisão pendente: flux-db MySQL 8.4 ou reescrever as views), seed completo
+com `memory_limit=512M`, `npm ci` + build (44,7 s) e sessão de sync
+recriada com os 15 ignores. O `flux.exe` do host estava 3 dias velho
+(14/10) — rebuilt; shim `~/bin/flux` aponta `target/release`.
+
+**O que NUNCA fazer** (reforçado por esta sessão): confiar em
+`mutagen sync list` sem `-l` para verificar ignores (o formato curto omite
+a seção `Ignores:` inteira); editar `vite.config.js` no Windows esperando
+que chegue à VM (o overlay é cópia manual — e o overlay do vippers ainda é
+uma cópia do vipa, com `cors`/`allowedHosts` de `vipa-*` e `hmr: false`).
+
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 
 **Intenção** (pedido do Gabriel): a auditoria desta sessão mostrou 9 seções do
