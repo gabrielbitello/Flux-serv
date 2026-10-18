@@ -34,8 +34,53 @@ recriada com os 15 ignores. O `flux.exe` do host estava 3 dias velho
 **O que NUNCA fazer** (reforçado por esta sessão): confiar em
 `mutagen sync list` sem `-l` para verificar ignores (o formato curto omite
 a seção `Ignores:` inteira); editar `vite.config.js` no Windows esperando
-que chegue à VM (o overlay é cópia manual — e o overlay do vippers ainda é
-uma cópia do vipa, com `cors`/`allowedHosts` de `vipa-*` e `hmr: false`).
+que chegue à VM (o overlay é cópia manual — os overlays do vippers e do
+vipa foram reescritos em 18/10 para o design same-origin, com hostname
+próprio de cada projeto); testar arquivos descartáveis dentro de
+`/srv/flux/projects/{name}` FORA dos ignores — a sessão one-way-replica
+DELETA arquivo que existe só na réplica (comeu 3 probes de vite até
+entender; o lugar seguro é dentro de `node_modules/`).
+
+## 18/10/2026 (parte 2) — live same-origin no host -d: proxy de paths do vite + túnel websocket do HMR
+
+**Intenção** (pedido do Gabriel): matar o desenho cross-origin
+(`vite-{name}-d.bitello.xyz`, `hmr: false`, cors por projeto) — ele pediu
+"o mesmo método do -d dos devservers": vite exposto no MESMO domínio, com
+HMR de verdade. Sintoma que motivava: live ligado = CSS parcial +
+Alpine/Livewire quebrado (os dropdowns do Filament perdiam posicionamento);
+desligar = voltava.
+
+**Resultado real**: commit `5993487`, deployado na VM (backup
+`fluxd.bak-20261018`). No router, quando `public/hot` existe (contrato do
+Vite: nasce com o dev server, o wrapper do compose apaga na morte), os
+prefixos `/@vite /@id /@fs /node_modules /resources` do host `-d` vão para
+a :5173 do MESMO container; rotas do Laravel, Livewire e `public/` seguem
+no frankenphp. Pedido com `Upgrade` usa `forward_ws`: headers de upgrade
+preservados, 101 do upstream devolvido ao servidor e túnel
+`copy_bidirectional` em task própria — o client legacy do hyper-util já
+conecta com `with_upgrades`, nenhuma flag nova. 204 testes do fluxd
+verdes (2 novos). Overlays do vippers e do vipa reescritos: `origin` = o
+próprio host -d, `allowedHosts: true` (o proxy reescreve Host; o gate
+público é o fluxd+WAF), `hmr.path = /@vite/ws`.
+
+**Verificado ao vivo**: hot file = `https://vippers-d.bitello.xyz`; HTML
+emite URLs same-origin (`/@vite/client`, `/resources/**`); `/@vite/client`
+200 pela Cloudflare; handshake ws **101 ponta a ponta** (CF → Caddy →
+fluxd → vite) com o subprotocolo `vite-hmr`; `GET /` continua no
+frankenphp. O que o smoke NÃO cobre: HMR dentro do browser logado no
+Filament — validação visual do Gabriel.
+
+**Armadilha do caminho**: o `ws` do vite recusa handshake SEM
+`Sec-WebSocket-Protocol: vite-hmr` DESTRUINDO o socket em silêncio (curl
+sem o header = pendência etária, sem resposta) — qualquer teste de
+handshake precisa do header. E o `mutagen` one-way-replica come arquivo
+novo na réplica (ver "o que NUNCA fazer" acima).
+
+**Pendências**: 1) testar HMR real no browser (hot update, Livewire
+morph); 2) host legado `vite-{name}-d` segue existindo apontando :5173 —
+candidato a remover num futuro commit (nada depende mais dele); 3) o
+`serve` do fluxd usa `axum::serve` (com upgrades) — se um dia trocar por
+conn manual, lembrar do `.with_upgrades()`.
 
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 
