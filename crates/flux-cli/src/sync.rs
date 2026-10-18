@@ -783,7 +783,7 @@ pub fn listar_arquivos_rastreaveis(
 /// (`public/hot` só casa na raiz), padrão solto casa qualquer segmento
 /// (`.env`, `*.log`) e padrão terminado em `/` casa o diretório em qualquer
 /// nível (`vendor/`).
-fn caminho_ignorado(rel: &str, padroes: &[String]) -> bool {
+pub(crate) fn caminho_ignorado(rel: &str, padroes: &[String]) -> bool {
     let rel = rel.replace('\\', "/");
     padroes.iter().any(|p| padrao_casa(&rel, p))
 }

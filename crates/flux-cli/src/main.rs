@@ -856,7 +856,7 @@ async fn up(env: &str, seed: Option<bool>) {
             "aviso: migrations instáveis ({e}) — pipeline de schema PULADO, nada enviado ao fluxd; rode `flux up` de novo quando a árvore parar"
         ),
         Ok(()) => {
-            let migrations = coletar_migrations();
+            let migrations = coletar_migrations(&extra_sync);
             if migrations.is_empty() {
                 eprintln!("[6/6] banco: nenhuma migration em database/migrations — schema pulado");
             }
@@ -951,8 +951,31 @@ fn coletar_overlays(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 /// pasta do projeto), ordenado por nome (ordem cronológica do Laravel) e
 /// com sha256 de cada conteúdo — o par (arquivo, hash) que o contrato do
 /// schema espera. Dir ausente = lista vazia (projeto sem migrations).
-fn coletar_migrations() -> Vec<(String, String)> {
-    coletar_migrations_em(Path::new("database/migrations"))
+/// Filtra pelos MESMOS ignores da sync (GLOBAL_IGNORES + `[sync]`):
+/// arquivo fora da sync não chega à VM — gravar o hash dele no fluxd
+/// registraria "aplicada" uma migration que o `php artisan migrate` nunca
+/// vê (o estado mentiria sobre o banco).
+fn coletar_migrations(extra_ignore: &[String]) -> Vec<(String, String)> {
+    let mut ignores: Vec<String> = crate::sync::GLOBAL_IGNORES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    ignores.extend(extra_ignore.iter().cloned());
+    filtra_migrations_ignoradas(coletar_migrations_em(Path::new("database/migrations")), &ignores)
+}
+
+/// Filtro puro, separado do I/O para testar sem chdir: descarta pares cujo
+/// caminho relativo à raiz do repo casa com algum ignore da sync.
+fn filtra_migrations_ignoradas(
+    lista: Vec<(String, String)>,
+    ignores: &[String],
+) -> Vec<(String, String)> {
+    lista
+        .into_iter()
+        .filter(|(nome, _)| {
+            !crate::sync::caminho_ignorado(&format!("database/migrations/{nome}"), ignores)
+        })
+        .collect()
 }
 
 /// Versão injetável do coletor — pura o suficiente para testar sem chdir.
@@ -2330,6 +2353,27 @@ mod tests {
     #[test]
     fn coletor_com_dir_ausente_devolve_vazio() {
         assert!(coletar_migrations_em(Path::new("definitivamente/inexistente")).is_empty());
+    }
+
+    #[test]
+    fn coletor_filtra_migrations_fora_da_sync() {
+        let lista = vec![
+            ("2026_01_01_base.php".to_owned(), "h1".to_owned()),
+            ("2026_01_02_spatial.php".to_owned(), "h2".to_owned()),
+            ("2026_01_03_normal.php".to_owned(), "h3".to_owned()),
+        ];
+        // O ignore do [sync] aponta pelo caminho relativo à raiz — o mesmo
+        // formato do flux.toml real; os GLOBAL_IGNORES não casam com nada
+        // aqui e não podem filtrar migration nenhuma.
+        let mut ignores: Vec<String> = crate::sync::GLOBAL_IGNORES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        ignores.push("database/migrations/2026_01_02_spatial.php".to_owned());
+
+        let got = filtra_migrations_ignoradas(lista, &ignores);
+        let nomes: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(nomes, ["2026_01_01_base.php", "2026_01_03_normal.php"]);
     }
 
     #[test]
