@@ -51,6 +51,9 @@ pub struct AppState {
     /// dedicado com limites do deploy.rs — independente da borda global R30
     /// (router.rs), que segue intocada.
     pub deploy_limiter: std::sync::Arc<edge::EdgeState>,
+    /// Redirects estáticos de host (`[redirects.hosts]` do config global):
+    /// host → destino, resolvidos no router ANTES da decisão de projeto.
+    pub redirects: std::collections::BTreeMap<String, String>,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
             docker,
             state_dir: None,
             deploy_public: config.deploy_public(),
+            redirects: config.redirects().clone(),
             deploy_limiter: std::sync::Arc::new(edge::EdgeState::new(edge::EdgeLimits {
                 rate_per_min: deploy::DEPLOY_RATE_PER_MIN,
                 burst: deploy::DEPLOY_BURST,

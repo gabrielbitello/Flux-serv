@@ -10,7 +10,7 @@ Baseline: the matrix in
 [`doc-old/STATUS.md`](../doc-old/STATUS.md) (snapshot 14/10/2026 morning:
 11 SIM · 24 PARCIAL · 11 NÃO), updated with the real repository state and
 this session's deliveries. Scoreboard for **this** matrix:
-**19 SIM · 17 PARCIAL · 11 NÃO** (47 items).
+**20 SIM · 17 PARCIAL · 11 NÃO** (48 items).
 
 ## Platform base
 
@@ -21,6 +21,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | Catch-all router: `Host → action` decision machine | **SIM** |
 | L7 streaming proxy (no buffering; sleep-overlay injection for eligible HTML) | **SIM** |
 | Flux pages family (waiting page 200, branded 404/503, JSON for API clients) | **SIM** |
+| Static host redirects (`[redirects.hosts]`: apex/`www` → 302 before the project decision) | **SIM** |
 | robots/sitemap intercept (dev hidden, prod autogen) | **SIM** |
 | Control API `:7420` (register/status/lease/schema/up/switch/fresh/down/logs/exec/containers; sha256 fail-closed; logs SSE real) | **SIM** |
 | Docker module (bollard; wake/pause/stop by `flux-{name}-{env}` labels) | **PARCIAL** — tested on a real engine and running real projects; broader engine-failure paths still to exercise |
