@@ -46,7 +46,8 @@ Fora de escopo: comportamento de produto (nenhuma mudança funcional é proposta
 | [file-audit.md](file-audit.md) | Achados por arquivo — avaliação curta dos sãos, detalhada dos problemáticos, com propostas vinculadas. |
 | [architecture-findings.md](architecture-findings.md) | Problemas estruturais transversais (AF-01…AF-23): evidência, consequência, correção recomendada. |
 | [dependency-map.md](dependency-map.md) | Grafo de dependências entre crates e camadas internas do `fluxd`; acoplamentos problemáticos; direção-alvo. |
-| [execution-plan.md](execution-plan.md) | **O PLANO CANÔNICO.** Lotes L0–L8, passos ordenados por dependência e risco (P0→P3), campos por passo, "O que NUNCA fazer", propostas ajustadas/rejeitadas/defer. |
+| [execution-plan.md](execution-plan.md) | **O PLANO CANÔNICO — v2 (19/10/2026).** Visão arquitetural (capacidades × orquestradores × interfaces), diagnóstico com as emendas da revisão, estrutura-alvo, mapeamento por arquivo, fluxos de execução, passos L0–L7 (emendas v2: L3.4, L5.5, L5.6; L3.1/L5.2/L6.3/L7.2 ampliados), justificativas demonstradas dos arquivos grandes e validação de reuso. |
+| [execution-plan-v1.md](execution-plan-v1.md) | Plano v1 (18/10) PRESERVADO: texto integral dos passos L0–L7 que o v2 referencia — os passos não emendados no v2 valem pelo v1. |
 | [coverage-manifest.md](coverage-manifest.md) | Cobertura da auditoria: caminho × linhas × status × revisor × referência ao achado. 100% com status explícito. |
 
 ## Resumo executivo (30 segundos)
