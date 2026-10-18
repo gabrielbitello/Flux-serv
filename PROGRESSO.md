@@ -172,6 +172,38 @@ container sem ASSET_URL correto; latente do modo build, não do fallback.
 com SIGKILL no sh o `rm` não roda; a limpeza precisa existir fora do
 processo moribundo (up idempotente + fallback por request).
 
+## 18/10/2026 (parte 6) — ASSET_URL injetado no override + zumbi-killer que funcionava errado
+
+**Intenção** (pergunta do Gabriel): "não dá pra fazer igual o db, que
+injeta no env os dados corretos?" — sobre o asset do build montado com o
+IP interno do container (`http://172.18.0.4/build/…`).
+
+**Causa** (fechada com dado, não suposição): o proxy reescreve o header
+`Host` para o IP do container (`proxy.rs` forward) — no modo build o
+Laravel monta asset E ROTAS pelo Host percebido. `ASSET_URL` nem existia
+no `.env` (verificado). E o mecanismo do DB (`DB_HOST` no override,
+vencendo o `.env`) era aplicável: a plataforma injeta infraestrutura, o
+`.env` do projeto não manda.
+
+**Resultado real**: commits `095551e` (override injeta `ASSET_URL` —
+dev = host `-d`, prod = host raiz, mesmo mecanismo do `DB_HOST`) e `c148850` (pid correto no zumbi-killer). Dose de humildade: o
+`matar_vite_zumbis` comitado de dia usava `kill "${p#/proc/}"` —
+devolvia `"72/cmdline"` pro kill (EINVAL silencioso, nada morria);
+apanhado validando ao vivo contra o live legítimo do próprio Gabriel
+(pid 48/72, vivo desde o boot do container). Corrigido com
+`basename(dirname())` + redeploy. O projeto precisou também do
+`config/vite.php` (não existe no scaffold dele): sem o arquivo o Laravel
+nem lê `ASSET_URL` — o flux injeta a env, o config do projeto a lê
+(espelho exato de `config/database.php` + `DB_HOST`). Fim a fim
+verificado: `env` e `config('vite.asset_url')` = `https://vippers-d.
+bitello.xyz` no container; kill real do vite → `/@vite/client` 404 do
+frankenphp + hot limpo → `flux up` ressuscita (client 200).
+
+**Aberto (spec)**: o Host reescrito afeta `url()` de ROTAS também
+(`http://172.18.0.4/signin` no HTML) — conserto estrutural = fluxd
+preservar Host / injetar `X-Forwarded-Host`/`-Proto` + `TrustProxies` no
+projeto. Família das specs 18/19, não feito.
+
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 
 **Intenção** (pedido do Gabriel): a auditoria desta sessão mostrou 9 seções do
