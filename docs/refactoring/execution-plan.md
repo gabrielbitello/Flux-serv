@@ -221,10 +221,12 @@ crates/flux-cli/src/
 
 ## Perguntas abertas (decisão do dono; não bloqueiam L0/L1)
 
-1. **[image_guard] GLOBAL** (L2.2): ligar no compose.rs:282 ou remover também? Default sugerido: remover.
+> **Regra de escopo (19/10, ordem do Gabriel): esta refatoração NÃO implementa funcionalidade** — define estrutura, separação e arruma problemas que JÁ existem (movimento, dedup, morto, doc, gate de CI, teste de caracterização). Opções abaixo que implementariam algo novo (ligar image_guard, endpoint de token) estão FORA do escopo desta refatoração — viram pedido separado se um dia fizerem sentido.
+
+1. **[image_guard] GLOBAL** (L2.2): remover também? Default: remover. ("ligar" a global no compose.rs:282 implementaria comportamento novo — FORA do escopo.)
 2. **`Causa`** (L1.5): remover ou marcar reserva da spec 17? Default: remover.
 3. **Split opcional de compose.rs** (L6.2): up.rs/live.rs após o obrigatório? Default: não.
 4. **Helper ssh** (L7.3): executar? Default: sim.
-5. **NOVO v2 — `set_deploy_token_hash`** (state.rs): sem chamador de produção — a gravação real do token é o CLI via `ssh sqlite3` (main.rs:574, 654), terceiro caminho de escrita que bypassa fachada, gate e schema-check. Opções: (a) remover a fn morta e DOCUMENTAR o canal CLI→sqlite como contrato (status quo formalizado); (b) dar endpoint na API :7420 e apontar o CLI para lá (mata o ssh-sql, custo médio). Default sugerido: (a) agora; (b) como candidato quando o contrato CLI↔daemon evoluir.
+5. **NOVO v2 — `set_deploy_token_hash`** (state.rs): sem chamador de produção — a gravação real do token é o CLI via `ssh sqlite3` (main.rs:574, 654), terceiro caminho de escrita que bypassa fachada, gate e schema-check. Opção no escopo: (a) remover a fn morta e DOCUMENTAR o canal CLI→sqlite como contrato (status quo formalizado). (Endpoint novo na API :7420 = funcionalidade nova — FORA do escopo; candidato a pedido separado quando o contrato CLI↔daemon evoluir.)
 6. **NOVO v2 — invocador `docker compose` duplicado** (ciclo.rs:183-195 stop × temporary.rs:204-210 down): esqueleto spawn+exit 2× — candidata P3 num futuro lote higiene; não bloqueia nada.
 7. **NOVO v2 — divergência API×painel sobre "está de pé?"** (regra F9 só na API — api.rs:458-498 vs painel cru panel.rs:406-417): documentar a semântica por interface em docs/ (1 linha) — unificar NÃO recomendado (produto decidiu diferente por superfície).
