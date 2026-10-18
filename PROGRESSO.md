@@ -84,6 +84,20 @@ Cloudflare = bloco `http://` por host no Caddy" com a prova do não-vazamento
 "Delta 19/10" registrando o código pós-auditoria — `api_hold` no
 `router.rs`/`config.rs` — e que nenhuma proposta ficou obsoleta (`15c40c2`).
 
+**Slots de modelo por esforço (19/10, pedido do Gabriel)**: haiku =
+flash+low, sonnet = flash+high, opus = flash+max, principal = glm-5.3 (o
+upstream defaulta `max`). Como os 3 slots compartilham o mesmo modelo
+upstream, virou **patch no proxy** (fork `Projetos/zcode-proxy-fork`,
+commit `43799ea`): sufixo no nome do modelo (`-low/-min/-high/-max`) é
+tirado e injetado como `reasoning_effort` no body (campo do endpoint
+Anthropic do z.ai; cliente ganha se mandar o campo; rollback
+`ZCODE_PROXY_EFFORT_SUFFIX=off`). 44 testes do transform verdes; imagem
+`zcode-proxy:effort` buildada na VM (`/srv/flux/build/zcode-proxy`, FORA da
+sync); `settings.json` com os 4 slots; provado por curl (low/max, log
+`[effort]` no container) e `claude -p` → `ok`. Patch arquivado em
+`Projetos/zcode-api/patches/` (`630ab1f`). Atualizar o fork upstream =
+re-aplicar patch → rebuild → recreate.
+
 **O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
 dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
 create failed` (por isso o `.gitkeep` em `dados/credenciais/`);
