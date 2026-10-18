@@ -52,11 +52,17 @@ public/hot
 vendor/
 node_modules/
 public/build/
-public/fonts/
-public/css/
-public/js/
 storage/
 ```
+
+> **Ajuste 18/10/2026 (commit `f29ebfc`)**: `public/fonts/`, `public/css/` e
+> `public/js/` saíram da lista. A premissa "tudo ali é artefato de build"
+> quebrou no vippers: esses diretórios também hospedam asset PUBLICADO
+> commitado no repo (60 arquivos de `filament:assets` + `js/app/
+> money-script.js`) — asset trackeado pelo git é fonte da verdade e TEM que
+> sincronizar; o artefato do vite vive em `public/build/`, que segue
+> ignorado. Ignorado ≠ commitado. Sessões vivas só pegam a lista nova
+> recriadas (`mutagen sync terminate` + `flux up`).
 
 - `respectGitignore = true` (o `.gitignore` do projeto entra de graça).
 - Projeto pode **adicionar** excludes em `flux.toml` (`[sync] extra_ignore`),

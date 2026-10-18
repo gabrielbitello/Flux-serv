@@ -82,6 +82,27 @@ candidato a remover num futuro commit (nada depende mais dele); 3) o
 `serve` do fluxd usa `axum::serve` (com upgrades) — se um dia trocar por
 conn manual, lembrar do `.with_upgrades()`.
 
+## 18/10/2026 (parte 3) — public/{css,js,fonts} volta a sincronizar: ignorado ≠ commitado
+
+**Intenção** (pedido do Gabriel): "deixa só o public/build/, todo o resto
+do public vai" — endossando o diagnóstico do bug do Filament (404 em
+`/js/filament/**`): os 60 assets publicados commitados no repo
+(`filament:assets` + `js/app/money-script.js`) moravam em diretórios da
+`GLOBAL_IGNORES` e nunca chegavam à árvore nova da VM. A referência dele
+para o desenho certo = deploy hml do vippers: imagem com `COPY . .`, repo
+inteiro baked — nada de sync ignorando diretório commitado.
+
+**Resultado real**: commit `f29ebfc`. `GLOBAL_IGNORES` perde
+`public/fonts/`, `public/css/`, `public/js/`; fica `public/build/` para o
+artefato do vite (mesmo contrato da spec 02: nunca sincronizar build).
+Teste verbatim atualizado; 85 testes do flux-cli verdes; sessão do
+vippers recreada (`mutagen sync terminate` + `flux up`) — `mutagen sync
+list -l` confirma 7 globais + 5 extras, `app.js` 200 pelo domínio público.
+Lição registrada na spec 02: **ignorado ≠ commitado — repo trackeado é
+fonte da verdade e sincroniza; gerado em `public/build/` fica fora**.
+Sessões de sync vivas só pegam a lista nova recriadas (congela na
+criação) — vale para presente-digital e demais projetos.
+
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 
 **Intenção** (pedido do Gabriel): a auditoria desta sessão mostrou 9 seções do
