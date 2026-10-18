@@ -2,6 +2,40 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 18/10/2026 (parte 7) — redirects estáticos de host: entregues e DESLIGADOS no mesmo dia
+
+**Intenção** (pedido do Gabriel): DNS de `bitello.xyz` e `www.bitello.xyz`
+apontados pro túnel — o flux responderia 302 pro GitHub dele
+(`https://github.com/gabrielbitello`) em vez do 404 brandiado.
+
+**O que foi construído e revertido**: commits `cc791b1` (feat) + `aa01c61`
+(diário), revertidos por `9517331`/`b99e104`. `[redirects.hosts]` no config
+global: map host → destino, consultado pelo router ANTES da decisão de
+projeto, `302` + `Location` com `Cache-Control: no-store` (302 de propósito —
+trocar destino não fica preso em cache de browser). 4 testes novos, 34
+(flux-common) + 208 (fluxd) verdes, deployado, www provado pela internet.
+O código continua no histórico (`cc791b1`) — religar é revert do revert +
+seção no `/etc/fluxd/config.toml` + restart.
+
+**Por que desligou**: o apex `bitello.xyz` responde **200 com 0 bytes e sem
+Content-Type em qualquer path** e o journal do fluxd prova que a request
+NUNCA chega na VM (probe + `journalctl` no mesmo minuto, zero registro).
+As entradas do túnel estão iguais às do wildcard (`https://192.168.140.2:443`
+— Gabriel conferiu no painel), então o record DNS do apex aponta pra OUTRA
+coisa (túnel velho com `http_status:200` ou Worker route — decidir exige o
+painel CF, e ele não podia mexer na hora). Com só o www redirecionando, o
+estado ficava inconsistente; pedido dele: desfazer. VM restaurada dos
+backups (`fluxd.bak-20261018-redirects` volta a ser o binário vivo; binário
+com a feature salvo em `~/fluxd.com-redirects-20261018`; config
+`config.toml.bak-20261018` restaurado). Smoke pós-revert: www 404,
+vippers-d 200.
+
+**O que NUNCA fazer**: assumir que "apontar o DNS no painel" ligou o caminho
+até o fluxd — o record do apex era coisa distinta do túnel editado; provar
+sempre com probe externo + journal no mesmo instante. E `cp` em binário em
+uso é `Text file busy`: deploy de fluxd é `mv` (inode troca, processo vivo
+continua no arquivo velho).
+
 ## 18/10/2026 — fix da coleta de migrations (estado não mente mais sobre arquivo fora da sync) + reparo real da homolog vippers
 
 **Intenção** (pedido do Gabriel): durante o reparo da homolog do vippers
