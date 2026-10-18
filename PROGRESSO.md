@@ -48,11 +48,15 @@ com o hold real**: `docker stop` → request pelo chain Caddy→fluxd→proxy �
 HTTP 200 em **0,85 s (frio) / 0,84 s (morno)**; acordado, `/health` = 34 ms.
 `POST /v1/messages` respondeu **200 em formato Anthropic** (`type: message`,
 thinking, usage) com `glm-5.3-flash` em 3,4 s; `/v1/models` lista 11 GLM.
-Uso pelo IDE: `ANTHROPIC_BASE_URL=http://zcode-api-d.bitello.xyz` (hosts do
-PC precisa de `192.168.140.2 zcode-api-d.bitello.xyz`, linha pendingente de
-admin). Nota: `claim` automático do proxy falha preview com `(3001)
-parameter error` e re-tenta em 600 s — erro do endpoint de promoção
-upstream, sem impacto no proxy.
+Uso pelo IDE: **Claude Code CLI conectado e provado** — hosts do PC com
+`192.168.140.2 zcode-api-d.bitello.xyz` (entrada elevada, UAC) e
+`~/.claude/settings.json` com `env.ANTHROPIC_BASE_URL=http://zcode-api-d.bitello.xyz`,
+`ANTHROPIC_AUTH_TOKEN=zcode-lan-local` (proxy não valida), main
+`ANTHROPIC_MODEL=glm-5.3` (sonnet/opus mapeados idem) e haiku/small =
+`glm-5.3-flash`; `claude -p "responda apenas: ok"` → **`ok`** (aviso
+cosmético de contexto desconhecido — assume 200k). Nota: `claim` automático
+do proxy falha preview com `(3001) parameter error` e re-tenta em 600 s —
+erro do endpoint de promoção upstream, sem impacto no proxy.
 
 **O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
 dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
