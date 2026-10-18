@@ -103,6 +103,42 @@ fonte da verdade e sincroniza; gerado em `public/build/` fica fora**.
 Sessões de sync vivas só pegam a lista nova recriadas (congela na
 criação) — vale para presente-digital e demais projetos.
 
+## 18/10/2026 (parte 4) — vendor/ ancorado na raiz: o tema blade do vippers nunca tinha sincronizado
+
+**Intenção** (pedido do Gabriel): "-d ainda diferente da prod — faltam
+botão de estatísticas, 'Last day', e os erros do F12 não existem na
+prod". Dica dele fechou o caso: a diferença NÃO era banco seed (1 vs 15
+afiliados) nem idioma (EN dev vs PT hml = dados), era o TEMA inteiro.
+
+**Causa raiz**: padrão `vendor/` solto na `GLOBAL_IGNORES` casa o
+segmento em QUALQUER nível (semântica gitignore) — engoliu
+`resources/views/vendor/filament-tables/` (override de blade Laravel
+OFICIAL: o tema custom do painel, 4 arquivos trackeados). O painel dev
+caía na toolbar default do Filament: sem dropdown de período
+("Last day"), sem painel de indicadores, sem stats. Probe reproduziu:
+sync não replica nada sob `resources/views/vendor/`. E os
+ReferenceErrors do F12 que ele viu no dev (zero na prod) caíram junto —
+pós-fix, página com **0 erros**.
+
+**Resultado real**: commits `ba83621` + `9faf85c`. `GLOBAL_IGNORES` com
+`/vendor/`, `/node_modules/`, `/storage/` ANCORADOS na raiz (dir gerado é
+o da raiz; aninhado é código). Bug no caminho: `padrao_casa` fazia
+`strip_suffix('/')` antes da âncora — `/vendor/` virava o segmento
+literal `"/vendor"` e não filtrava NADA (apanhado pelo
+`hash_da_arvore_ignora_globais_e_muda_com_conteudo`, que o pipeline com
+grep engoliu e commitou vermelho — violação da regra "pipeline nunca
+termina em grep"; consertado no commit seguinte com a suíte inteira sob
+`pipefail`, 86 verdes). Sessão recriada, blades na VM, Playwright:
+toolbar completa ("Last day" + toggle de tema), botão marrom
+`rgb(104, 26, 9)` = tema aplicado, 0 erros. Nota: o `<link>` do tema
+aponta pra URL que o vite dev serve como módulo JS (tag morta) — o CSS
+chega pelo pipeline de módulos; inofensivo.
+
+**O que NUNCA fazer**: pipeline de verificação terminando em `grep` sem
+`pipefail` (engole exit code de teste falho e commita vermelho); confiar
+que "não aparece na VM" = "não está no repo" — diff `git ls-files` vs
+árvore da VM antes de culpar a sync.
+
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 
 **Intenção** (pedido do Gabriel): a auditoria desta sessão mostrou 9 seções do
