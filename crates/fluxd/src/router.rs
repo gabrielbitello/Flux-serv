@@ -188,15 +188,13 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                     if upgrade.is_some() {
                         tracing::debug!(host = %host_raw, path, "ws do HMR → {target}");
                     }
-                } else {
-                    if let Some(r) = crate::compose::raiz_arvore(&app, &name) {
-                        match std::fs::remove_file(r.join("public/hot")) {
-                            Ok(()) => {
-                                tracing::warn!(host = %host_raw, "dev server morto com hot órfão — hot removido, build assumindo")
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(e) => tracing::warn!("falha removendo hot órfão: {e}"),
+                } else if let Some(r) = crate::compose::raiz_arvore(&app, &name) {
+                    match std::fs::remove_file(r.join("public/hot")) {
+                        Ok(()) => {
+                            tracing::warn!(host = %host_raw, "dev server morto com hot órfão — hot removido, build assumindo")
                         }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => tracing::warn!("falha removendo hot órfão: {e}"),
                     }
                 }
             }
