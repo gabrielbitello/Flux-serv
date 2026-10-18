@@ -638,7 +638,10 @@ fn comando_live_args(projeto: &str, service: &str, live: &str) -> Vec<String> {
 /// "vite") e completa o ciclo sozinho: filho morto → `rm -f public/hot` do
 /// wrapper → exit. Erro é evento warn; o disparo do live segue de pé.
 async fn matar_vite_zumbis(st: &crate::state::State, projeto: &str, service: &str) {
-    let script = "for p in /proc/[0-9]*/cmdline; do grep -qa vite \"$p\" 2>/dev/null && kill \"${p#/proc/}\" 2>/dev/null; done; exit 0";
+    // `${p#/proc/}` devolve "72/cmdline" — kill nesse argumento é EINVAL
+    // silencioso (apanhado ao vivo: zumbi da 5174 sobreviveu a rodadas de
+    // kill). O PID é basename(dirname(cmdline)).
+    let script = "for p in /proc/[0-9]*/cmdline; do grep -qa vite \"$p\" 2>/dev/null && kill \"$(basename \"$(dirname \"$p\")\")\" 2>/dev/null; done; exit 0";
     let saida = tokio::process::Command::new("docker")
         .args([
             "compose", "-p", projeto, "exec", "-T", service, "sh", "-c", script,
