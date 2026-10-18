@@ -38,10 +38,21 @@ até ordem.
   cliente curl era browser). Journal: `hold: porta de zcode-api
   (172.21.0.2:8080) não abriu em tempo — segue fluxo normal`.
 
-**Pendente (com o Gabriel)**: OAuth `auth login zai` (link expira em 5 min —
-comando pronto no projeto), linha `192.168.140.2 zcode-api-d.bitello.xyz` no
-hosts do Windows (precisa admin), depois `flux up` e a medição do wake real
-(espera: 1–3 s; o teto é 90 s).
+**Resolvido na sequência (mesmo dia)**: OAuth `auth login zai` concluído;
+credenciais em `/srv/flux/secrets/zcode-api/credentials.json` — **fora da
+árvore de sync**: arquivos que nasciam no bind `./dados/credenciais` sumiam
+em segundos (3 probes: escreve no container → some do host; sessão mutagen
+sadia e sem propagar; causa raiz não perseguida até o fim — suspeito
+mutagen, FATO = dir sincronizado não é storage de segredo). **Wake medido
+com o hold real**: `docker stop` → request pelo chain Caddy→fluxd→proxy →
+HTTP 200 em **0,85 s (frio) / 0,84 s (morno)**; acordado, `/health` = 34 ms.
+`POST /v1/messages` respondeu **200 em formato Anthropic** (`type: message`,
+thinking, usage) com `glm-5.3-flash` em 3,4 s; `/v1/models` lista 11 GLM.
+Uso pelo IDE: `ANTHROPIC_BASE_URL=http://zcode-api-d.bitello.xyz` (hosts do
+PC precisa de `192.168.140.2 zcode-api-d.bitello.xyz`, linha pendingente de
+admin). Nota: `claim` automático do proxy falha preview com `(3001)
+parameter error` e re-tenta em 600 s — erro do endpoint de promoção
+upstream, sem impacto no proxy.
 
 **O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
 dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
@@ -50,7 +61,9 @@ create failed` (por isso o `.gitkeep` em `dados/credenciais/`);
 `:2019`, que está morta — usar `restart`, ~1 s de interrupção); subir
 `ZCODE_PROXY_API_KEY` sem antes resolver o `/health` que o fluxd sonda sem
 credencial (401 → projeto eternamente "falho" no painel); `flux env push`
-antes do diretório do projeto existir na VM (o push não cria pasta).
+antes do diretório do projeto existir na VM (o push não cria pasta);
+**guardar segredo dentro da árvore sincronizada** (arquivos novos sumiram —
+segredo morre em `/srv/flux/secrets/`, fora do sync).
 
 ## 18/10/2026 (parte 7) — redirects estáticos de host: entregues e DESLIGADOS no mesmo dia
 
