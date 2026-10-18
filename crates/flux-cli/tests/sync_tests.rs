@@ -136,6 +136,9 @@ fn projeto_vazio_e_recusado() {
 
 #[test]
 fn ignores_globais_sao_verbatim_da_spec_02() {
+    // 18/10: public/{fonts,css,js} saíram — asset publicado commitado no repo
+    // (filament:assets do vippers) precisa sincronizar; artefato de build vive
+    // em public/build/, que continua ignorado.
     assert_eq!(
         sync::GLOBAL_IGNORES,
         &[
@@ -145,9 +148,6 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
             "vendor/",
             "node_modules/",
             "public/build/",
-            "public/fonts/",
-            "public/css/",
-            "public/js/",
             "storage/",
         ]
     );

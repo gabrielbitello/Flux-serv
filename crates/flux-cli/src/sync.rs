@@ -63,13 +63,18 @@ pub const VM_USER: &str = "flux";
 pub const VM_HOST: &str = "192.168.140.2";
 pub const VM_PROJECTS_ROOT: &str = "/srv/flux/projects";
 
-/// Excludes GLOBAIS, verbatim da spec 02 ("Padrão global, não configurável por
+/// Excludes GLOBAIS, da spec 02 ("Padrão global, não configurável por
 /// segurança/estabilidade"). O projeto SÓ ADICIONA ignores via `flux.toml`
 /// (`[sync].extra_ignore` e, opt-in, o `.dockerignore` — `ignores_do_projeto`);
 /// remover daqui é impossível pela API do módulo —
 /// é o que protege o container de perder estado a cada sync (spec 02, "o que
 /// NUNCA fazer": nunca sincronizar storage/, vendor/, node_modules/, artefatos
 /// de build).
+/// 18/10: `public/{fonts,css,js}` saíram da lista — o vippers provou que esses
+/// diretórios também hospedam asset PUBLICADO commitado no repo (60 arquivos
+/// de `filament:assets` + estáticos do app): asset trackeado pelo git é fonte
+/// da verdade e TEM que sincronizar; artefato de build do vite vive em
+/// `public/build/`, que continua ignorado. Ignorado ≠ commitado.
 pub const GLOBAL_IGNORES: &[&str] = &[
     ".env",
     ".env.*",
@@ -77,9 +82,6 @@ pub const GLOBAL_IGNORES: &[&str] = &[
     "vendor/",
     "node_modules/",
     "public/build/",
-    "public/fonts/",
-    "public/css/",
-    "public/js/",
     "storage/",
 ];
 
