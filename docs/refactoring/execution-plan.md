@@ -2,6 +2,24 @@
 
 Este documento é a fonte única de verdade da execução. Prioridades FINAIS já incorporam os vereditos do revisor independente (onde divergiram do auditor proponente, marca-se "intenção → resultado"). Nenhum passo altera comportamento de produto, exceto onde o passo DECLARA explicitamente a mudança.
 
+## Delta 19/10/2026 — mudanças no repo DEPOIS desta auditoria
+
+A auditoria fotografou o repo da manhã de 18/10. Depois dela, o `master`
+ganhou código novo que este plano NÃO auditou (escrito, testado e deployado
+à parte — ver diário 18/10 e spec 04):
+
+- **`crates/fluxd/src/router.rs`** — bloco hold de API (`[sleep] api_hold`):
+  ~+70 linhas no `handle` + helpers `projeto_do_host`/`api_hold_ativo` +
+  `WAKE_HOLD_TIMEOUT_SECS`. O arquivo segue < 1000 linhas; nenhuma proposta
+  do lote `rede` fica obsoleta, mas o passo que tocar `router.rs` re-lerá o
+  arquivo (regra 4) e o bloco novo é caminho distinto da extração
+  `rede-proxy-montagem-request` — não se misturam.
+- **`crates/flux-common/src/config.rs`** — campo `api_hold` em
+  `SleepSection` + teste. Nenhuma proposta `common-*` muda; o arquivo
+  (964 linhas na foto) cresceu ~15 e segue fora dos hotspots.
+- **Contagens do `inventory.md`/`file-audit.md`** driftaram nesses dois
+  arquivos; NÃO re-auditados — nenhum alvo mudou de faixa (>1000).
+
 ## Regras de execução (valem para todo passo)
 
 1. **Um passo = um commit** (ou um commit por sub-unidade quando dito). Commit local com pathspec dos próprios arquivos; **push só por pedido do Gabriel**; nunca `--amend` em HEAD compartilhado.
