@@ -2,6 +2,53 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 18/10/2026 (parte 8) — auditoria de modularização multiagente: 41 propostas revisadas e plano P0–P3, sem tocar código
+
+**Intenção** (pedido do Gabriel): auditoria completa do repo contra o
+anti-monolito (a fase de planejamento da spec 19), rodada como workflow
+multiagente em branch separada, com a VM intocada.
+
+**Como rodou**: workflow `dwfrun-2f9bbdc8`, 19 subagentes — 7 auditores por
+domínio (núcleo fluxd, rede, painel/observabilidade, dados/db, CLI,
+flux-common, testes+CI), 9 focos dedicados aos arquivos acima de 1000 linhas,
+1 mapeador de dependências, 1 revisor independente (Agente G da spec) e 1
+editor do plano; 17 em paralelo. Cobertura conferida por gate determinístico:
+51/51 itens in-scope auditados (44 `.rs` + manifestos/CI).
+
+**Entrega**: `docs/refactoring/` com 7 documentos (1569 linhas) — README,
+inventory, file-audit, architecture-findings, dependency-map, execution-plan
+(o plano canônico: 8 lotes, cada passo com evidência `path:linha`,
+movimento origem→destino, testes de regressão, validação com os comandos
+reais do `ci.yml`, risco, esforço e aceite) e coverage-manifest. 41 propostas:
+36 aprovadas, 5 ajustadas pelo revisor, 0 rejeitadas.
+
+**Teses centrais**: o grafo de crates é um DAG sadio; `decision.rs` e
+`state.rs` têm fronteiras exemplares e ficam únicos (igualmente `observe.rs`).
+O ganho real está em: (1) ativar os 3 testes gated de Docker que PASSAM
+VAZIOS no CI — `ci.yml:26-27` roda `cargo test --workspace` sem
+`FLUX_DOCKER_URL` e os testes retornam cedo sem ela
+(`docker_integration.rs:14-17`, `sleep_integration.rs:14-21`,
+`schema_integration.rs:12-19`) — único P1 do plano; (2) deduplicar o que já
+divergiu em silêncio (validador de nome de projeto em 5 cópias, CSS/esc do
+croma, consultas SQLite copiadas no DockerSource); (3) 4 splits justificados:
+`flux-cli/main.rs` (2574), `panel.rs` (1985), `compose.rs` (1383),
+`flux-cli/sync.rs` (1286).
+
+**Registro de segurança (inferência, sem fix)**: `waf.rs:174-179` aceita
+`cf-connecting-ip` de qualquer origem e ele vence XFF/ConnectInfo — cliente
+com HTTP direto ao Caddy poderia forjar IP da allowlist LAN; a exploração
+depende de topologia (binds 127.0.0.1 em `lib.rs:172-174`, cloudflared
+sobrescreve o header no túnel). Documentado no plano, decisão com o Gabriel.
+
+**Estado**: branch `audit/modularizacao`, nada em `master`, nada na VM,
+`git status` provou que só `docs/refactoring/` surgiu. Próximo passo natural:
+executar o plano lote a lote (cada lote deixa o repo compilando e testando).
+
+**O que NUNCA fazer**: split cosmético por contagem de linhas (o revisor
+derrubou/ajustou os que não pagavam o custo); mover código sem teste de
+caracterização antes; executar proposta sem ler o veredito e o lote de que
+ela depende no execution-plan.
+
 ## 18/10/2026 (parte 7) — redirects estáticos de host: entregues e DESLIGADOS no mesmo dia
 
 **Intenção** (pedido do Gabriel): DNS de `bitello.xyz` e `www.bitello.xyz`
