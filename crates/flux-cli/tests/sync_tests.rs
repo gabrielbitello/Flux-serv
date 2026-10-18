@@ -172,9 +172,18 @@ fn dirs_gerados_da_raiz_nao_engolem_aninhados() {
         "resources/views/vendor/filament-tables/index.blade.php",
         &ignores
     ));
-    assert!(crate::sync::caminho_ignorado("vendor/laravel/framework", &ignores));
-    assert!(crate::sync::caminho_ignorado("storage/framework/views/x.php", &ignores));
-    assert!(!crate::sync::caminho_ignorado("app/Support/storage-notes.md", &ignores));
+    assert!(crate::sync::caminho_ignorado(
+        "vendor/laravel/framework",
+        &ignores
+    ));
+    assert!(crate::sync::caminho_ignorado(
+        "storage/framework/views/x.php",
+        &ignores
+    ));
+    assert!(!crate::sync::caminho_ignorado(
+        "app/Support/storage-notes.md",
+        &ignores
+    ));
 }
 
 #[test]

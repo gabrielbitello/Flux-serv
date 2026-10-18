@@ -961,7 +961,10 @@ fn coletar_migrations(extra_ignore: &[String]) -> Vec<(String, String)> {
         .map(|s| s.to_string())
         .collect();
     ignores.extend(extra_ignore.iter().cloned());
-    filtra_migrations_ignoradas(coletar_migrations_em(Path::new("database/migrations")), &ignores)
+    filtra_migrations_ignoradas(
+        coletar_migrations_em(Path::new("database/migrations")),
+        &ignores,
+    )
 }
 
 /// Filtro puro, separado do I/O para testar sem chdir: descarta pares cujo
