@@ -525,8 +525,69 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         } else {
             services[0].clone()
         };
-        subir_live_se_configurado(st, &name, &projeto, &principal).await;
+        // IP do container (proxy_target `ip:80` → ip): a porta do dev server
+        // é conferida na MÁQUINA/VM, não dentro do container.
+        use crate::decision::HostSource;
+        let ip = if let Some(d) = &app.docker {
+            crate::docker::DockerSource::new(d.clone(), st)
+                .proxy_target(&name, flux_common::protocol::Env::Dev)
+        } else {
+            crate::sqlite_source::SqliteSource::new(st)
+                .proxy_target(&name, flux_common::protocol::Env::Dev)
+        }
+        .and_then(|t| {
+            t.rsplit_once(':')
+                .map(|(parte_ip, _porta): (&str, &str)| parte_ip.to_owned())
+        });
+        subir_live_se_configurado(st, &app, &name, &projeto, &principal, ip.as_deref()).await;
     }
+}
+
+/// Decisão do live server no up (06/live) — PURA, para testar sem engine.
+/// O `public/hot` é o contrato do Vite e a :5173 é a porta fixa do
+/// roteamento same-origin; as DUAS fontes juntas fecham os dois sintomas de
+/// 18/10: dev server DUPLICADO (cada `up` re-disparava `npm run dev` — o
+/// segundo via de "Port in use" pra 5174, invisível ao roteamento) e hot
+/// ÓRFÃO (npm morto com SIGKILL não roda o `rm -f public/hot` do wrapper e o
+/// Laravel segue apontando pro servidor morto — site sem CSS).
+pub enum AcaoLive {
+    /// hot vivo + porta respondendo: live já de pé — não duplica.
+    Pular,
+    /// alguma das duas fontes caiu: remover hot órfão (se houver), matar
+    /// node zumbis (se houver) e subir de novo.
+    Ressuscitar,
+}
+
+pub fn decidir_live(hot: bool, porta_viva: bool) -> AcaoLive {
+    if hot && porta_viva {
+        AcaoLive::Pular
+    } else {
+        AcaoLive::Ressuscitar
+    }
+}
+
+/// A porta do dev server responde no IP do container? TCP connect rápido —
+/// não importa O QUE escuta na porta para o "já está de pé" do up; o
+/// roteamento same-origin do router valida o tráfego por cima.
+pub(crate) async fn porta_tcp_viva(ip: &str, porta: u16) -> bool {
+    let Ok(addr) = format!("{ip}:{porta}").parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(400), async {
+        tokio::net::TcpStream::connect(addr).await.is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Raiz da árvore sincronizada do projeto na VM — mesma derivação do router
+/// (`state_dir` `/srv/flux/state` → irmão `projects`). `None` = fora da VM
+/// (testes/dev host) — nada de live nem de limpeza de hot.
+pub(crate) fn raiz_arvore(app: &crate::AppState, name: &str) -> Option<std::path::PathBuf> {
+    app.state_dir
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("projects").join(name))
 }
 
 /// Monta os argumentos do live server: `docker compose -p {projeto} exec -d
@@ -555,14 +616,57 @@ fn comando_live_args(projeto: &str, service: &str, live: &str) -> Vec<String> {
     ]
 }
 
+/// Mata `vite` zumbis dentro do service — loop `/proc` direto, sem depender
+/// de ps/pkill no container. O sh/npm do wrapper SOBREVIVE (cmdline não tem
+/// "vite") e completa o ciclo sozinho: filho morto → `rm -f public/hot` do
+/// wrapper → exit. Erro é evento warn; o disparo do live segue de pé.
+async fn matar_vite_zumbis(st: &crate::state::State, projeto: &str, service: &str) {
+    let script = "for p in /proc/[0-9]*/cmdline; do grep -qa vite \"$p\" 2>/dev/null && kill \"${p#/proc/}\" 2>/dev/null; done; exit 0";
+    let saida = tokio::process::Command::new("docker")
+        .args([
+            "compose", "-p", projeto, "exec", "-T", service, "sh", "-c", script,
+        ])
+        .output()
+        .await;
+    match saida {
+        Ok(s) if s.status.success() => events::event(
+            st,
+            "info",
+            "up",
+            &format!("{projeto}: zumbis de vite mortos antes do re-disparo do live"),
+        ),
+        Ok(s) => {
+            let cauda: String = String::from_utf8_lossy(&s.stderr)
+                .lines()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            events::event(
+                st,
+                "warn",
+                "up",
+                &format!("{projeto}: falha matando zumbis de vite: {cauda}"),
+            );
+        }
+        Err(e) => events::event(
+            st,
+            "warn",
+            "up",
+            &format!("{projeto}: falha executando limpeza de zumbis: {e}"),
+        ),
+    }
+}
+
 /// Dispara o live server de dev quando o flux.toml do projeto (lido do state,
 /// como o temporary lê) declara `[dev] live`. NUNCA falha o up: todo erro é
 /// evento warn com a causa real.
 async fn subir_live_se_configurado(
     st: &crate::state::State,
+    app: &crate::AppState,
     name: &str,
     projeto: &str,
     service: &str,
+    ip: Option<&str>,
 ) {
     let toml_src = match st.project_toml(name) {
         Ok(Some(t)) => t,
@@ -600,6 +704,61 @@ async fn subir_live_se_configurado(
             &format!("{projeto}: [dev] live declarado VAZIO no flux.toml — nada a executar"),
         );
         return;
+    }
+
+    // Idempotência (06/live): hot + porta = live já de pé, NÃO re-dispara
+    // (o segundo `npm run dev` ia de "Port in use" pra 5174 e ficava
+    // invisível ao roteamento). Qualquer uma das fontes caída = zumbi/órfão:
+    // limpa e ressuscita.
+    let hot_vivo = raiz_arvore(app, name)
+        .as_ref()
+        .is_some_and(|r| r.join("public/hot").is_file());
+    let porta_viva = match ip {
+        Some(ip) => porta_tcp_viva(ip, crate::decision::VITE_PORT).await,
+        None => false, // sem IP no state = não dá para conferir; tratar como caído
+    };
+    if let AcaoLive::Pular = decidir_live(hot_vivo, porta_viva) {
+        events::event(
+            st,
+            "info",
+            "up",
+            &format!(
+                "{projeto}: live server já ativo (hot vivo + :{} respondendo) — \
+                 pulando re-disparo",
+                crate::decision::VITE_PORT
+            ),
+        );
+        return;
+    }
+    if hot_vivo {
+        // Porta morta com hot de pé = órfão: o wrapper do npm morto com
+        // SIGKILL não rodou o `rm -f public/hot`. Remover ANTES de subir,
+        // senão o Laravel segue apontando pro servidor morto (site sem CSS).
+        if let Some(r) = raiz_arvore(app, name) {
+            match std::fs::remove_file(r.join("public/hot")) {
+                Ok(()) => events::event(
+                    st,
+                    "warn",
+                    "up",
+                    &format!(
+                        "{projeto}: hot ÓRFÃO removido — dev server morto sem a porta {}",
+                        crate::decision::VITE_PORT
+                    ),
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => events::event(
+                    st,
+                    "warn",
+                    "up",
+                    &format!("{projeto}: falha removendo hot órfão: {e}"),
+                ),
+            }
+        }
+    }
+    if porta_viva {
+        // Porta viva SEM hot = npm zumbi que perdeu o contrato — mata antes
+        // de subir o novo, senão o novo nasce na 5174 fora do roteamento.
+        matar_vite_zumbis(st, projeto, service).await;
     }
     events::event(
         st,
@@ -1024,6 +1183,24 @@ mod tests {
             },
         ];
         assert_eq!(strip_list(&renderizado, &block), vec!["mysql".to_owned()]);
+    }
+
+    #[test]
+    fn decidir_live_cobre_as_quatro_combinacoes() {
+        use AcaoLive::*;
+        assert!(
+            matches!(decidir_live(true, true), Pular),
+            "tudo vivo = pular"
+        );
+        assert!(
+            matches!(decidir_live(true, false), Ressuscitar),
+            "hot órfão = ressuscitar"
+        );
+        assert!(
+            matches!(decidir_live(false, true), Ressuscitar),
+            "porta viva sem contrato = zumbi, ressuscitar"
+        );
+        assert!(matches!(decidir_live(false, false), Ressuscitar));
     }
 
     #[test]

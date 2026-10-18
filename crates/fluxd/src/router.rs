@@ -169,6 +169,10 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
             // e HMR saem pelo próprio domínio, sem cross-origin/CORS; tudo
             // que não é path do vite (Laravel, Livewire, `public/`) segue
             // pro frankenphp intacto. Pedido com `Upgrade` usa o túnel ws.
+            // Hot órfão EM TEMPO REAL (npm morreu com SIGKILL — o wrapper
+            // não rodou o rm): :5173 não responde → limpa o hot e CAI PRO
+            // FRANKENPHP (build) em vez de devolver página failed para um
+            // path de módulo — MIME text/html derruba CSS e Alpine inteiros.
             let mut target = target;
             let mut upgrade = None;
             if host.is_dev() && decision::eh_path_vite(&path) && live_ativo(&app, &name) {
@@ -176,12 +180,24 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                     .rsplit_once(':')
                     .map(|(ip, _)| ip.to_owned())
                     .unwrap_or_else(|| target.clone());
-                target = format!("{ip}:{}", decision::VITE_PORT);
-                // OnUpgrade mora nas extensions do request: retirar ANTES do
-                // forward — o `into_parts` já aconteceu no topo do handler.
-                upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
-                if upgrade.is_some() {
-                    tracing::debug!(host = %host_raw, path, "ws do HMR → {target}");
+                if crate::compose::porta_tcp_viva(&ip, decision::VITE_PORT).await {
+                    target = format!("{ip}:{}", decision::VITE_PORT);
+                    // OnUpgrade mora nas extensions do request: retirar ANTES
+                    // do forward — o `into_parts` já aconteceu no topo.
+                    upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
+                    if upgrade.is_some() {
+                        tracing::debug!(host = %host_raw, path, "ws do HMR → {target}");
+                    }
+                } else {
+                    if let Some(r) = crate::compose::raiz_arvore(&app, &name) {
+                        match std::fs::remove_file(r.join("public/hot")) {
+                            Ok(()) => {
+                                tracing::warn!(host = %host_raw, "dev server morto com hot órfão — hot removido, build assumindo")
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => tracing::warn!("falha removendo hot órfão: {e}"),
+                        }
+                    }
                 }
             }
             let encaminhado = if upgrade.is_some() {
