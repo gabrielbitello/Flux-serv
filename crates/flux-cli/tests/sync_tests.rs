@@ -188,7 +188,8 @@ fn extra_ignore_adiciona_e_nunca_subtrai_globais() {
     .unwrap();
     // Projeto tenta "adicionar" um global de novo e um novo padrão: global não
     // duplica, novo entra no fim (globais primeiro, ordem estável).
-    spec.extra_ignore = vec!["vendor/".into(), "resources/svg/**".into()];
+    // ".env" segue global solto: tentar "adicionar" de novo não duplica.
+    spec.extra_ignore = vec![".env".into(), "resources/svg/**".into()];
     let ignores = spec.ignores();
     assert_eq!(ignores.len(), sync::GLOBAL_IGNORES.len() + 1);
     for (i, global) in sync::GLOBAL_IGNORES.iter().enumerate() {
@@ -437,7 +438,7 @@ fn for_project_le_nome_e_extra_ignore_do_flux_toml() {
     escrever(
         &dir,
         "flux.toml",
-        "name = \"vipers\"\n\n[sync]\nextra_ignore = [\"resources/svg/**\", \"vendor/\"]\n",
+        "name = \"vipers\"\n\n[sync]\nextra_ignore = [\"resources/svg/**\", \".env\"]\n",
     );
     let spec = SyncSpec::for_project(&dir, Beta::Local(PathBuf::from("C:\\b")), None).unwrap();
     assert_eq!(spec.project, "vipers");

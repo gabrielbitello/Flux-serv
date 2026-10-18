@@ -796,11 +796,22 @@ pub(crate) fn caminho_ignorado(rel: &str, padroes: &[String]) -> bool {
 }
 
 fn padrao_casa(rel: &str, padrao: &str) -> bool {
+    // Âncora (gitignore): '/' INICIAL = casa SÓ na raiz; sem âncora, o
+    // segmento casa em qualquer nível. A âncora vem ANTES do sufixo de dir —
+    // "/vendor/" não pode virar segmento literal "/vendor" (nunca casa).
+    let (ancorado, padrao) = match padrao.strip_prefix('/') {
+        Some(p) => (true, p),
+        None => (false, padrao),
+    };
     if let Some(dir) = padrao.strip_suffix('/') {
-        return rel.split('/').any(|seg| seg == dir);
+        return if ancorado {
+            rel == dir || rel.starts_with(&format!("{dir}/"))
+        } else {
+            rel.split('/').any(|seg| seg == dir)
+        };
     }
     if padrao.contains('/') {
-        return glob_casa(rel, padrao.trim_start_matches('/'));
+        return glob_casa(rel, padrao);
     }
     rel.split('/').any(|seg| glob_casa(seg, padrao))
 }
