@@ -111,9 +111,22 @@ impl decision::HostSource for Source<'_> {
     }
 }
 
+/// Dev server de pé para o projeto? O `public/hot` é o contrato (06/live):
+/// o Vite o cria ao subir e o wrapper do compose o apaga na morte — a
+/// existência do arquivo É o estado, sem flag paralela para dessincronizar.
+/// Raiz derivada de `state_dir` (`/srv/flux/state` → irmão `projects`) para
+/// não duplicar caminho no AppState; sem `state_dir` (testes/dev host) o
+/// live fica desligado.
+fn live_ativo(app: &AppState, name: &str) -> bool {
+    app.state_dir
+        .as_ref()
+        .and_then(|p| p.parent())
+        .is_some_and(|p| p.join("projects").join(name).join("public/hot").is_file())
+}
+
 async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Request) -> Response {
     let started = std::time::Instant::now();
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
 
     let host_raw = parts
         .headers
@@ -149,7 +162,34 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                         .set_cooldown(&name, env, crate::sleep::WAKE_COOLDOWN_SECS);
                 }
             }
-            match proxy::forward(&app.http, parts, body, &target).await {
+            // Live same-origin (06/live, método do devserver velho): com o
+            // dev server de pé (`public/hot` é o contrato do Vite — nasce
+            // com ele, o wrapper do compose apaga na morte), os prefixos do
+            // vite no host `-d` vão para a :5173 do MESMO container. Assets
+            // e HMR saem pelo próprio domínio, sem cross-origin/CORS; tudo
+            // que não é path do vite (Laravel, Livewire, `public/`) segue
+            // pro frankenphp intacto. Pedido com `Upgrade` usa o túnel ws.
+            let mut target = target;
+            let mut upgrade = None;
+            if host.is_dev() && decision::eh_path_vite(&path) && live_ativo(&app, &name) {
+                let ip = target
+                    .rsplit_once(':')
+                    .map(|(ip, _)| ip.to_owned())
+                    .unwrap_or_else(|| target.clone());
+                target = format!("{ip}:{}", decision::VITE_PORT);
+                // OnUpgrade mora nas extensions do request: retirar ANTES do
+                // forward — o `into_parts` já aconteceu no topo do handler.
+                upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
+                if upgrade.is_some() {
+                    tracing::debug!(host = %host_raw, path, "ws do HMR → {target}");
+                }
+            }
+            let encaminhado = if upgrade.is_some() {
+                proxy::forward_ws(&app.http, parts, body, &target, upgrade).await
+            } else {
+                proxy::forward(&app.http, parts, body, &target).await
+            };
+            match encaminhado {
                 Ok(r) => r,
                 Err(e) => {
                     // Upstream falhou → reavalia estado: página "falhou" ou 503

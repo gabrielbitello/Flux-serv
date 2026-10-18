@@ -19,7 +19,7 @@ use axum::http::{
 use axum::response::Response;
 use http_body_util::BodyExt;
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 
 /// Injeção do overlay de sono (04): ativa por default. Virar `false` aqui
 /// desliga a injeção em TODOS os forwards — a rota `/__flux/beat` continua
@@ -31,6 +31,9 @@ pub const INJECT_BEAT: bool = true;
 pub const MAX_INJECT_BYTES: usize = 256 * 1024;
 
 /// Cliente HTTP do proxy — um só, reutilizado (pool de conexões do hyper).
+/// O client legacy do hyper-util conecta HTTP/1.1 com `with_upgrades()` —
+/// o túnel do websocket do HMR (06/live) funciona sem flag extra; para
+/// request sem upgrade a conexão segue idêntica.
 pub type ProxyClient = Client<HttpConnector, Body>;
 
 pub fn new_client() -> ProxyClient {
@@ -182,6 +185,91 @@ pub async fn forward(
     }
 
     Ok(Response::from_parts(p2, Body::new(b2)))
+}
+
+/// Encaminha um pedido de UPGRADE (websocket do HMR, 06/live) para `target`.
+/// Diferença do `forward`: `strip_hop_by_hop` NÃO passa — `Connection` e
+/// `Upgrade` SÃO o pedido. Chegando 101 do upstream, devolve o 101 para o
+/// servidor do fluxd e spawna o túnel bruto (`copy_bidirectional`) entre as
+/// duas pontas: depois do upgrade não existe HTTP, é byte a byte nos dois
+/// sentidos (o cliente precisa ter sido construído com `upgrade(true)`).
+/// `down` é o `OnUpgrade` extraído das extensions do request do browser —
+/// retirado ANTES do `into_parts`, porque hyper registra nele.
+pub async fn forward_ws(
+    client: &ProxyClient,
+    mut parts: Parts,
+    body: Body,
+    target: &str,
+    down: Option<hyper::upgrade::OnUpgrade>,
+) -> Result<Response, String> {
+    let pq = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| "/".to_owned());
+    let uri = Uri::builder()
+        .scheme("http")
+        .authority(target)
+        .path_and_query(pq)
+        .build()
+        .map_err(|e| format!("alvo de ws inválido {target:?}: {e}"))?;
+
+    parts.headers.insert(
+        header::HOST,
+        HeaderValue::from_str(target)
+            .map_err(|e| format!("alvo de ws inválido {target:?}: {e}"))?,
+    );
+
+    let mut builder = Request::builder().method(parts.method.clone()).uri(uri);
+    if let Some(h) = builder.headers_mut() {
+        *h = std::mem::take(&mut parts.headers);
+    }
+    let req = builder
+        .body(body)
+        .map_err(|e| format!("montagem do ws para {target:?}: {e}"))?;
+
+    let resp: HttpResponse<hyper::body::Incoming> = client
+        .request(req)
+        .await
+        .map_err(|e| format!("upstream ws {target}: {e}"))?;
+    let (mut p2, b2) = resp.into_parts();
+
+    // Sem 101 o dev server recusou o upgrade (caiu no HTTP normal): devolve
+    // a resposta como qualquer outra — o router nunca finge que tunelou.
+    if p2.status != StatusCode::SWITCHING_PROTOCOLS {
+        strip_hop_by_hop(&mut p2.headers);
+        return Ok(Response::from_parts(p2, Body::new(b2)));
+    }
+
+    let up = p2.extensions.remove::<hyper::upgrade::OnUpgrade>();
+    let resp = Response::from_parts(p2, Body::empty());
+    match (down, up) {
+        (Some(down), Some(up)) => {
+            tokio::spawn(async move {
+                match tokio::try_join!(down, up) {
+                    Ok((browser, upstream)) => {
+                        // hyper 1.x divide os traits de IO: TokioIo adapta
+                        // `Upgraded` para o copy_bidirectional do tokio.
+                        let (mut browser, mut upstream) =
+                            (TokioIo::new(browser), TokioIo::new(upstream));
+                        if let Err(e) =
+                            tokio::io::copy_bidirectional(&mut browser, &mut upstream).await
+                        {
+                            tracing::debug!("túnel ws encerrado: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("upgrade ws falhou nas pontas: {e}"),
+                }
+            });
+        }
+        (down, up) => tracing::warn!(
+            target,
+            "101 sem ponta de upgrade: browser={} upstream={}",
+            down.is_some(),
+            up.is_some()
+        ),
+    }
+    Ok(resp)
 }
 
 #[cfg(test)]
@@ -352,6 +440,37 @@ mod tests {
         let headers = resp.headers().clone();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, headers, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn forward_ws_sem_101_no_upstream_passa_http_normal_sem_injecao() {
+        // O dev server recusou o upgrade e respondeu HTTP comum: a resposta
+        // volta pelo caminho normal (o router nunca finge que tunelou) — e
+        // o ws NUNCA injeta o overlay de sono, mesmo em HTML elegível.
+        let app = Arc::new(AppState::new(
+            State::in_memory().unwrap(),
+            &GlobalConfig::default(),
+            None,
+        ));
+        let target = servidor().await;
+        let (parts, _) = Request::builder()
+            .uri("http://upstream/")
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::UPGRADE, "websocket")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts();
+        let resp = forward_ws(&app.http, parts, Body::empty(), &target, None)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let out = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(out.contains("oi"), "corpo do upstream passa: {out}");
+        assert!(
+            !out.contains(&crate::beat::SCRIPT),
+            "forward_ws não injeta overlay: {out}"
+        );
     }
 
     #[tokio::test]

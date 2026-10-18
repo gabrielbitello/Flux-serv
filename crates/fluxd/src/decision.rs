@@ -167,6 +167,23 @@ fn vite_action(
 /// mesma porta no host quando o live server está declarado (06/live).
 pub const VITE_PORT: u16 = 5173;
 
+/// Prefixos de path que pertencem ao dev server no modo SAME-ORIGIN
+/// (06/live, método do devserver velho): `/@vite` (cliente + ws do HMR),
+/// módulos resolvidos (`/@id`, `/@fs`), dependências otimizadas
+/// (`/node_modules`) e as fontes do projeto (`/resources`). Todo o resto do
+/// host `-d` continua no container — rotas do Laravel, Livewire, estáticos
+/// de `public/` — que é exatamente o que o modo cross-origin quebrava.
+pub const VITE_PATH_PREFIXES: &[&str] = &["/@vite", "/@id", "/@fs", "/node_modules", "/resources"];
+
+/// O path pertence ao dev server? Igualdade no prefixo ou subcaminho —
+/// `/@vite` NÃO casa `/@viteiros` (rotear path alheio pro vite é 404 com
+/// cara de bug).
+pub fn eh_path_vite(path: &str) -> bool {
+    VITE_PATH_PREFIXES
+        .iter()
+        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
+}
+
 /// Reconhece o path EXATO da rota pública de deploy (10/F4):
 /// `/api/projects/{name}/deploy` com `name` em `[a-z0-9-]`. Qualquer outro
 /// formato (nome vazio, nome inválido, sufixo/ prefixo divergente) devolve
@@ -703,6 +720,32 @@ mod tests {
             fantasma.decide("zzz.bitello.xyz", "/api/projects/vipers/deploy", true),
             Action::NotFound
         );
+    }
+
+    #[test]
+    fn path_do_vite_casa_prefixo_e_subcaminho_sem_falso_positivo() {
+        for p in [
+            "/@vite",
+            "/@vite/client",
+            "/@vite/ws",
+            "/@id/x.js",
+            "/@fs/app",
+            "/node_modules/.vite/deps/vue.js",
+            "/resources/js/app.js",
+            "/resources",
+        ] {
+            assert!(eh_path_vite(p), "{p} é do vite");
+        }
+        for p in [
+            "/",
+            "/livewire/update",
+            "/@viteiros",
+            "/resourcesxs",
+            "/admin/login",
+            "/node_modulesbaz",
+        ] {
+            assert!(!eh_path_vite(p), "{p} NÃO é do vite");
+        }
     }
 
     #[test]
