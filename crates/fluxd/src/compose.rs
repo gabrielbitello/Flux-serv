@@ -88,6 +88,7 @@ pub fn override_yaml(
     env: &str,
     stripped: &[String],
     publicar_vite: bool,
+    asset_host: &str,
 ) -> String {
     let mut y = String::from("services:\n");
     for svc in stripped {
@@ -104,6 +105,12 @@ pub fn override_yaml(
         y.push_str("    restart: \"no\"\n");
         y.push_str("    labels:\n      flux.managed: \"true\"\n");
         y.push_str("    environment:\n      DB_HOST: flux-db\n      DB_PORT: \"3306\"\n");
+        // ASSET_URL público (06/live): o proxy do fluxd reescreve o Host para
+        // o IP do container — sem esta env o Laravel monta asset do BUILD com
+        // o IP interno (http://172.18.0.4/…), que o browser do dev não
+        // alcança. Mesmo mecanismo do DB_HOST: a plataforma injeta por cima
+        // do .env, que não manda em infraestrutura.
+        y.push_str(&format!("      ASSET_URL: \"{asset_host}\"\n"));
         y.push_str("    networks: !override [default, flux-net]\n");
     }
     y.push_str("networks:\n  flux-net:\n    external: true\n");
@@ -400,9 +407,19 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         .and_then(|d| d.live)
         .map(|l| !l.trim().is_empty())
         .unwrap_or(false);
+    // ASSET_URL público por ambiente (06/live): dev = host -d, prod = host
+    // raiz — a env injetada vence o .env, igual DB_HOST.
+    let asset_host = if env == "dev" {
+        format!(
+            "https://{}{}.{}",
+            name, app.domain.dev_suffix, app.domain.zone
+        )
+    } else {
+        format!("https://{}.{}", name, app.domain.zone)
+    };
     if let Err(e) = std::fs::write(
         &override_path,
-        override_yaml(&services, &env, &strip, publicar_vite),
+        override_yaml(&services, &env, &strip, publicar_vite, &asset_host),
     ) {
         events::event(
             st,
@@ -1106,6 +1123,7 @@ mod tests {
             "dev",
             &["mysql".into()],
             false,
+            "https://vippers-d.bitello.xyz",
         );
         assert!(y.contains("  app:\n"));
         assert!(y.contains("  worker:\n"));
@@ -1128,6 +1146,10 @@ mod tests {
             "dev não compete com o sono"
         );
         assert!(y.contains("DB_HOST: flux-db"));
+        assert!(
+            y.contains("ASSET_URL: \"https://vippers-d.bitello.xyz\""),
+            "asset público injetado por cima do .env (mesmo mecanismo do DB)"
+        );
         assert!(y.contains("networks: !override [default, flux-net]"));
         assert!(y.contains("external: true"), "flux-net é a rede do flux-db");
         // Nada publicado = portscan da 09 continua só 22/80/443.
@@ -1136,8 +1158,8 @@ mod tests {
 
     #[test]
     fn override_com_live_publica_a_porta_do_dev_server() {
-        let sem = override_yaml(&["app".into()], "dev", &[], false);
-        let com = override_yaml(&["app".into()], "dev", &[], true);
+        let sem = override_yaml(&["app".into()], "dev", &[], false, "https://v-d.x");
+        let com = override_yaml(&["app".into()], "dev", &[], true, "https://v-d.x");
         assert!(
             !sem.contains("5173:5173"),
             "sem live declarado, nada publicado"
