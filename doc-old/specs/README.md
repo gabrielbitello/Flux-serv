@@ -58,3 +58,12 @@ marcada.
 | 13, 14 + ajustes 00/01/03/05/06/07/09/10/11 | v0.3 (09/10/2026: R24–R30 — observabilidade/alertas, DR + snapshot pré-migrate + upgrade, multi-stack PHP/Node/Rust, host manda (fila), isolamento de rede, guard runtime, rate limit/borda) |
 | 15, 16, 17 + ajustes 00/03/06/09/14 | v0.4 (10/10/2026: R31–R34 — erros fora de dev + manutenção, segurança própria sem terceiros, status público com causa, backup 48 h/7 d; edge cache e e-mail em estudo) |
 | Implementação | não iniciada (repo contém só o esqueleto Rust) |
+
+## v0.5 — 18/10/2026
+
+| Novo | Conteúdo |
+|---|---|
+| [`18-overlays-merge-parcial.md`](18-overlays-merge-parcial.md) | overlay com MERGE declarativo (delta "o quê pelo quê" sobre o arquivo SINCRONIZADO do repo) + modo INTEIRO mantido; motivação = incidente real do overlay do vippers (cópia do vipa apodrecida) |
+| [`19-estrutura-modular.md`](19-estrutura-modular.md) | princípio anti-monolito fixado pelo Gabriel (9 arquivos > 1000 linhas mapeados), referência de organização = estrutura Filament forçada no CMS do vippers; refatoração por fases futuras, mover-sem-reescrever |
+
+Ambas ESCOPO FUTURO — nada implementado ainda.
