@@ -160,7 +160,7 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
 fn dirs_gerados_da_raiz_nao_engolem_aninhados() {
     // resources/views/vendor/ é override de blade Laravel oficial: o segmento
     // "vendor" aninhado TEM que sincronizar — o ignore vale pro dir da raiz.
-    let mut spec = SyncSpec::new(
+    let spec = SyncSpec::new(
         "vippers",
         PathBuf::from("a"),
         Beta::Local(PathBuf::from("b")),
