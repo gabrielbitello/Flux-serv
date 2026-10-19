@@ -23,19 +23,13 @@
 use std::sync::Arc;
 
 use axum::extract::{RawQuery, State};
-use axum::http::{HeaderName, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use serde_json::Value;
 
 use crate::AppState;
 use crate::observe::{self, Metrica, PeakRow};
-
-/// Header anti-índice em TODA resposta (R22 — mesma constante do painel).
-const NOINDEX: &str = "noindex, nofollow, noarchive";
-
-fn x_robots_tag() -> HeaderName {
-    HeaderName::from_static("x-robots-tag")
-}
+use crate::ui::{NOINDEX, x_robots_tag};
 
 /// Geometria da curva grande (idêntica à do dashboard) e da mini-curva.
 const CURVA_W: u32 = 720;
@@ -50,59 +44,7 @@ const JANELA_DEFAULT: i64 = 1440;
 /// verdade visual; CADA cor do light tem par no dark) + um bloco mínimo no fim
 /// para os controles do formulário de filtros e o `<pre>` do snapshot,
 /// usando SÓ os tokens que já existem.
-const CSS: &str = r#"
-:root{
---bg:#f1f5f9;--card:#ffffff;--text:#0f172a;--muted:#64748b;--line:#e2e8f0;
---accent:#2563eb;--accentbg:#dbeafe;--ok:#15803d;--okbg:#dcfce7;
---warn:#b45309;--warnbg:#fef3c7;--err:#b91c1c;--errbg:#fee2e2;
---info:#0e7490;--infobg:#cffafe;--idle:#475569;--idlebg:#e2e8f0}
-@media (prefers-color-scheme:dark){:root{
---bg:#0b1220;--card:#121b2f;--text:#e2e8f0;--muted:#94a3b8;--line:#26344f;
---accent:#93c5fd;--accentbg:#1e3a8a;--ok:#4ade80;--okbg:#14532d;
---warn:#fbbf24;--warnbg:#451a03;--err:#fca5a5;--errbg:#450a0a;
---info:#67e8f9;--infobg:#164e63;--idle:#94a3b8;--idlebg:#1e293b}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);
-font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;padding-bottom:3rem}
-.wrap{max-width:1060px;margin:0 auto;padding:1.2rem}
-header.top{display:flex;gap:1.2rem;align-items:baseline;flex-wrap:wrap;
-border-bottom:1px solid var(--line);padding-bottom:.6rem;margin-bottom:1rem}
-header.top h1{font-size:1.15rem;margin:0}
-nav a{margin-right:.9rem;color:var(--accent);text-decoration:none}
-nav a:hover{text-decoration:underline}
-.aviso{background:var(--warnbg);color:var(--warn);border:1px solid var(--warn);
-border-radius:8px;padding:.55rem .8rem;margin:0 0 1rem;font-size:.88rem}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:1rem}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.9rem 1rem}
-.card h3{margin:0 0 .5rem;font-size:1rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
-.card a{color:var(--accent);text-decoration:none}
-.card a:hover{text-decoration:underline}
-a{color:var(--accent)}
-.badge{background:var(--accentbg);color:var(--accent);border-radius:999px;
-padding:.05rem .55rem;font-size:.72rem;font-weight:600}
-.dot{display:inline-block;width:.62rem;height:.62rem;border-radius:50%;margin-right:.35rem}
-.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.err{background:var(--err)}
-.dot.info{background:var(--info)}.dot.accent{background:var(--accent)}.dot.idle{background:var(--idle)}
-table{width:100%;border-collapse:collapse;font-size:.86rem}
-th,td{text-align:left;padding:.3rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--muted);font-weight:600}
-.urls{margin:.6rem 0 0;font-size:.82rem;color:var(--muted);word-break:break-all}
-section{margin-top:1.6rem}
-section h2{font-size:1rem;margin:0 0 .6rem}
-.muted{color:var(--muted)}
-.ok-t{color:var(--ok)}.warn-t{color:var(--warn)}.err-t{color:var(--err)}
-.empty{background:var(--card);border:1px dashed var(--line);border-radius:10px;
-padding:1.4rem;text-align:center;color:var(--muted)}
-.curve{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.8rem}
-.curve svg{display:block;width:100%;height:auto}
-.curve polyline{stroke:var(--accent);fill:none;stroke-width:1.5}
-.curve .eixo{stroke:var(--line)}
-.curve text{fill:var(--muted);font-size:10px}
-.pager{display:flex;gap:1rem;margin-top:.8rem}
-code{background:var(--idlebg);color:var(--text);border-radius:4px;padding:.05rem .3rem;font-size:.85em}
-footer{margin-top:2rem;color:var(--muted);font-size:.78rem}
-@media(max-width:640px){.wrap{padding:.7rem}table{font-size:.8rem}}
-/* --- filtros e snapshot (só tokens existentes; painel não tem form GET) --- */
+const CSS_TAIL: &str = r#"/* --- filtros e snapshot (só tokens existentes; painel não tem form GET) --- */
 form.filtros{display:flex;gap:.8rem;flex-wrap:wrap;align-items:end;margin-top:.8rem}
 form.filtros label{display:flex;flex-direction:column;gap:.25rem;
 font-size:.78rem;color:var(--muted)}
@@ -112,8 +54,7 @@ form.filtros button{background:var(--accentbg);color:var(--accent);
 border:1px solid var(--accent);border-radius:6px;padding:.35rem .8rem;
 cursor:pointer;font-weight:600}
 details pre{background:var(--idlebg);color:var(--text);border-radius:6px;
-padding:.6rem;overflow:auto;font-size:.78rem;max-width:640px;margin:.4rem 0 0}
-"#;
+padding:.6rem;overflow:auto;font-size:.78rem;max-width:640px;margin:.4rem 0 0}"#;
 
 // ------------------------------------------------------------------ handler
 
@@ -397,7 +338,7 @@ fn layout(title: &str, body: &str) -> String {
 <meta name="robots" content="noindex, nofollow">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<style>{CSS}</style>
+<style>{css_admin}{css_tail}</style>
 </head>
 <body>
 <div class="wrap">
@@ -413,7 +354,9 @@ border:1px solid var(--line);border-radius:6px;padding:.2rem .7rem;cursor:pointe
 <footer>fluxd — painel server-side, zero JS (spec 13) · horários em UTC</footer>
 </div>
 </body>
-</html>"#
+</html>"#,
+        css_admin = crate::ui::CSS_ADMIN,
+        css_tail = CSS_TAIL,
     )
 }
 
@@ -1280,4 +1223,16 @@ mod tests {
             );
         }
     }
+}
+
+/// L4.4: o tail exclusivo + a base compartilhada cobrem o contrato visual
+/// do /observe (a base vem de ui.rs e é testada lá; aqui o tail).
+#[test]
+fn css_tail_tem_os_controles_do_monitor() {
+    assert!(CSS_TAIL.contains("form.filtros"), "filtros do monitor");
+    assert!(CSS_TAIL.contains("details pre"), "snapshot");
+    assert!(
+        crate::ui::CSS_ADMIN.contains("--accent:#2563eb"),
+        "token base"
+    );
 }

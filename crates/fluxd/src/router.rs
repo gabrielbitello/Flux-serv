@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderName, HeaderValue, header};
+use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use axum::routing::post;
 use flux_common::config::{GlobalConfig, ProjectToml};
@@ -22,6 +22,7 @@ use crate::events;
 use crate::pages;
 use crate::proxy;
 use crate::sqlite_source::SqliteSource;
+use crate::ui::{NOINDEX, x_robots_tag};
 use crate::waf::WafLayer;
 
 /// `global` alimenta a borda R30 (teto de body vem do config, 09; o resto é
@@ -51,10 +52,6 @@ pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) ->
         .with_state((app, panel))
 }
 
-fn x_robots_tag() -> HeaderName {
-    HeaderName::from_static("x-robots-tag")
-}
-
 /// Adaptador de estado do `POST /__flux/beat` (04): o router carrega
 /// `(Arc<AppState>, Router)` e o handler de beat.rs extrai `State<Arc<AppState>>`
 /// — axum-core só tem `FromRef` identidade, então a tupla é desembrulhada aqui.
@@ -64,8 +61,6 @@ async fn beat_roteado(
 ) -> Response {
     beat::beat(State(app), headers).await
 }
-
-const NOINDEX: &str = "noindex, nofollow, noarchive";
 
 /// Fonte da decisão: Docker quando existe (estado/alto do engine — verdade,
 /// 07), SQLite como fallback (dev/testes sem engine).

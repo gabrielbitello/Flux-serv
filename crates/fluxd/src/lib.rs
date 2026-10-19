@@ -25,6 +25,7 @@ pub mod sqlite_source;
 pub mod state;
 pub mod sync;
 pub mod temporary;
+mod ui;
 pub mod waf;
 
 use bollard::Docker;

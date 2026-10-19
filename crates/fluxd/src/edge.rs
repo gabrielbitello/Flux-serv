@@ -57,8 +57,8 @@ use flux_common::config::GlobalConfig;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::{Layer, Service};
 
-use crate::pages::CSS;
 use crate::decision;
+use crate::pages::CSS;
 
 /// Rate default por host (07): 300 req/min.
 pub const DEFAULT_RATE_PER_MIN: u32 = 300;
