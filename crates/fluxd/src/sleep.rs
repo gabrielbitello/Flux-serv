@@ -230,7 +230,7 @@ impl<'a> SleepManager<'a> {
                     return Some(format!("{name}/{env}: CPU {cpu:.1}% > teto — timer zerado"));
                 }
                 let resultado = match acao {
-                    "pause" => src.pause(name, env).await,
+                    "pause" => src.pause(name, env).await.map_err(|e| e.to_string()),
                     _ => src.sleep(name, env).await,
                 };
                 match resultado {

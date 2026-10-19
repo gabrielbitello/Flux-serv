@@ -1060,26 +1060,13 @@ pub async fn trocar_cor(
     Ok((velha, drenada))
 }
 
-/// Containers do compose project (resumo cru) — lista vazia quando não há.
+/// Containers do compose project (resumo cru) — DELEGAÇÃO (L3.1: fonte
+/// única de listagem por label vive em docker.rs).
 async fn lista_do_projeto(
     docker: &bollard::Docker,
     projeto: &str,
 ) -> Result<Vec<bollard::models::ContainerSummary>, String> {
-    use bollard::query_parameters::ListContainersOptionsBuilder;
-    let mut filters = std::collections::HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec![format!("com.docker.compose.project={projeto}")],
-    );
-    docker
-        .list_containers(Some(
-            ListContainersOptionsBuilder::new()
-                .all(true)
-                .filters(&filters)
-                .build(),
-        ))
-        .await
-        .map_err(|e| e.to_string())
+    crate::docker::listar_label(docker, Some(projeto)).await
 }
 
 /// Varre `base` (até `profundidade` 3) coletando compose*/Dockerfile* para o

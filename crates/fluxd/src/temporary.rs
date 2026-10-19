@@ -172,22 +172,10 @@ async fn teardown(
 /// `com.docker.compose.project` começando em `flux-{nome}-` (dev e
 /// worktrees; NUNCA casa `flux-{outro}` — o traço final é parte do match).
 async fn compose_projects_do(d: &Docker, nome: &str) -> Result<Vec<String>, String> {
-    use bollard::query_parameters::ListContainersOptionsBuilder;
-    use std::collections::HashMap;
-
-    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec!["com.docker.compose.project".to_owned()],
-    );
-    let opts = ListContainersOptionsBuilder::new()
-        .all(true)
-        .filters(&filters)
-        .build();
-    let containers = d
-        .list_containers(Some(opts))
-        .await
-        .map_err(|e| e.to_string())?;
+    // L3.1: listagem vem da FONTE ÚNICA (docker::listar_label, forma
+    // "todos com label") — o filtro de prefixo fica aqui, é o contrato
+    // deste teardown (dev + worktrees; NUNCA casa flux-{outro}).
+    let containers = crate::docker::listar_label(d, None).await?;
     let prefixo = format!("flux-{nome}-");
     let mut projetos: Vec<String> = containers
         .iter()

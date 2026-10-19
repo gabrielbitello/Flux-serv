@@ -28,39 +28,60 @@ pub fn compose_project(name: &str, env: Env) -> String {
     format!("flux-{name}-{env}")
 }
 
-/// TODOS os containers do compose project (sono de dev é do PROJETO inteiro:
-/// só o app parado deixava worker/reverb rodando à toa — salada que o
-/// Gabriel apontou). Flux-db e cia NUNCA entram: não têm o label.
-async fn containers_do_projeto(docker: &Docker, project: &str) -> Vec<ContainerSummary> {
+/// Filtro de label de compose project — montagem PURA (testável sem engine).
+/// `Some(projeto)` = match exato; `None` = TODOS com o label (o chamador
+/// filtra prefixo — forma do teardown de worktrees, temporary.rs).
+fn filtros_label(projeto: Option<&str>) -> HashMap<String, Vec<String>> {
     let mut filters = HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec![format!("com.docker.compose.project={project}")],
-    );
+    let valor = match projeto {
+        Some(p) => format!("com.docker.compose.project={p}"),
+        None => "com.docker.compose.project".to_owned(),
+    };
+    filters.insert("label".to_owned(), vec![valor]);
+    filters
+}
+
+/// FONTE ÚNICA de listagem por label (L3.1 — eram 4 cópias com erros
+/// divergentes: `unwrap_or_default` engolia falha de engine e wake/sleep
+/// agiam como lista vazia; `.ok()?` não distinguia "sem container" de
+/// "engine falhou"). ERRO PROPAGA — mudança DECLARADA no plano: os
+/// chamadores de wake/sleep já tratam `Err` com evento/warn. Flux-db e cia
+/// NUNCA entram no match exato: não têm o label.
+pub(crate) async fn listar_label(
+    docker: &Docker,
+    projeto: Option<&str>,
+) -> Result<Vec<ContainerSummary>, String> {
     let options = ListContainersOptionsBuilder::default()
         .all(true)
-        .filters(&filters)
+        .filters(&filtros_label(projeto))
         .build();
     docker
         .list_containers(Some(options))
         .await
-        .unwrap_or_default()
+        .map_err(|e| format!("listagem de containers (projeto {projeto:?}): {e}"))
+}
+
+/// TODOS os containers do compose project (sono de dev é do PROJETO inteiro:
+/// só o app parado deixava worker/reverb rodando à toa — salada que o
+/// Gabriel apontou).
+async fn containers_do_projeto(
+    docker: &Docker,
+    project: &str,
+) -> Result<Vec<ContainerSummary>, String> {
+    listar_label(docker, Some(project)).await
 }
 
 pub async fn find_app_container(
     docker: &Docker,
     project: &str,
 ) -> Option<ContainerInspectResponse> {
-    let mut filters = HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec![format!("com.docker.compose.project={project}")],
-    );
-    let options = ListContainersOptionsBuilder::default()
-        .all(true)
-        .filters(&filters)
-        .build();
-    let list = docker.list_containers(Some(options)).await.ok()?;
+    let list = match listar_label(docker, Some(project)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("find_app_container {project}: {e}");
+            return None;
+        }
+    };
     let id = list
         .iter()
         .find(|c| {
@@ -211,10 +232,10 @@ impl<'a> DockerSource<'a> {
 
     /// `docker start` — o wake da página de espera (03) e do sleep manager (F4).
     /// Devolve `true` quando o container estava parado e foi acordado.
-    pub async fn wake(&self, name: &str, env: Env) -> Result<bool, bollard::errors::Error> {
+    pub async fn wake(&self, name: &str, env: Env) -> Result<bool, String> {
         let project = self.compose_project_cor(name, env);
         let mut acordou_algum = false;
-        for c in containers_do_projeto(&self.docker, &project).await {
+        for c in containers_do_projeto(&self.docker, &project).await? {
             let parado = c
                 .state
                 .as_ref()
@@ -223,7 +244,10 @@ impl<'a> DockerSource<'a> {
                 continue;
             }
             let id = c.id.clone().unwrap_or_default();
-            self.docker.start_container(&id, None).await?;
+            self.docker
+                .start_container(&id, None)
+                .await
+                .map_err(|e| e.to_string())?;
             acordou_algum = true;
         }
         Ok(acordou_algum)
@@ -252,9 +276,9 @@ impl<'a> DockerSource<'a> {
     }
 
     /// `docker stop` — sono de dev (04).
-    pub async fn sleep(&self, name: &str, env: Env) -> Result<(), bollard::errors::Error> {
+    pub async fn sleep(&self, name: &str, env: Env) -> Result<(), String> {
         let project = self.compose_project_cor(name, env);
-        for c in containers_do_projeto(&self.docker, &project).await {
+        for c in containers_do_projeto(&self.docker, &project).await? {
             let rodando = c.state.as_ref().is_some_and(|st| {
                 matches!(
                     st,
@@ -266,7 +290,8 @@ impl<'a> DockerSource<'a> {
             }
             self.docker
                 .stop_container(c.id.as_deref().unwrap_or_default(), None)
-                .await?;
+                .await
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -385,6 +410,21 @@ mod tests {
     use super::*;
 
     // Sem engine de Docker nos testes unitários: exercita só o mapeamento puro.
+
+    /// L3.1: montagem de filtro pura — as duas formas (exato / todos com label).
+    #[test]
+    fn filtros_label_monta_exato_e_coringa() {
+        let exato = filtros_label(Some("flux-pedi-dev"));
+        assert_eq!(
+            exato.get("label"),
+            Some(&vec!["com.docker.compose.project=flux-pedi-dev".to_owned()])
+        );
+        let todos = filtros_label(None);
+        assert_eq!(
+            todos.get("label"),
+            Some(&vec!["com.docker.compose.project".to_owned()])
+        );
+    }
 
     #[test]
     fn compose_project_segue_convencao_da_spec_06() {
