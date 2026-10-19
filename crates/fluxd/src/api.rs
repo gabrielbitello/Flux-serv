@@ -29,8 +29,8 @@ use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::ciclo;
-use crate::db::{self, SchemaOutcome};
 use crate::events;
+use crate::migrations::{self, SchemaOutcome};
 // O extrator `State` do axum ocupa o nome; o estado do banco entra como DbState.
 use crate::state::State as DbState;
 use crate::sync;
@@ -657,7 +657,7 @@ impl From<SchemaOutcome> for SchemaReply {
     }
 }
 
-/// POST /projects/{name}/schema — dispara `db::ensure_schema_com_seed` com os
+/// POST /projects/{name}/schema — dispara `migrations::ensure_schema_com_seed` com os
 /// arquivos informados e o override de seed do corpo (05: `Some` vence o
 /// toml; `None` = decidir pelo flux.toml). Exige engine: sem Docker não há
 /// container onde rodar migrate, e simular sucesso seria pior que recusar (05).
@@ -680,8 +680,10 @@ async fn run_schema(
         Ok(src) => src,
         Err(r) => return *r,
     };
-    match db::ensure_schema_com_seed(&docker, &app.state, &name, env, &toml_src, &b.files, b.seed)
-        .await
+    match migrations::ensure_schema_com_seed(
+        &docker, &app.state, &name, env, &toml_src, &b.files, b.seed,
+    )
+    .await
     {
         Ok(o) => Json(SchemaReply::from(o)).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -766,7 +768,7 @@ async fn fresh_forcado(
         Ok(t) => t,
         Err(r) => return *r,
     };
-    match db::fresh_dev_forcado(&docker, &app.state, &name, &toml_src, corpo.seed).await {
+    match migrations::fresh_dev_forcado(&docker, &app.state, &name, &toml_src, corpo.seed).await {
         Ok(output) => (StatusCode::OK, output).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
