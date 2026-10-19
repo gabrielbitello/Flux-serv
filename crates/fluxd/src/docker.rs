@@ -190,10 +190,16 @@ impl<'a> DockerSource<'a> {
     /// tem cor.
     fn compose_project_cor(&self, name: &str, env: Env) -> String {
         let base = compose_project(name, env);
-        if env == Env::Prod
-            && let Ok(Some(cor)) = self.sqlite.active_color(name)
-        {
-            return format!("{base}-{cor}");
+        if env == Env::Prod {
+            match self.sqlite.active_color(name) {
+                Ok(Some(cor)) => return format!("{base}-{cor}"),
+                Ok(None) => {}
+                // L3.2: falha de leitura NÃO é "sem cor" silencioso — em prod
+                // isso decidiria o compose project ERRADO. Warn com a causa.
+                Err(e) => {
+                    tracing::warn!("active_color de {name} falhou — usando o project base: {e}")
+                }
+            }
         }
         base
     }
@@ -299,7 +305,7 @@ impl<'a> DockerSource<'a> {
 
 impl HostSource for DockerSource<'_> {
     fn project_exists(&self, name: &str) -> bool {
-        self.sqlite_project_exists(name)
+        self.fonte_sqlite().project_exists(name)
     }
 
     fn env_state(&self, name: &str, env: Env) -> ContainerState {
@@ -320,13 +326,7 @@ impl HostSource for DockerSource<'_> {
     /// Hosts custom de `[domains]` (09): consulta SQLite direta (a engine não
     /// participa — host é registro do estado).
     fn host_custom(&self, host: &str) -> Option<(String, bool)> {
-        match self.sqlite.host_custom(host) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("consulta de host custom {host:?} falhou: {e}");
-                None
-            }
-        }
+        self.fonte_sqlite().host_custom(host)
     }
 
     fn proxy_target(&self, name: &str, env: Env) -> Option<String> {
@@ -339,29 +339,18 @@ impl HostSource for DockerSource<'_> {
     }
 
     fn release_flags(&self, name: &str) -> (bool, bool) {
-        self.sqlite_release_flags(name)
+        self.fonte_sqlite().release_flags(name)
     }
 }
 
-// Helpers delegando ao SQLite (mesmo código do SqliteSource, reusado aqui
-// para projetos/flags — estado de projeto NUNCA mora no Docker).
+/// L3.2: as consultas de estado de projeto (existência, flags, hosts custom)
+/// têm UMA implementação — o `SqliteSource`. O `DockerSource` delega em vez
+/// de copiar o SQL (as cópias engoliam erro SEM log: `.is_ok()` e
+/// `unwrap_or((false, false))` — numa falha de leitura o router fingia
+/// "projeto inexistente"/"sem flags").
 impl DockerSource<'_> {
-    fn sqlite_project_exists(&self, name: &str) -> bool {
-        self.sqlite
-            .with(|c| c.query_row("SELECT 1 FROM projects WHERE name = ?1", [name], |_| Ok(())))
-            .is_ok()
-    }
-
-    fn sqlite_release_flags(&self, name: &str) -> (bool, bool) {
-        self.sqlite
-            .with(|c| {
-                c.query_row(
-                    "SELECT has_robots, has_sitemap FROM active_color WHERE project = ?1",
-                    [name],
-                    |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
-                )
-            })
-            .unwrap_or((false, false))
+    fn fonte_sqlite(&self) -> crate::sqlite_source::SqliteSource<'_> {
+        crate::sqlite_source::SqliteSource::new(self.sqlite)
     }
 }
 
