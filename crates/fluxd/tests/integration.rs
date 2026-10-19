@@ -143,6 +143,11 @@ async fn dev_dormindo_recebe_pagina_de_espera_200() {
     assert!(body.contains("http-equiv=\"refresh\""), "corpo: {body}");
     assert!(body.contains("Acordando pedi"), "corpo: {body}");
     assert_eq!(header(&headers, "cache-control"), Some("no-store"));
+    // R22 em TODA resposta de dev (L0.4): a página de espera também.
+    assert_eq!(
+        header(&headers, "x-robots-tag"),
+        Some("noindex, nofollow, noarchive")
+    );
 }
 
 #[tokio::test]
@@ -162,6 +167,11 @@ async fn api_dormindo_recebe_503_json_com_retry_after() {
         "contrato do corpo JSON (12)"
     );
     assert_eq!(header(&headers, "retry-after"), Some("30"));
+    // R22 em TODA resposta de dev (L0.4): o 503 JSON também.
+    assert_eq!(
+        header(&headers, "x-robots-tag"),
+        Some("noindex, nofollow, noarchive")
+    );
 }
 
 #[tokio::test]
@@ -171,10 +181,15 @@ async fn robots_em_dev_e_gerado_disallow_r22() {
 
     let port = spawn_router(st).await;
     let client = test_client();
-    let (status, body, _) = get(&client, port, "pedi-d.bitello.xyz", "/robots.txt").await;
+    let (status, body, headers) = get(&client, port, "pedi-d.bitello.xyz", "/robots.txt").await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "User-agent: *\nDisallow: /\n");
+    // R22 em TODA resposta de dev (L0.4): o robots.txt gerado também.
+    assert_eq!(
+        header(&headers, "x-robots-tag"),
+        Some("noindex, nofollow, noarchive")
+    );
 }
 
 #[tokio::test]
