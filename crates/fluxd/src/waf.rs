@@ -62,6 +62,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use tower::{Layer, Service};
 
+use crate::pages::CSS;
 use crate::decision;
 
 // ------------------------------------------------- padrões SQLI (spec 16)
@@ -440,12 +441,7 @@ fn html_bloqueado_page() -> String {
 /// CSS da família Flux (15) — cópia local do padrão, como o `edge.rs` já
 /// faz para suas páginas de erro (as consts das páginas são privadas nos
 /// módulos de origem).
-const CSS: &str = "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
-background:linear-gradient(160deg,#0f172a,#1e293b);color:#e2e8f0;\
-font-family:system-ui,-apple-system,sans-serif;text-align:center}\
-main{max-width:640px;padding:2rem}h1{font-size:1.4rem;font-weight:600;margin:0 0 .5rem}\
-p{color:#94a3b8;margin:.4rem 0;line-height:1.5}code{color:#7dd3fc;font-size:.95em}\
-footer{margin-top:2.5rem;font-size:.8rem;color:#64748b;letter-spacing:.08em}";
+// L4.2: cópia local REMOVIDA — dono único em pages.rs.
 
 #[cfg(test)]
 mod tests {

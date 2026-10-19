@@ -9,7 +9,7 @@ use flux_common::protocol::{ServiceFailedBody, ServiceWakingBody};
 
 use crate::decision::{Robots, Sitemap, WaitPhase};
 
-const CSS: &str = "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
+pub(crate) const CSS: &str = "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
 background:linear-gradient(160deg,#0f172a,#1e293b);color:#e2e8f0;\
 font-family:system-ui,-apple-system,sans-serif;text-align:center}\
 main{max-width:640px;padding:2rem}h1{font-size:1.4rem;font-weight:600;margin:0 0 .5rem}\
@@ -206,7 +206,7 @@ pub fn sitemap(kind: &Sitemap, domain: &DomainConfig) -> Response {
         .into_response()
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

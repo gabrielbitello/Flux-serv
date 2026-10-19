@@ -57,6 +57,7 @@ use flux_common::config::GlobalConfig;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::{Layer, Service};
 
+use crate::pages::CSS;
 use crate::decision;
 
 /// Rate default por host (07): 300 req/min.
@@ -555,12 +556,8 @@ fn html_error_page(title: &str, heading: &str, body_html: &str) -> String {
     )
 }
 
-const CSS: &str = "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
-background:linear-gradient(160deg,#0f172a,#1e293b);color:#e2e8f0;\
-font-family:system-ui,-apple-system,sans-serif;text-align:center}\
-main{max-width:640px;padding:2rem}h1{font-size:1.4rem;font-weight:600;margin:0 0 .5rem}\
-p{color:#94a3b8;margin:.4rem 0;line-height:1.5}code{color:#7dd3fc;font-size:.95em}\
-footer{margin-top:2.5rem;font-size:.8rem;color:#64748b;letter-spacing:.08em}";
+// L4.2: CSS do croma público tem DONO ÚNICO — pages.rs (era cópia
+// byte-idêntica; corrigir num lado e não no outro era divergência silenciosa).
 
 #[cfg(test)]
 mod tests {
