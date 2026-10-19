@@ -169,7 +169,7 @@ pub(crate) fn hash_confere(a: &str, b: &str) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn erro(status: StatusCode, msg: impl Into<String>) -> Response {
+pub(crate) fn erro(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ApiErrorBody { error: msg.into() })).into_response()
 }
 
@@ -606,7 +606,7 @@ async fn grant_lease(
 
 /// Existência do projeto — erro vira 404 com causa (nunca criar sleep_state
 /// de projeto fantasma).
-fn garante_projeto(app: &AppState, name: &str) -> Result<(), Box<Response>> {
+pub(crate) fn garante_projeto(app: &AppState, name: &str) -> Result<(), Box<Response>> {
     match app.state.list_projects() {
         Ok(l) if l.iter().any(|n| n == name) => Ok(()),
         Ok(_) => Err(Box::new(erro(

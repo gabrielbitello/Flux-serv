@@ -39,7 +39,7 @@ use axum::response::{IntoResponse, Response};
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::query_parameters::{LogsOptions, LogsOptionsBuilder};
-use flux_common::protocol::{ApiErrorBody, Env};
+use flux_common::protocol::Env;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
@@ -82,11 +82,6 @@ struct DownReply {
 }
 
 /// Copiado da api.rs (o helper de lá não é `pub`): todo erro sai com a causa
-/// no corpo `{"error": ...}` — parsers do CLI dependem disso (12).
-fn erro(status: StatusCode, msg: impl Into<String>) -> Response {
-    (status, Json(ApiErrorBody { error: msg.into() })).into_response()
-}
-
 /// Ambiente da query com default `dev`; inválido → 422 com causa (mesma
 /// mensagem do `Env::from_str` do protocolo). `Box` no Err: mesmo motivo do
 /// `toml_gravado` na api.rs — o clippy reclama do tamanho do `Response`.
@@ -94,7 +89,7 @@ fn env_de(q: &CicloQuery) -> Result<Env, Box<Response>> {
     let bruto = q.env.as_deref().unwrap_or("dev");
     bruto
         .parse::<Env>()
-        .map_err(|m| Box::new(erro(StatusCode::UNPROCESSABLE_ENTITY, m)))
+        .map_err(|m| Box::new(crate::api::erro(StatusCode::UNPROCESSABLE_ENTITY, m)))
 }
 
 /// `tail` da query com default 200; `0` = tudo (semântica do `--tail` do
@@ -103,7 +98,7 @@ fn tail_de(q: &CicloQuery) -> Result<usize, Box<Response>> {
     match q.tail.as_deref() {
         None | Some("") => Ok(LOGS_TAIL_PADRAO),
         Some(s) => s.parse::<usize>().map_err(|_| {
-            Box::new(erro(
+            Box::new(crate::api::erro(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("tail inválido: {s:?} (inteiro ≥ 0; 0 = tudo)"),
             ))
@@ -116,25 +111,9 @@ fn follow_de(q: &CicloQuery) -> Result<bool, Box<Response>> {
     match q.follow.as_deref() {
         None | Some("") | Some("false") => Ok(false),
         Some("true") => Ok(true),
-        Some(outro) => Err(Box::new(erro(
+        Some(outro) => Err(Box::new(crate::api::erro(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("follow inválido: {outro:?} (use true|false)"),
-        ))),
-    }
-}
-
-/// Existência do projeto no registro — espelho do `garante_projeto` da api.rs
-/// (não é `pub` lá). Fantasma → 404 com causa; erro de leitura → 500.
-fn projeto_registrado(app: &AppState, name: &str) -> Result<(), Box<Response>> {
-    match app.state.list_projects() {
-        Ok(l) if l.iter().any(|n| n == name) => Ok(()),
-        Ok(_) => Err(Box::new(erro(
-            StatusCode::NOT_FOUND,
-            format!("projeto {name:?} não registrado no fluxd — rode `flux up` no repo dele"),
-        ))),
-        Err(e) => Err(Box::new(erro(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("falha consultando projetos: {e}"),
         ))),
     }
 }
@@ -164,7 +143,7 @@ pub async fn down(
         Ok(e) => e,
         Err(r) => return *r,
     };
-    if let Err(r) = projeto_registrado(&app, &name) {
+    if let Err(r) = crate::api::garante_projeto(&app, &name) {
         return *r;
     }
     let projeto = docker::compose_project(&name, env);
@@ -177,7 +156,7 @@ pub async fn down(
             dir.display()
         );
         events::event(&app.state, "error", "down", &format!("{projeto}: {msg}"));
-        return erro(StatusCode::CONFLICT, msg);
+        return crate::api::erro(StatusCode::CONFLICT, msg);
     }
     let saida = match tokio::process::Command::new("docker")
         .args(args_down(&projeto))
@@ -189,7 +168,7 @@ pub async fn down(
         Err(e) => {
             let msg = format!("{projeto}: docker compose stop não rodou: {e}");
             events::event(&app.state, "error", "down", &msg);
-            return erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
+            return crate::api::erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
         }
     };
     if !saida.status.success() {
@@ -198,7 +177,7 @@ pub async fn down(
             String::from_utf8_lossy(&saida.stderr).trim()
         );
         events::event(&app.state, "error", "down", &msg);
-        return erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
+        return crate::api::erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
     }
     events::event(
         &app.state,
@@ -280,18 +259,18 @@ pub async fn logs(
         Ok(f) => f,
         Err(r) => return *r,
     };
-    if let Err(r) = projeto_registrado(&app, &name) {
+    if let Err(r) = crate::api::garante_projeto(&app, &name) {
         return *r;
     }
     let Some(docker) = app.docker.clone() else {
-        return erro(
+        return crate::api::erro(
             StatusCode::SERVICE_UNAVAILABLE,
             "fluxd sem Docker conectado — logs de container só na VM",
         );
     };
     let projeto = docker::compose_project(&name, env);
     let Some(container) = find_app_container(&docker, &projeto).await else {
-        return erro(
+        return crate::api::erro(
             StatusCode::CONFLICT,
             format!(
                 "{projeto}: container app não encontrado — o projeto nunca subiu? (rode `flux up`)"
@@ -299,7 +278,7 @@ pub async fn logs(
         );
     };
     let Some(id) = container.id.clone() else {
-        return erro(
+        return crate::api::erro(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{projeto}: container app sem id no inspect"),
         );
@@ -316,7 +295,7 @@ pub async fn logs(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    return erro(
+                    return crate::api::erro(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         format!("{projeto}: stream de logs: {e}"),
                     );
@@ -418,27 +397,27 @@ pub async fn exec(
         Ok(e) => e,
         Err(r) => return *r,
     };
-    if let Err(r) = projeto_registrado(&app, &name) {
+    if let Err(r) = crate::api::garante_projeto(&app, &name) {
         return *r;
     }
     let cmd = match b.cmd {
         Some(c) if !c.is_empty() => c,
         Some(_) | None => {
-            return erro(
+            return crate::api::erro(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "cmd vazio ou ausente: envie {\"cmd\":[\"php\",\"artisan\",\"migrate\",\"--force\"]}",
             );
         }
     };
     let Some(docker) = app.docker.clone() else {
-        return erro(
+        return crate::api::erro(
             StatusCode::SERVICE_UNAVAILABLE,
             "fluxd sem Docker conectado — exec só roda na VM",
         );
     };
     let projeto = docker::compose_project(&name, env);
     let Some(container) = find_app_container(&docker, &projeto).await else {
-        return erro(
+        return crate::api::erro(
             StatusCode::CONFLICT,
             format!(
                 "{projeto}: container app não encontrado — o projeto nunca subiu? (rode `flux up`)"
@@ -461,10 +440,10 @@ pub async fn exec(
             "{projeto}: container app não está rodando (estado: {estado}) — suba o projeto antes (`flux up`)"
         );
         events::event(&app.state, "warn", "exec", &msg);
-        return erro(StatusCode::CONFLICT, msg);
+        return crate::api::erro(StatusCode::CONFLICT, msg);
     }
     let Some(id) = container.id.clone() else {
-        return erro(
+        return crate::api::erro(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{projeto}: container app sem id no inspect"),
         );
@@ -476,7 +455,7 @@ pub async fn exec(
         Ok(Ok(v)) => v,
         Ok(Err(msg)) => {
             events::event(&app.state, "error", "exec", &msg);
-            return erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
+            return crate::api::erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
         }
         Err(_) => {
             let msg = format!(
@@ -484,7 +463,7 @@ pub async fn exec(
                 EXEC_TIMEOUT.as_secs()
             );
             events::event(&app.state, "error", "exec", &msg);
-            return erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
+            return crate::api::erro(StatusCode::INTERNAL_SERVER_ERROR, msg);
         }
     };
 

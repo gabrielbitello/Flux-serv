@@ -49,7 +49,6 @@ use axum::Json;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use flux_common::protocol::ApiErrorBody;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -107,10 +106,6 @@ fn in_flight_release(name: &str) {
         .remove(name);
 }
 
-fn json_erro(status: StatusCode, msg: impl Into<String>) -> Response {
-    (status, Json(ApiErrorBody { error: msg.into() })).into_response()
-}
-
 /// Linha na trilha de deploy (tabela `deploy_log`, schema V1). Falha de
 /// gravação NÃO é engolida: erro no log do fluxd — a trilha é o rastro.
 fn deploy_log(st: &crate::state::State, project: &str, kind: &str, detail_json: &str, ok: bool) {
@@ -132,7 +127,7 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
     // path /api é rota de API, matriz 12 nunca manda HTML pra ela). Nada de
     // bucket nem auth gastos.
     if parts.method != Method::POST {
-        return json_erro(StatusCode::NOT_FOUND, "rota de deploy responde apenas POST");
+        return crate::api::erro(StatusCode::NOT_FOUND, "rota de deploy responde apenas POST");
     }
 
     // (2) Rate limit PRÓPRIO da rota, ANTES do auth (contrato 10/F4): abuso
@@ -143,20 +138,10 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
     }
 
     // (3) Projeto registrado? (nomes de projeto são públicos — viram hosts.)
-    let registrado = match app.state.list_projects() {
-        Ok(l) => l.contains(&name),
-        Err(e) => {
-            return json_erro(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("falha consultando projetos: {e}"),
-            );
-        }
-    };
-    if !registrado {
-        return json_erro(
-            StatusCode::NOT_FOUND,
-            format!("projeto {name:?} não registrado no fluxd — rode `flux up` no repo dele"),
-        );
+    // L5.2: mesma fonte de erro/projeto do resto do crate (api.rs) — os
+    // 404/500 e as mensagens são contrato de fio, não podem divergir.
+    if let Err(r) = crate::api::garante_projeto(&app, &name) {
+        return *r;
     }
 
     // (4) Auth por projeto, fail-closed: o hash conferido é SEMPRE o do
@@ -173,7 +158,7 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
             "deploy",
             &format!("deploy de {name} recusado: Authorization Bearer ausente"),
         );
-        return json_erro(
+        return crate::api::erro(
             StatusCode::UNAUTHORIZED,
             format!("token de deploy ausente — Bearer do `flux project token {name}`"),
         );
@@ -181,14 +166,14 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
     let hash_alvo = match app.state.deploy_token_hash(&name) {
         Ok(h) => h,
         Err(e) => {
-            return json_erro(
+            return crate::api::erro(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("estado indisponível — deploy fail-closed: {e}"),
             );
         }
     };
     let Some(hash_alvo) = hash_alvo else {
-        return json_erro(
+        return crate::api::erro(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("token de deploy não configurado — rode `flux project token {name}`"),
         );
@@ -206,7 +191,7 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
                     "deploy",
                     &format!("deploy de {name} recusado: Bearer é o token de OUTRO projeto (403)"),
                 );
-                json_erro(
+                crate::api::erro(
                     StatusCode::FORBIDDEN,
                     format!(
                         "token válido, mas de OUTRO projeto — use o Bearer do `flux project token {name}`"
@@ -222,14 +207,14 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
                         "deploy de {name} recusado: Bearer malformado ou divergente do hash do projeto (401)"
                     ),
                 );
-                json_erro(
+                crate::api::erro(
                     StatusCode::UNAUTHORIZED,
                     format!(
                         "token de deploy de {name} recusado — gere outro com `flux project token {name}`"
                     ),
                 )
             }
-            Err(e) => json_erro(
+            Err(e) => crate::api::erro(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("estado indisponível — deploy fail-closed: {e}"),
             ),
@@ -240,7 +225,7 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
     let bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return json_erro(
+            return crate::api::erro(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("corpo ilegível: {e}"),
             );
@@ -249,7 +234,7 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
     let corpo: DeployBody = match serde_json::from_slice(&bytes) {
         Ok(c) => c,
         Err(e) => {
-            return json_erro(
+            return crate::api::erro(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("corpo inválido — esperado {{\"ref\", \"actor?\", \"run?\"}}: {e}"),
             );
@@ -257,7 +242,7 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
     };
     let sha = corpo.r#ref.trim().to_ascii_lowercase();
     if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        return json_erro(
+        return crate::api::erro(
             StatusCode::UNPROCESSABLE_ENTITY,
             "campo `ref` precisa ser o SHA completo do commit (40 hex — o GITHUB_SHA do workflow)",
         );
@@ -266,7 +251,7 @@ pub async fn deploy(app: std::sync::Arc<AppState>, name: String, req: Request) -
     // (6) Um deploy por projeto: 409 honesto enquanto o anterior está em
     // andamento (guard solto no fim do pipeline — sucesso OU falha).
     if !in_flight_claim(&name) {
-        return json_erro(
+        return crate::api::erro(
             StatusCode::CONFLICT,
             format!("deploy de {name} já em andamento — acompanhe no painel/`flux status`"),
         );
