@@ -2,6 +2,75 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+
+## 18/10/2026 (parte 9) — execução da refatoração: 29/34 passos, TRIO+G verdes, VM clone para teste
+
+**Pedido do Gabriel**: "vai com tudo" — executar o plano, subindo uma CÓPIA
+da VM para teste (nada de derrubar o que estava em uso).
+
+**Infra de teste**: VM `FluxTest` clonada ao vivo da `Flux` (snapshot
+`pre-clone-test` tirado e APAGADO — regra snapshot), NIC2 (host-only .2)
+desconectada — zero colisão de IP; ssh via `natpf1` 127.0.0.1:2223; dockerd
+tcp no loopback do guest (:2375); túnel ssh `-L 127.0.0.1:2375` no host.
+Gate **G** (`FLUX_DOCKER_URL=tcp://127.0.0.1:2375`) vivo pela primeira vez.
+
+**Baseline (3 commits de estilo)**: fmt/clippy estavam vermelhos no master
+SEM mudança de código (rustfmt 1.92 divergiu do stable do último CI) — prova
+viva do L0.1. Corrigidos como commits separados antes de qualquer movimento.
+
+**Passos executados (cada um = 1 commit, TRIO verde local; G onde exigido)**:
+
+- **L0** (4/4): L0.1 `rust-toolchain.toml` pin 1.92.0; L0.2 job
+  `test-engine` (dind + FLUX_DOCKER_URL, suíte completa — os 3 testes
+  gated de engine rodaram DE VERDADE no clone: 12s/2s/12s); L0.3 mutagen
+  0.18.1 pinado com checksum — o gate EXPOSIU o gap `.gitignore` (spec
+  02:67 promete `respectGitignore`, `create_args` nunca mandou o flag desde
+  F2) e a poluição de sessão órfã entre testes (spec 02 registrada,
+  `spec_local` termina sessão órfã antes de criar); L0.4 noindex em toda
+  resposta de dev (página de espera, 503 JSON, robots.txt).
+- **L1** (8/8): Busy morto, db.rs→migrations.rs, sha2 fora, hash_path
+  privado, Causa removida, docs verazes (parse_created_id, ponte #[path]),
+  raiz de projetos → paths.rs.
+- **L2** (6/6): `nomes.rs` contrato único (5 cópias → 1), image_guard
+  removida (config global da VM conferida no clone: chave ausente), regra de
+  hosts em host.rs, wizard usa Framework::from_str + round-trip de TOML,
+  VM_HOST/VM_USER fonte única em sync.rs (inversão: a ponte #[path] exige
+  sync.rs autossuficiente).
+- **L3** (4/4): listagem por label FONTE ÚNICA (docker::listar_label, erro
+  propaga — declarado); DockerSource delega consultas ao SqliteSource;
+  exec container UNIFICADO (docker::exec_no_app, ExecSpec com as diferenças
+  deliberadas como campos; db ganha teto 4 MiB); registro pós-up warna
+  falha (nada silencioso).
+- **L4** (5/5): XSS latente nos valores interpolados (wait/failed/
+  branch_missing); croma público DONO ÚNICO pages.rs; esc do painel delega;
+  ui.rs com NOINDEX/CSS_ADMIN (a cópia que "era verbatim" já tinha
+  divergido); render_monitor 264→33 l. em 4 fn.
+- **L5** (6/6): sweep.rs (política de tick fora do composition root);
+  erro/garante_projeto FONTE ÚNICA (api.rs, cópias em ciclo+deploy fora);
+  gate 09 em api/auth.rs; regra F9 caracterizada em docker.rs
+  (rotulo_dev puro 3 ramos + probe injetável); montagem de proxy única
+  (wire-format ws preservado); cooldown pós-acordar fn única.
+- **L6** (3/3): bluegreen.rs (domínio blue-green, 2 consumidores por
+  caminhos distintos); classificar_de pura (teste exercita a REGLA REAL, a
+  cópia foi apagada); panel.rs → painel/{mod,leitura,formato,paginas,tests}
+  (CONSULTA × APRESENTAÇÃO separadas; curva dividida contagem/SVG).
+- **L7** (1/5): L7.1 contexto.rs ✓. L7.2–L7.5 (comandos/ por domínio,
+  ssh helper, sync submódulos, api tests) — mecânicos, ficam para a próxima
+  sessão (a extração L7.2 foi tentada e revertida por volume de acerto de
+  imports; o algoritmo está correto, o volume é grande demais para
+  uma passada).
+
+**Estado final**: 48 commits na branch `audit/modularizacao` (29 passos do
+plano + 3 baseline + docs/specs/diário). TRIO local + gate G (via clone)
+100% verdes no último commit. Zero push. VM original INTACTA.
+
+**O que NUNCA fazer**: confiar no pipe `cargo ... | tail` para exit code
+(engole falhas de compile/clippy — usar `bash trio.sh` com pipefail ou
+PIPESTATUS); aplicar L7.2 de uma vez (o split por domínio exige
+compilação iterativa arquivo por arquivo); esquecer de APAGAR snapshots
+da VM clone (regra: quem tira, apaga).
+
+
 ## 18/10/2026 (parte 8) — auditoria de modularização multiagente: 41 propostas revisadas e plano P0–P3, sem tocar código
 
 **Intenção** (pedido do Gabriel): auditoria completa do repo contra o
