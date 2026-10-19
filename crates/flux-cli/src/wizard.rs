@@ -55,11 +55,10 @@ pub fn gerar(raiz: &Path, pasta: &str) -> io::Result<Option<ManifestoGerado>> {
     } else {
         fw
     };
-    if !matches!(
-        fw.as_str(),
-        "laravel" | "node" | "rust" | "static" | "custom"
-    ) {
-        eprintln!("erro: framework '{fw}' não é um dos: laravel, node, rust, static, custom");
+    // L2.4: UMA lista executável — o FromStr do flux-common (framework.rs).
+    // A cópia aqui driftava da lista ali se uma variante nova nascesse.
+    if let Err(e) = fw.parse::<flux_common::framework::Framework>() {
+        eprintln!("erro: framework '{fw}' — {e}");
         return Ok(None);
     }
 
