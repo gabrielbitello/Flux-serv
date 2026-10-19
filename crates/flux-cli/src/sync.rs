@@ -59,6 +59,11 @@ pub const ENV_BIN: &str = "MUTAGEN_BIN";
 pub const LABEL: &str = "flux";
 
 /// Endpoint da VM (spec 01/02): usuário, IP fixo e raiz dos projetos.
+/// L2.5: FONTE ÚNICA das constantes da VM. Mora AQUI (e não no tunel.rs)
+/// porque a ponte `#[path]` compila este arquivo AVULSO no target de testes —
+/// `crate::tunel` não existe nesse contexto (constraint do L1.7); a direção
+/// possível é tunel.rs → sync.rs. Redeclarar noutro arquivo nasce drift
+/// silencioso (sync aponta VM, túnel do token aponta outra).
 pub const VM_USER: &str = "flux";
 pub const VM_HOST: &str = "192.168.140.2";
 pub const VM_PROJECTS_ROOT: &str = "/srv/flux/projects";
