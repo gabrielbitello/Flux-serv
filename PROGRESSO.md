@@ -3,6 +3,30 @@
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
 
+## 19/10/2026 (parte 2) — merge do master + binário do dia a dia atualizado, branch pushada
+
+**Ordem do Gabriel**: "pode dar merge, pode dar push".
+
+**Merge `master` → `audit/modularizacao`**: 2 conflitos, ambos resolvidos —
+`router.rs` (o `NOINDEX` que o master tinha no local virou
+`crate::ui::NOINDEX` no L4.4; só `WAKE_HOLD_TIMEOUT_SECS` entra, com a nota;
+o hold de API do `cbfe02f` e a refatoração convivem — config.rs auto-mergeou:
+api_hold + image_guard removida são regiões distintas) e `PROGRESSO.md`
+(união dos diários). TRIO verde pós-merge: 215 testes no fluxd (+1 do
+api_hold do master), 36 no flux-cli, 24+12 na ponte do sync.
+
+**Binário do dia a dia ATUALIZADO**: `cargo build --release` no código
+merged (16,5 s) — o shim `~/bin/flux` agora roda refatoração + api_hold.
+Smoke com o shim: `flux status` no zcode-api (parseia api_hold), `flux ps`
+fora de projeto e `flux status` no djm — saída idêntica à de antes.
+O `fluxd` da VM SEGUE no binário de master (deploy é passo separado, não
+pedido).
+
+**Push**: branch `audit/modularizacao` pushada para o origin (primeiro push
+— 68 commits locais). Master local e remoto INTOCADOS: landar a refatoração
+no master é a próxima decisão, depois de o Gabriel validar no uso. O CI
+(test-engine incluído) roda no push.
+
 ## 19/10/2026 — L7.2–L7.5 fechados: refatoração 41/41, plano EXECUTADO POR INTEIRO
 
 **Pedido do Gabriel**: "ent pode ir com tudo" — os 4 passos pendentes
