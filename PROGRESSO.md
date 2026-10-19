@@ -3,6 +3,80 @@
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
 
+## 19/10/2026 — L7.2–L7.5 fechados: refatoração 41/41, plano EXECUTADO POR INTEIRO
+
+**Pedido do Gabriel**: "ent pode ir com tudo" — os 4 passos pendentes
+(mecânicos, documentados como follow-up de sessão dedicada).
+
+**Como rodou (a lição das 2 tentativas revertidas virou método)**: um
+domínio por vez, commit por módulo (o plano v1 já mandava: "um commit por
+módulo"), trio completo a cada commit. Script por domínio
+(`Temp/l72d.py`): fatia os símbolos por brace-matching, copia o bloco de
+`use` INTEIRO como superset (o excedente sai com `cargo fix --all-targets`)
+e distribui os 15 testes inline por mapa de nomes EXPLÍCITO (nada de
+fuzzy por substring — causa de erro silencioso). Consertos por classe de
+erro, todos declarados: caminhos inline `tunel::`/`api::` viram
+`crate::...` (módulo filho não resolve a raiz); `pub(crate)` em tudo que
+viajou; nenhum `pub` além de `pub(crate)` (aceite cumprido).
+
+**L7.2 (10 commits)**: `main.rs` 2483→462 l. — `comandos/{up,ciclo,logs,
+sync_cmd,build,watch,env_cmd,live,tokens}.rs` + `mod.rs`. main() e a
+árvore clap ficam; 15 testes viajam com seus domínios (up 4, logs 5,
+tokens 2, build 2, live 1, sync_cmd 1). Emenda v2 no mesmo passo: doc do
+main.rs declara a EXCEÇÃO real (3 rotas ssh→docker: build flock, live OFF,
+container_do_servico) e a convenção `flux-{name}[-{env}|-@{slug}-{env}]`
+vira contrato registrado nos 4 pontos (sync.rs, ciclo.rs, watch.rs, live.rs).
+**L7.3**: `ssh_util.rs` — `ssh_alvo()` + `ssh_vm()` com os flags fixos; os 9
+sites só passam comando remoto e stdio; `vm_ssh` FORA de propósito
+(interativo quebra com modo batch); túnel :7420 mantém flags próprios de
+longa vida. `env_ssh_alvo` sai de cena. **L7.4**: `sync.rs` (1292 l.) →
+`sync/{mod,spec,estabilidade}.rs` — directory/mod.rs (formato OBRIGATÓRIO
+da ponte `#[path]`); `git diff main.rs` VAZIO; superfície `sync::*
+preservada por re-export COM `#[allow(unused_imports)]` (em crate binário,
+`pub use` sem consumidor interno é "unused" — o allow é o CONTRATO da
+ponte, não concessão; o `cargo fix` comeu os re-exports 2× até o allow
+entrar); VM_USER/VM_HOST ficam em mod.rs (fonte única L2.5), spec.rs usa
+`super::` — `crate::` quebraria o compile standalone; helpers de teste
+`git_disponivel`/`repo_temp` moram em estabilidade (servem os DOIS grupos —
+o plano presumia spec, ranges velhos); sync_tests diff = só a linha do
+`#[path]`; 24 externos + 12 internos, mesma contagem. **L7.5**: bloco de
+testes do `api.rs` (mock do fluxd + 14 testes) → `api/tests.rs`; produção
+fica em 730 l.; layout `foo.rs + foo/tests.rs`, acesso privado preservado
+por descendência.
+
+**Smoke read-only (binário debug, release do shim intocado)**: `flux ps`
+fora de projeto lista os containers do djm; `flux status` dentro do djm
+idêntico ao de antes; `flux sync status` fora erra com a mensagem certa;
+fora de projeto o aviso do contexto herdado sai e o erro lista os
+registrados. **Divergência mapeada (não é regressão)**: o binário da branch
+rejeita `api_hold` no flux.toml do zcode-api — `cbfe02f` (api_hold) está no
+MASTER e NÃO na branch: o fork da `audit/modularizacao` é anterior ao
+trabalho do zcode-api. O delta 19/10 do plano já avisava ("re-ler
+router.rs e config.rs"). Prova: o shim (release, build do master) parseia o
+mesmo flux.toml sem erro. **Antes de landar a branch: merge do master
+(NÃO rebase — 60+ commits locais)**; conflitos esperados em config.rs e
+router.rs (o hold de API e o image_guard removido moram nos mesmos
+arquivos).
+
+**Erros meus registrados**: 1 commit saiu com `cargo fmt --check` vermelho
+(encadeei o gate com `;` em vez de `&&`) — corrigido no commit seguinte e
+o trio desse commit está integralmente verde; a armadilha do `grep -c`
+(0 match = exit 1) quebrou 2 cadeias de gate — já estava na lista "o que
+NUNCA fazer" e voltou a morder.
+
+**Estado final**: 41/41 passos do plano v2 executados, 24 commits nesta
+sessão (9 domínios + emenda doc + ssh_util + sync split + api tests + fmt),
+TRIO 100% verde no último commit. Zero push. VM intocada. Arquivos >
+1000 l. que SOBRAM são os coesos que o plano manteu de propósito
+(observe.rs, state.rs, ciclo.rs do fluxd, deploy/edge/waf/router).
+
+**O que NUNCA fazer**: encadear gate com `;` (o commit passa com fmt
+vermelho); confiar no `cargo fix` para preservar re-exports usados só por
+target externo (em binário, `pub use` sem consumidor interno é removido —
+allow explícito); mapear teste por substring do corpo (doc-comment mentindo
+o destino); parsear `pub(crate)` com regex de `pub ` (o sufixo quebra o
+match — foi o bug silencioso do primeiro split do sync).
+
 ## 18/10/2026 (parte 9) — execução da refatoração: 37/41 passos, TRIO+G verdes, VM clone para teste
 
 **Pedido do Gabriel**: "vai com tudo" — executar o plano, subindo uma CÓPIA
