@@ -369,40 +369,21 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
     // E RUNNING deixa de valer "awake" (06, fecha o F9): só merece "awake"
     // com o `[health] path` RESPONDENDO; app no ar sem responder = "waking" —
     // o `flux up` continua esperando em vez de celebrar cedo.
+    // L5.4: a regra F9 (RUNNING + health → awake/waking) vive em
+    // docker::estado_dev_rotulado — handler vira mapeamento HTTP. JSON igual.
     let dev_container_state = match app.docker.as_ref() {
-        Some(d) => Some({
-            use crate::decision::HostSource;
-            let estado =
-                crate::docker::DockerSource::new(d.clone(), &app.state).env_state(&name, Env::Dev);
-            if estado == flux_common::protocol::ContainerState::Awake {
-                let saudavel = match crate::docker::alvo_app(
-                    d,
-                    &crate::docker::compose_project(&name, Env::Dev),
-                )
-                .await
-                {
-                    Ok(Some(target)) => {
-                        let path = app
-                            .state
-                            .project_toml(&name)
-                            .ok()
-                            .flatten()
-                            .and_then(|s| ProjectToml::parse_str(&s).ok())
-                            .map(|t| t.health_path().to_owned())
-                            .unwrap_or_else(|| "/up".into());
-                        crate::compose::saude_ok(&app.http, &target, &path).await
-                    }
-                    _ => false,
-                };
-                if saudavel {
-                    "awake".to_owned()
-                } else {
-                    "waking".to_owned()
-                }
-            } else {
-                estado.as_str().to_owned()
-            }
-        }),
+        Some(d) => Some(
+            crate::docker::estado_dev_rotulado(
+                d,
+                &app.state,
+                &name,
+                app.http.clone(),
+                |client, target, path| async move {
+                    crate::compose::saude_ok(&client, &target, &path).await
+                },
+            )
+            .await,
+        ),
         None => None,
     };
 

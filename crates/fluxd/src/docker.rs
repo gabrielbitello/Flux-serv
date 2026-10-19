@@ -31,6 +31,54 @@ pub fn compose_project(name: &str, env: Env) -> String {
     format!("flux-{name}-{env}")
 }
 
+/// Rótulo DEV com a regra F9 (06): RUNNING só é "awake" com o `[health]`
+/// RESPONDENDO; app no ar sem responder = "waking" (o `flux up` continua
+/// esperando em vez de celebrar cedo). Demais estados passam CRU — nunca
+/// inventado. Função PURA: os 3 ramos caracterizados sem engine (L5.4).
+pub(crate) fn rotulo_dev(estado: ContainerState, saudavel: bool) -> &'static str {
+    if estado == ContainerState::Awake {
+        if saudavel { "awake" } else { "waking" }
+    } else {
+        estado.as_str()
+    }
+}
+
+/// Tudo que o handler de status precisa para o rótulo DEV: estado do engine
+/// (verdade) + probe de saúde sobre o alvo do app. `probe` INJETÁVEL — o
+/// real é `compose::saude_ok(&http, target, path)`; o path de health vem do
+/// TOML gravado (default `/up`). Sem engine → estado cru da fonte SQLite.
+pub(crate) async fn estado_dev_rotulado<P, Fut>(
+    docker: &Docker,
+    st: &crate::state::State,
+    name: &str,
+    client: crate::proxy::ProxyClient,
+    probe: P,
+) -> String
+where
+    P: FnOnce(crate::proxy::ProxyClient, String, String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    use crate::decision::HostSource as _;
+    let estado = DockerSource::new(docker.clone(), st).env_state(name, Env::Dev);
+    if estado != ContainerState::Awake {
+        return estado.as_str().to_owned();
+    }
+    let saudavel = match alvo_app(docker, &compose_project(name, Env::Dev)).await {
+        Ok(Some(target)) => {
+            let path = st
+                .project_toml(name)
+                .ok()
+                .flatten()
+                .and_then(|s| flux_common::config::ProjectToml::parse_str(&s).ok())
+                .map(|t| t.health_path().to_owned())
+                .unwrap_or_else(|| "/up".into());
+            probe(client.clone(), target, path).await
+        }
+        _ => false,
+    };
+    rotulo_dev(estado, saudavel).to_owned()
+}
+
 /// Filtro de label de compose project — montagem PURA (testável sem engine).
 /// `Some(projeto)` = match exato; `None` = TODOS com o label (o chamador
 /// filtra prefixo — forma do teardown de worktrees, temporary.rs).
@@ -526,6 +574,27 @@ mod tests {
         assert_eq!(
             todos.get("label"),
             Some(&vec!["com.docker.compose.project".to_owned()])
+        );
+    }
+
+    /// L5.4: os 3 ramos do rótulo F9, caracterizados SEM engine.
+    #[test]
+    fn rotulo_dev_cobre_os_tres_ramos() {
+        use flux_common::protocol::ContainerState;
+        assert_eq!(
+            rotulo_dev(ContainerState::Sleeping, true),
+            "sleeping",
+            "não-Running passa cru — nunca inventado"
+        );
+        assert_eq!(
+            rotulo_dev(ContainerState::Awake, true),
+            "awake",
+            "Running + health respondendo = awake"
+        );
+        assert_eq!(
+            rotulo_dev(ContainerState::Awake, false),
+            "waking",
+            "Running sem health = waking (o up continua esperando)"
         );
     }
 
