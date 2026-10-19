@@ -427,7 +427,8 @@ fn run(bin: &str, args: &[String]) -> Result<String, SyncError> {
 
 /// Extrai o identifier da resposta do `sync create`
 /// ("Created session <identifier>", `cmd/mutagen/sync/create.go`). Público
-/// porque o CLI também usa para exibir o id em modo verboso.
+/// para os testes de integração via ponte `#[path]` (sync_tests.rs);
+/// consumo interno em `create`.
 pub fn parse_created_id(saida: &str) -> Result<String, SyncError> {
     // A saída do mutagen vem com texto de progresso ANTES da confirmação
     // ("Creating session… Connecting to agent… Created session sync_X") —
