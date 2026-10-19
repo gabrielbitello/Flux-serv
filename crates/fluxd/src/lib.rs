@@ -23,6 +23,7 @@ pub mod router;
 pub mod sleep;
 pub mod sqlite_source;
 pub mod state;
+pub mod sweep;
 pub mod sync;
 pub mod temporary;
 mod ui;
@@ -129,35 +130,10 @@ pub async fn serve(
     // No MESMO tick roda a expiração dos dev temporários (14) — docker
     // opcional: sem engine o teardown ainda limpa dirs + SQLite (compose
     // é pulado com aviso no evento).
-    let shared_for_sweep = std::sync::Arc::clone(&shared);
-    {
-        let d = shared.docker.clone();
-        let global = global.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-            tick.tick().await; // primeiro tick dispara já — pula
-            loop {
-                tick.tick().await;
-                if let Some(d) = &d {
-                    let acoes = sleep::SleepManager::new(
-                        d.clone(),
-                        &shared_for_sweep.state,
-                        global.clone(),
-                    )
-                    .sweep()
-                    .await;
-                    for a in acoes {
-                        tracing::info!("{a}");
-                    }
-                }
-                let agora = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|t| t.as_secs() as i64)
-                    .unwrap_or(0);
-                temporary::expire_check(&shared_for_sweep.state, d.clone(), agora).await;
-            }
-        });
-    }
+    tokio::spawn(crate::sweep::iniciar(
+        std::sync::Arc::clone(&shared),
+        global.clone(),
+    ));
 
     // Sampler de recursos (13/16): coleta métricas de 30 s em `metrics_1min`,
     // retenção de 24 h e perícia de pico. O `iniciar` garante o schema,
