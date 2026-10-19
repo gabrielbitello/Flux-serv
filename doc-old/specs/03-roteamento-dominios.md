@@ -133,6 +133,40 @@ http://zcode-api-d.bitello.xyz {
   caminho público FORÇANDO o IP da borda (`curl --resolve host:443:IP-DA-CF
   https://host/...`) — `nslookup` não serve (ignora o hosts) e o caminho
   interno mente sobre o externo.
+#### HTTPS local pro Claude Desktop (19/10/2026)
+
+O Desktop valida o campo de endpoint e REJEITA `http://` (validação do app,
+sem toggle). Solução: o MESMO host em TLS da CA interna da Caddy (o curinga
+`*.bitello.xyz` já é `tls internal`), com a CA root importada no store do
+USUÁRIO do Windows (`certutil -user -addstore Root root.crt` — válido até
+2036) e o MESMO gate de token dos dois formulários de header:
+
+```caddy
+https://zcode-api-d.bitello.xyz {
+	tls internal
+	@sim_tls `{header.Authorization} == "Bearer {TOKEN}" || {header.x-api-key} == "{TOKEN}"`
+	handle @sim_tls {
+		reverse_proxy 127.0.0.1:8080
+	}
+	respond 401
+}
+```
+
+- O túnel público da CF cai AQUI também → sem token = 401 (o 403 incondicional
+  anterior virou gate; a proteção pública se mantém pelo token).
+- O `:80` aceita os DOIS formulários também (expression matcher CEL — matcher
+  nomeado repetido NÃO é OR na Caddyfile, é ERRO de adapt).
+- **Armadilha schannel**: curl/PowerShell no Windows falham com
+  `CERT_TRUST_REVOCATION_STATUS_UNKNOWN` (a CA interna não publica CRL/OCSP);
+  clients Chromium/Electron (Desktop) fazem soft-fail e funcionam. Teste de
+  curl precisa `--ssl-no-revoke`.
+- **Armadilha ssh**: backtick dentro de comando ssh com aspas duplas = command
+  substitution LOCAL — o heredoc viaja mastigado e a Caddy valida config com
+  matcher VAZIO (que casa TUDO = gate aberto!). Editar Caddyfile remoto via
+  script scpiado, nunca inline.
+- Provas: HTTPS sem token 401 · Bearer 200 · x-api-key 200 · POST real
+  200/1,9 s · HTTP sem token 401 (regressão).
+
 - O hostname no painel da CF (Zero Trust → tunnel) continua configurado;
   com o 403 do HTTPS e o 401 do HTTP, ficou inofensivo. Removê-lo lá é
   limpeza opcional.
