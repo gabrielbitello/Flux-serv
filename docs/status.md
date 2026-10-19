@@ -10,7 +10,7 @@ Baseline: the matrix in
 [`doc-old/STATUS.md`](../doc-old/STATUS.md) (snapshot 14/10/2026 morning:
 11 SIM · 24 PARCIAL · 11 NÃO), updated with the real repository state and
 this session's deliveries. Scoreboard for **this** matrix:
-**19 SIM · 17 PARCIAL · 11 NÃO** (47 items).
+**19 SIM · 17 PARCIAL · 11 NÃO** (47 items) → **20 SIM · 16 PARCIAL · 11 NÃO** after 2026-10-18/19 (R21 moved).
 
 ## Platform base
 
@@ -54,7 +54,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R18 | Encrypted `.env` + panel read-only | **NÃO** — F12 |
 | R19 | VM save after 30 days | **NÃO** — `savestate` mapped; F13 |
 | R20 | Central warden wakes the VM | **NÃO** — F13 |
-| R21 | API wakes without breaking apps | **PARCIAL** — 503 JSON + `Retry-After` tested; hold/queue pending |
+| R21 | API wakes without breaking apps | **SIM** — `[sleep] api_hold` (opt-in per project): the router holds the API request while the project wakes, polls the TCP port, re-decides (90 s cap) — never a 503 for opted projects; proven live with zcode-api (wake 0.85 s, `/v1/messages` 200); commit `cbfe02f`. Non-opted projects keep the 503 JSON + `Retry-After` |
 | R22 | Staging hidden from bots | **SIM** |
 | R23 | robots/sitemap autogen in prod | **SIM** |
 | R24 | Metrics + alerts + log rotation | **PARCIAL** — 30 s sampler → 1 min rollup, 24 h retention, peak forensics, `/observe` page; outbound alerts and long curves pending |
@@ -68,6 +68,17 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R32 | Headers + own WAF | **PARCIAL** — SQLi + path scan in **enforce** 403 with LAN allowlist (proven: internet 403, LAN 200); headers and bad bots pending |
 | R33 | Public status page with classified cause | **NÃO** — `Cause` enum exists; F20 |
 | R34 | Prod DB backup (48 h / 7 d) | **NÃO** — F16 |
+
+## Delivered 2026-10-18/19
+
+| Delivery | Where |
+|---|---|
+| `[sleep] api_hold` — API requests held while the project wakes (never a 503; 90 s cap) → R21 **SIM** | commit `cbfe02f`; `crates/fluxd/src/router.rs`; [04-adormecimento](../doc-old/specs/04-adormecimento.md) |
+| zcode-api deployed on the platform: LAN-only host (no Cloudflare), credentials outside the sync tree (`/srv/flux/secrets/`), wake 0.85 s proven | Projetos/zcode-api; [03-roteamento-dominios](../doc-old/specs/03-roteamento-dominios.md) |
+| VM RAM 6144 → 6644 MB (zcode-api headroom) | [01-vm-hyperv](../doc-old/specs/01-vm-hyperv.md) |
+| Toolchain pinned (`rust-toolchain.toml`, 1.92.0) — fmt/clippy no longer drift with the host toolchain | branch `audit/modularizacao`; commit from the refactoring batch |
+| CI: `test-engine` job (dind + `FLUX_DOCKER_URL`) — the 3 Docker-gated tests now run for real, no longer passing empty | branch `audit/modularizacao`; `.github/workflows/ci.yml` |
+| Modularization refactoring EXECUTED: 30 of 34 plan steps (L0–L6 + L7.1), 49 commits, TRIO + real-engine gate green; L7.2–L7.5 documented as mechanical follow-ups | branch `audit/modularizacao`; [refactoring/execution-plan.md](refactoring/execution-plan.md) |
 
 ## Delivered in this session (2026-10-17)
 
@@ -115,3 +126,4 @@ matrix and its full history live in
 |---|---|
 | 2026-10-14 | Initial English documentation (matrix rebased on doc-old/STATUS.md + this session's deliveries) |
 | 2026-10-14 | Post-session pass: new entries anchored to their commits (`89886e0`, `66a22e5`); verification level recorded |
+| 2026-10-18/19 | R21 → SIM (`api_hold`, `cbfe02f`); zcode-api on the platform (LAN-only, secrets out of the sync tree); refactoring executed on `audit/modularizacao` (30/34 steps, structural only, zero behavior change) |
