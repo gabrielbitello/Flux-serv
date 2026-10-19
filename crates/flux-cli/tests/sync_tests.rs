@@ -1,10 +1,12 @@
-//! Testes do módulo de sync (spec 02). Ponte `#[path]` sobre `src/sync.rs`:
-//! o main.rs ainda não declara o módulo (o integrador liga), mas o target de
-//! testes o compila como módulo avulso — mesmas deps do pacote, sem tocar o
-//! binário. Quando o integrador declarar `mod sync;`, este arquivo segue
-//! válido (os testes passam a rodar contra o módulo declarado, não a cópia).
+//! Testes do módulo de sync (spec 02). Ponte `#[path]` sobre `src/sync/mod.rs` —
+//! PERMANENTE, não transitória: `main.rs` JÁ declara `mod sync;`, mas crate
+//! só-binário (sem [lib]) não expõe módulos a testes de integração, então o
+//! target recompila `src/sync.rs` como módulo avulso — mesmas deps do pacote,
+//! sem tocar o binário. Constraint da ponte: `src/sync.rs` não pode
+//! referenciar `crate::` do main.rs (a quebra é pega pelo clippy
+//! --all-targets do ci.yml — barulhenta, não silenciosa).
 
-#[path = "../src/sync.rs"]
+#[path = "../src/sync/mod.rs"]
 mod sync;
 
 use std::path::{Path, PathBuf};
@@ -58,17 +60,20 @@ fn spec_local(tag: &str) -> (SyncSpec, PathBuf, PathBuf) {
     let alpha = tmp_dir(&format!("{tag}-alpha"));
     let beta = tmp_dir(&format!("{tag}-beta"));
     escrever(&alpha, "README.md", "v1");
-    (
-        SyncSpec::new(
-            &format!("sync-{tag}"),
-            alpha.clone(),
-            Beta::Local(beta.clone()),
-            None,
-        )
-        .unwrap(),
-        alpha,
-        beta,
+    let spec = SyncSpec::new(
+        &format!("sync-{tag}"),
+        alpha.clone(),
+        Beta::Local(beta.clone()),
+        None,
     )
+    .unwrap();
+    // Teste que panica não chega ao terminate do chamador: a sessão órfã
+    // envenena a próxima criação ("config vigente é a da criação original;
+    // ignores novos só entram com flux sync reset") e o sync nunca converge
+    // para os tempdirs novos. Cleanup best-effort ANTES de criar (Err =
+    // não existia, ignorado de propósito).
+    let _ = sync::terminate(&spec.session());
+    (spec, alpha, beta)
 }
 
 // ------------------------------------------------------- pureza: sessão/args
@@ -139,18 +144,51 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
     // 18/10: public/{fonts,css,js} saíram — asset publicado commitado no repo
     // (filament:assets do vippers) precisa sincronizar; artefato de build vive
     // em public/build/, que continua ignorado.
+    // 18/10 parte 2: vendor/, node_modules/ e storage/ ancorados na raiz —
+    // padrão solto casava qualquer nível e engolia
+    // resources/views/vendor/ (override de blade Laravel oficial).
     assert_eq!(
         sync::GLOBAL_IGNORES,
         &[
             ".env",
             ".env.*",
             "public/hot",
-            "vendor/",
-            "node_modules/",
+            "/vendor/",
+            "/node_modules/",
             "public/build/",
-            "storage/",
+            "/storage/",
         ]
     );
+}
+
+#[test]
+fn dirs_gerados_da_raiz_nao_engolem_aninhados() {
+    // resources/views/vendor/ é override de blade Laravel oficial: o segmento
+    // "vendor" aninhado TEM que sincronizar — o ignore vale pro dir da raiz.
+    let spec = SyncSpec::new(
+        "vippers",
+        PathBuf::from("a"),
+        Beta::Local(PathBuf::from("b")),
+        None,
+    )
+    .unwrap();
+    let ignores = spec.ignores();
+    assert!(!crate::sync::caminho_ignorado(
+        "resources/views/vendor/filament-tables/index.blade.php",
+        &ignores
+    ));
+    assert!(crate::sync::caminho_ignorado(
+        "vendor/laravel/framework",
+        &ignores
+    ));
+    assert!(crate::sync::caminho_ignorado(
+        "storage/framework/views/x.php",
+        &ignores
+    ));
+    assert!(!crate::sync::caminho_ignorado(
+        "app/Support/storage-notes.md",
+        &ignores
+    ));
 }
 
 #[test]
@@ -164,7 +202,8 @@ fn extra_ignore_adiciona_e_nunca_subtrai_globais() {
     .unwrap();
     // Projeto tenta "adicionar" um global de novo e um novo padrão: global não
     // duplica, novo entra no fim (globais primeiro, ordem estável).
-    spec.extra_ignore = vec!["vendor/".into(), "resources/svg/**".into()];
+    // ".env" segue global solto: tentar "adicionar" de novo não duplica.
+    spec.extra_ignore = vec![".env".into(), "resources/svg/**".into()];
     let ignores = spec.ignores();
     assert_eq!(ignores.len(), sync::GLOBAL_IGNORES.len() + 1);
     for (i, global) in sync::GLOBAL_IGNORES.iter().enumerate() {
@@ -413,7 +452,7 @@ fn for_project_le_nome_e_extra_ignore_do_flux_toml() {
     escrever(
         &dir,
         "flux.toml",
-        "name = \"vipers\"\n\n[sync]\nextra_ignore = [\"resources/svg/**\", \"vendor/\"]\n",
+        "name = \"vipers\"\n\n[sync]\nextra_ignore = [\"resources/svg/**\", \".env\"]\n",
     );
     let spec = SyncSpec::for_project(&dir, Beta::Local(PathBuf::from("C:\\b")), None).unwrap();
     assert_eq!(spec.project, "vipers");
@@ -470,8 +509,17 @@ fn gated_sync_real_exclui_globais_e_propaga_edicao_e_delete() {
     escrever(&alpha, "storage/framework/cache/x", "cache");
     escrever(&alpha, "public/hot", "espiã do npm run dev");
     escrever(&alpha, "public/build/app.js", "artefato");
+    // NOTA DE CONTRATO (19/10): `.gitignore` NÃO é respeitado pela sessão —
+    // a spec 02:67 promete `respectGitignore = true`, mas `create_args` nunca
+    // mandou o flag (desde F2, e959857). Aqui codifica-se o contrato REAL
+    // (GLOBAL_IGNORES + extra_ignore); implementar o flag é FEATURE, fora do
+    // escopo da refatoração — gap registrado no diário e na spec 02.
     escrever(&alpha, ".gitignore", "ignorado.log\n");
-    escrever(&alpha, "ignorado.log", "via .gitignore");
+    escrever(
+        &alpha,
+        "ignorado.log",
+        "via .gitignore — CRUZA (sem respectGitignore, gap registrado)",
+    );
 
     let id = sync::create(&spec).unwrap();
     assert!(!id.is_empty());
@@ -495,7 +543,9 @@ fn gated_sync_real_exclui_globais_e_propaga_edicao_e_delete() {
     );
 
     // Exclusões obrigatórias (aceite 3 e "o que NUNCA fazer"): nada de segredo,
-    // dependência, estado, artefato de build ou .gitignore.
+    // dependência, estado ou artefato de build. `ignorado.log` CRUZA de
+    // propósito — sem `respectGitignore`, `.gitignore` não é filtro (gap da
+    // spec 02:67 registrado; ver NOTA DE CONTRATO acima).
     for proibido in [
         ".env",
         ".env.local",
@@ -504,13 +554,18 @@ fn gated_sync_real_exclui_globais_e_propaga_edicao_e_delete() {
         "storage",
         "public/hot",
         "public/build",
-        "ignorado.log",
     ] {
         assert!(
             !beta.join(proibido).exists(),
             "`{proibido}` NUNCA deveria cruzar para o beta"
         );
     }
+    // E o cruzamento do gitignored é ASSERTIDO — o teste trava o contrato
+    // real; se um dia o flag entrar, ESTE teste quebra e o mapa atualiza.
+    espera(
+        || beta.join("ignorado.log").is_file(),
+        "ignorado.log deveria CRUZAR (sem respectGitignore hoje)",
+    );
 
     // Edição propaga (aceite 1: < 5 s típico).
     std::fs::write(alpha.join("README.md"), "v2").unwrap();

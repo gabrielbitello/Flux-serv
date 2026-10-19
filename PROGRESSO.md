@@ -2,6 +2,437 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+
+## 19/10/2026 (parte 3) — validação runtime TOTAL autorizada: CLI inteiro, fluxd deployado na VM, regressão verde
+
+**Ordem do Gabriel**: "n to usando o flux meu, pode fazer tudo e VC deve
+testar tudo que já tinha antes e garantir que TUDO ta funcionando na versão
+nova". Sandbox = djm (dormindo, sem uso); zcode-api só leitura (é a API
+desta conversa); vippers só o toggle live (idempotente).
+
+**CLI novo (release merged) — matriz completa, tudo que existia antes**:
+`status` nos 3 projetos ✓ · `ps` fora/dentro ✓ · `sync status` com sessão
+REAL (flux-vippers: alpha 6812/beta 6883, 71 pendências) ✓ · `logs --tail`
+em container morto ✓ · `logs -f` (SSE) preso até o timeout matar
+(rc=124=correto; o "exit 0" da 1ª tentativa era ruído do `head`) ✓ ·
+**`up` no djm: ciclo completo** — wake pollado 174 s, silêncio de árvore
+(rodada 1/3), 46 migrations, awake com lease, "pronto" ✓ · `exec` exit 0 E
+exit 42 repassado ✓ · `exec php -v` ✓ · **`build`: 3 m 08 s, vite na VM,
+[4/4] exit 0** (1ª tentativa bateu no erro honesto do scanner de
+estabilidade: `homepage.blade.php` deletado sem commit no repo do Gabriel —
+comportamento idêntico ao binário velho, movimento verbatim; testei o resto
+restaurando o arquivo de HEAD e re-deletando: estado líquido idêntico) ·
+**`env pull`+`push` roundtrip: md5 da VM idêntico antes/depois**
+(3365 bytes; draft local dele com backup e restaurado) ✓ · `live OFF`→`ON`
+no vippers: toml NET-ZERO (md5 igual), bak ciclando ✓ · `live` em projeto
+sem [dev] (djm): erro honesto ✓ · `token generate`: token gravado, auth dos
+OUTROS projetos intacta (token é por projeto) ✓ · `vm ssh`: interativo por
+design (sem BatchMode; sem TTY não roda daqui) ✓ · `down` devolve djm ao
+estado inicial (containers exited) ✓. Armadilha que voltou a morder:
+`flux build | tail` reportava exit 0 com erro — o pipe engole o exit code
+(já estava na lista NUNCA; medi sem pipe: exit 1 real).
+
+**Deploy do fluxd refatorado na VM**: tar do workspace → `~/flux-src`
+(sem o pin de toolchain — VM tem rustc 1.99 e já buildava) →
+`cargo build --release -p fluxd` em 25 s → **backup
+`fluxd.bak-20261019` → stop → mv (não cp, Text file busy) → start**.
+`systemctl is-active` = active.
+
+**Regressão pós-deploy — tudo verde**: API :7420 via túnel responde pros 3
+projetos ✓ · **painel :7421** (bind 127.0.0.1 por design — o 000 do curl
+direto era expectativa errada minha, o WARN do próprio log é a doc):
+login POST 303 (Argon2), dashboard 200, `/observe` 200 com dados "24 h",
+`<meta noindex>` presente ✓ · **página de espera REAL capturada pela
+internet**: `https://djm-d.bitello.xyz/` com djm dormindo = **200 +
+`x-robots-tag: noindex, nofollow, noarchive` + branding** — o R4 move pra
+SIM na matriz ✓ · 404 brandiado de host desconhecido (404 + "Flux") ✓ ·
+WAF path scan pela internet: **403** ✓ · zcode-api: HTTP 200 dormindo
+(HTTPS 000 = esperado — host LAN-only é HTTP-only, sem TLS) ✓ · SSE de
+logs contra o fluxd NOVO: stream preso 10 s (rc=124) ✓ · sessão do Claude
+Code (que passa pelo zcode-api) viva o tempo todo, inclusive durante o
+restart do fluxd ✓.
+
+**Estado final**: CLI e fluxd na versão refatorada, validados ponta a ponta
+em runtime. Master ainda sem a refatoração (PR #1 aguarda revisão). djm de
+volta dormindo como estava; sessão mutagen `flux-djm` criada pelo up (estado
+normal pós-up). Rollback do fluxd: `cp /usr/local/bin/fluxd.bak-20261019`.
+
+**O que NUNCA fazer** (novas entradas): testar exit code atrás de pipe
+(`| tail`/`| head` engolem — medir sem pipe ou PIPESTATUS); curl no painel
+direto no IP da VM — ele binda loopback, entrar por túnel ssh.
+
+## 19/10/2026 (parte 2) — merge do master + binário do dia a dia atualizado, branch pushada
+
+**Ordem do Gabriel**: "pode dar merge, pode dar push".
+
+**Merge `master` → `audit/modularizacao`**: 2 conflitos, ambos resolvidos —
+`router.rs` (o `NOINDEX` que o master tinha no local virou
+`crate::ui::NOINDEX` no L4.4; só `WAKE_HOLD_TIMEOUT_SECS` entra, com a nota;
+o hold de API do `cbfe02f` e a refatoração convivem — config.rs auto-mergeou:
+api_hold + image_guard removida são regiões distintas) e `PROGRESSO.md`
+(união dos diários). TRIO verde pós-merge: 215 testes no fluxd (+1 do
+api_hold do master), 36 no flux-cli, 24+12 na ponte do sync.
+
+**Binário do dia a dia ATUALIZADO**: `cargo build --release` no código
+merged (16,5 s) — o shim `~/bin/flux` agora roda refatoração + api_hold.
+Smoke com o shim: `flux status` no zcode-api (parseia api_hold), `flux ps`
+fora de projeto e `flux status` no djm — saída idêntica à de antes.
+O `fluxd` da VM SEGUE no binário de master (deploy é passo separado, não
+pedido).
+
+**Push**: branch `audit/modularizacao` pushada para o origin (primeiro push
+— 68 commits locais). Master local e remoto INTOCADOS: landar a refatoração
+no master é a próxima decisão, depois de o Gabriel validar no uso.
+
+**PR #1 aberto** (audit/modularizacao → master) — o ci.yml não dispara em
+push de branch qualquer (`on: push: branches: [main, master]` +
+`pull_request:`), então o PR é o gatilho do CI. 1ª rodada VERMELHA no `fmt`:
+o step `dtolnay/rust-toolchain@stable` instala clippy/rustfmt no STABLE, o
+rustup vê o `rust-toolchain.toml` (pin 1.92.0, L0.1) e baixa a pinada SEM
+componentes — `cargo-fmt is not installed`. Fix: os 2 steps do ci.yml
+passam a `@1.92.0` (mesma versão do pin). **2ª rodada 100% VERDE: job
+`test` ✓ e job `test-engine` ✓** (os 3 testes gated de Docker rodaram no
+dind do CI pela primeira vez na história do repo). Falha pré-existente do
+CI no MASTER desde 18/10 (21 s, mesmo drift de rustfmt) — o pin da branch
+conserta; o merge do PR apaga o vermelho.
+
+## 19/10/2026 — L7.2–L7.5 fechados: refatoração 41/41, plano EXECUTADO POR INTEIRO
+
+**Pedido do Gabriel**: "ent pode ir com tudo" — os 4 passos pendentes
+(mecânicos, documentados como follow-up de sessão dedicada).
+
+**Como rodou (a lição das 2 tentativas revertidas virou método)**: um
+domínio por vez, commit por módulo (o plano v1 já mandava: "um commit por
+módulo"), trio completo a cada commit. Script por domínio
+(`Temp/l72d.py`): fatia os símbolos por brace-matching, copia o bloco de
+`use` INTEIRO como superset (o excedente sai com `cargo fix --all-targets`)
+e distribui os 15 testes inline por mapa de nomes EXPLÍCITO (nada de
+fuzzy por substring — causa de erro silencioso). Consertos por classe de
+erro, todos declarados: caminhos inline `tunel::`/`api::` viram
+`crate::...` (módulo filho não resolve a raiz); `pub(crate)` em tudo que
+viajou; nenhum `pub` além de `pub(crate)` (aceite cumprido).
+
+**L7.2 (10 commits)**: `main.rs` 2483→462 l. — `comandos/{up,ciclo,logs,
+sync_cmd,build,watch,env_cmd,live,tokens}.rs` + `mod.rs`. main() e a
+árvore clap ficam; 15 testes viajam com seus domínios (up 4, logs 5,
+tokens 2, build 2, live 1, sync_cmd 1). Emenda v2 no mesmo passo: doc do
+main.rs declara a EXCEÇÃO real (3 rotas ssh→docker: build flock, live OFF,
+container_do_servico) e a convenção `flux-{name}[-{env}|-@{slug}-{env}]`
+vira contrato registrado nos 4 pontos (sync.rs, ciclo.rs, watch.rs, live.rs).
+**L7.3**: `ssh_util.rs` — `ssh_alvo()` + `ssh_vm()` com os flags fixos; os 9
+sites só passam comando remoto e stdio; `vm_ssh` FORA de propósito
+(interativo quebra com modo batch); túnel :7420 mantém flags próprios de
+longa vida. `env_ssh_alvo` sai de cena. **L7.4**: `sync.rs` (1292 l.) →
+`sync/{mod,spec,estabilidade}.rs` — directory/mod.rs (formato OBRIGATÓRIO
+da ponte `#[path]`); `git diff main.rs` VAZIO; superfície `sync::*
+preservada por re-export COM `#[allow(unused_imports)]` (em crate binário,
+`pub use` sem consumidor interno é "unused" — o allow é o CONTRATO da
+ponte, não concessão; o `cargo fix` comeu os re-exports 2× até o allow
+entrar); VM_USER/VM_HOST ficam em mod.rs (fonte única L2.5), spec.rs usa
+`super::` — `crate::` quebraria o compile standalone; helpers de teste
+`git_disponivel`/`repo_temp` moram em estabilidade (servem os DOIS grupos —
+o plano presumia spec, ranges velhos); sync_tests diff = só a linha do
+`#[path]`; 24 externos + 12 internos, mesma contagem. **L7.5**: bloco de
+testes do `api.rs` (mock do fluxd + 14 testes) → `api/tests.rs`; produção
+fica em 730 l.; layout `foo.rs + foo/tests.rs`, acesso privado preservado
+por descendência.
+
+**Smoke read-only (binário debug, release do shim intocado)**: `flux ps`
+fora de projeto lista os containers do djm; `flux status` dentro do djm
+idêntico ao de antes; `flux sync status` fora erra com a mensagem certa;
+fora de projeto o aviso do contexto herdado sai e o erro lista os
+registrados. **Divergência mapeada (não é regressão)**: o binário da branch
+rejeita `api_hold` no flux.toml do zcode-api — `cbfe02f` (api_hold) está no
+MASTER e NÃO na branch: o fork da `audit/modularizacao` é anterior ao
+trabalho do zcode-api. O delta 19/10 do plano já avisava ("re-ler
+router.rs e config.rs"). Prova: o shim (release, build do master) parseia o
+mesmo flux.toml sem erro. **Antes de landar a branch: merge do master
+(NÃO rebase — 60+ commits locais)**; conflitos esperados em config.rs e
+router.rs (o hold de API e o image_guard removido moram nos mesmos
+arquivos).
+
+**Erros meus registrados**: 1 commit saiu com `cargo fmt --check` vermelho
+(encadeei o gate com `;` em vez de `&&`) — corrigido no commit seguinte e
+o trio desse commit está integralmente verde; a armadilha do `grep -c`
+(0 match = exit 1) quebrou 2 cadeias de gate — já estava na lista "o que
+NUNCA fazer" e voltou a morder.
+
+**Estado final**: 41/41 passos do plano v2 executados, 24 commits nesta
+sessão (9 domínios + emenda doc + ssh_util + sync split + api tests + fmt),
+TRIO 100% verde no último commit. Zero push. VM intocada. Arquivos >
+1000 l. que SOBRAM são os coesos que o plano manteu de propósito
+(observe.rs, state.rs, ciclo.rs do fluxd, deploy/edge/waf/router).
+
+**O que NUNCA fazer**: encadear gate com `;` (o commit passa com fmt
+vermelho); confiar no `cargo fix` para preservar re-exports usados só por
+target externo (em binário, `pub use` sem consumidor interno é removido —
+allow explícito); mapear teste por substring do corpo (doc-comment mentindo
+o destino); parsear `pub(crate)` com regex de `pub ` (o sufixo quebra o
+match — foi o bug silencioso do primeiro split do sync).
+
+## 18/10/2026 (parte 9) — execução da refatoração: 37/41 passos, TRIO+G verdes, VM clone para teste
+
+**Pedido do Gabriel**: "vai com tudo" — executar o plano, subindo uma CÓPIA
+da VM para teste (nada de derrubar o que estava em uso).
+
+**Infra de teste**: VM `FluxTest` clonada ao vivo da `Flux` (snapshot
+`pre-clone-test` tirado e APAGADO — regra snapshot), NIC2 (host-only .2)
+desconectada — zero colisão de IP; ssh via `natpf1` 127.0.0.1:2223; dockerd
+tcp no loopback do guest (:2375); túnel ssh `-L 127.0.0.1:2375` no host.
+Gate **G** (`FLUX_DOCKER_URL=tcp://127.0.0.1:2375`) vivo pela primeira vez.
+
+**Baseline (3 commits de estilo)**: fmt/clippy estavam vermelhos no master
+SEM mudança de código (rustfmt 1.92 divergiu do stable do último CI) — prova
+viva do L0.1. Corrigidos como commits separados antes de qualquer movimento.
+
+**Passos executados (cada um = 1 commit, TRIO verde local; G onde exigido)**:
+
+- **L0** (4/4): L0.1 `rust-toolchain.toml` pin 1.92.0; L0.2 job
+  `test-engine` (dind + FLUX_DOCKER_URL, suíte completa — os 3 testes
+  gated de engine rodaram DE VERDADE no clone: 12s/2s/12s); L0.3 mutagen
+  0.18.1 pinado com checksum — o gate EXPOSIU o gap `.gitignore` (spec
+  02:67 promete `respectGitignore`, `create_args` nunca mandou o flag desde
+  F2) e a poluição de sessão órfã entre testes (spec 02 registrada,
+  `spec_local` termina sessão órfã antes de criar); L0.4 noindex em toda
+  resposta de dev (página de espera, 503 JSON, robots.txt).
+- **L1** (8/8): Busy morto, db.rs→migrations.rs, sha2 fora, hash_path
+  privado, Causa removida, docs verazes (parse_created_id, ponte #[path]),
+  raiz de projetos → paths.rs.
+- **L2** (6/6): `nomes.rs` contrato único (5 cópias → 1), image_guard
+  removida (config global da VM conferida no clone: chave ausente), regra de
+  hosts em host.rs, wizard usa Framework::from_str + round-trip de TOML,
+  VM_HOST/VM_USER fonte única em sync.rs (inversão: a ponte #[path] exige
+  sync.rs autossuficiente).
+- **L3** (4/4): listagem por label FONTE ÚNICA (docker::listar_label, erro
+  propaga — declarado); DockerSource delega consultas ao SqliteSource;
+  exec container UNIFICADO (docker::exec_no_app, ExecSpec com as diferenças
+  deliberadas como campos; db ganha teto 4 MiB); registro pós-up warna
+  falha (nada silencioso).
+- **L4** (5/5): XSS latente nos valores interpolados (wait/failed/
+  branch_missing); croma público DONO ÚNICO pages.rs; esc do painel delega;
+  ui.rs com NOINDEX/CSS_ADMIN (a cópia que "era verbatim" já tinha
+  divergido); render_monitor 264→33 l. em 4 fn.
+- **L5** (6/6): sweep.rs (política de tick fora do composition root);
+  erro/garante_projeto FONTE ÚNICA (api.rs, cópias em ciclo+deploy fora);
+  gate 09 em api/auth.rs; regra F9 caracterizada em docker.rs
+  (rotulo_dev puro 3 ramos + probe injetável); montagem de proxy única
+  (wire-format ws preservado); cooldown pós-acordar fn única.
+- **L6** (3/3): bluegreen.rs (domínio blue-green, 2 consumidores por
+  caminhos distintos); classificar_de pura (teste exercita a REGLA REAL, a
+  cópia foi apagada); panel.rs → painel/{mod,leitura,formato,paginas,tests}
+  (CONSULTA × APRESENTAÇÃO separadas; curva dividida contagem/SVG).
+- **L7** (1/5): L7.1 contexto.rs ✓. L7.2–L7.5 (comandos/ por domínio,
+  ssh helper, sync submódulos, api tests) — mecânicos, ficam para a próxima
+  sessão (a extração L7.2 foi tentada e revertida por volume de acerto de
+  imports; o algoritmo está correto, o volume é grande demais para
+  uma passada).
+
+**Estado final (19/10, fechamento)**: 51 commits na branch
+`audit/modularizacao` — **37 dos 41 passos do plano v2** (L0–L6 e L7.1;
+contagem corrigida 19/10: "30/34" contava só os commits com tag literal
+`refactor(L*)` — L0 veio como ci/test, L4.1 como fix, L1.6/L1.7 como docs;
+"34" era a frase da revisão v2 tomada como total) + 3 baseline de estilo +
+docs/specs/diário; 59 arquivos, +5613/−3428. TRIO local + gate G (via clone)
+100% verdes no último commit de código (L7.1, 92778dd). Zero push. VM
+original INTACTA e rodando. Clone `FluxTest` desligado e APAGADO no
+fechamento (regra: infra de teste não sobra) — 45 GB liberados em
+E:\flux\vms, zero snapshot restando em qualquer VM.
+
+**O que NUNCA fazer**: confiar no pipe `cargo ... | tail` para exit code
+(engole falhas de compile/clippy — usar `bash trio.sh` com pipefail ou
+PIPESTATUS); aplicar L7.2 de uma vez (o split por domínio exige
+compilação iterativa arquivo por arquivo); esquecer de APAGAR snapshots
+da VM clone (regra: quem tira, apaga).
+
+
+## 18/10/2026 (parte 8) — auditoria de modularização multiagente: 41 propostas revisadas e plano P0–P3, sem tocar código
+
+**Intenção** (pedido do Gabriel): auditoria completa do repo contra o
+anti-monolito (a fase de planejamento da spec 19), rodada como workflow
+multiagente em branch separada, com a VM intocada.
+
+**Como rodou**: workflow `dwfrun-2f9bbdc8`, 19 subagentes — 7 auditores por
+domínio (núcleo fluxd, rede, painel/observabilidade, dados/db, CLI,
+flux-common, testes+CI), 9 focos dedicados aos arquivos acima de 1000 linhas,
+1 mapeador de dependências, 1 revisor independente (Agente G da spec) e 1
+editor do plano; 17 em paralelo. Cobertura conferida por gate determinístico:
+51/51 itens in-scope auditados (44 `.rs` + manifestos/CI).
+
+**Entrega**: `docs/refactoring/` com 7 documentos (1569 linhas) — README,
+inventory, file-audit, architecture-findings, dependency-map, execution-plan
+(o plano canônico: 8 lotes, cada passo com evidência `path:linha`,
+movimento origem→destino, testes de regressão, validação com os comandos
+reais do `ci.yml`, risco, esforço e aceite) e coverage-manifest. 41 propostas:
+36 aprovadas, 5 ajustadas pelo revisor, 0 rejeitadas.
+
+**Teses centrais**: o grafo de crates é um DAG sadio; `decision.rs` e
+`state.rs` têm fronteiras exemplares e ficam únicos (igualmente `observe.rs`).
+O ganho real está em: (1) ativar os 3 testes gated de Docker que PASSAM
+VAZIOS no CI — `ci.yml:26-27` roda `cargo test --workspace` sem
+`FLUX_DOCKER_URL` e os testes retornam cedo sem ela
+(`docker_integration.rs:14-17`, `sleep_integration.rs:14-21`,
+`schema_integration.rs:12-19`) — único P1 do plano; (2) deduplicar o que já
+divergiu em silêncio (validador de nome de projeto em 5 cópias, CSS/esc do
+croma, consultas SQLite copiadas no DockerSource); (3) 4 splits justificados:
+`flux-cli/main.rs` (2574), `panel.rs` (1985), `compose.rs` (1383),
+`flux-cli/sync.rs` (1286).
+
+**Registro de segurança (inferência, sem fix)**: `waf.rs:174-179` aceita
+`cf-connecting-ip` de qualquer origem e ele vence XFF/ConnectInfo — cliente
+com HTTP direto ao Caddy poderia forjar IP da allowlist LAN; a exploração
+depende de topologia (binds 127.0.0.1 em `lib.rs:172-174`, cloudflared
+sobrescreve o header no túnel). Documentado no plano, decisão com o Gabriel.
+
+**Estado**: branch `audit/modularizacao`, nada em `master`, nada na VM,
+`git status` provou que só `docs/refactoring/` surgiu. Próximo passo natural:
+executar o plano lote a lote (cada lote deixa o repo compilando e testando).
+
+**O que NUNCA fazer**: split cosmético por contagem de linhas (o revisor
+derrubou/ajustou os que não pagavam o custo); mover código sem teste de
+caracterização antes; executar proposta sem ler o veredito e o lote de que
+ela depende no execution-plan.
+
+## 18/10/2026 — zcode-api no flux (LAN-only, sem Cloudflare) + RAM 6,5 GB + hold de API
+
+**Pedido**: subir o zcode-proxy (`TriDefender/zcode-api`) DENTRO do flux na VM,
+exposto pro PC só na LAN; dormir podendo, mas dormir = demorar pra responder,
+nunca recusar (IDEs quebram); acordar rápido; responder no formato Anthropic;
++500 MB de RAM; spec atualizada depois da migrate; após isso, VM congelada
+até ordem.
+
+**Entregue**:
+
+- **Patch `feat(fluxd): [sleep] api_hold`** (default OFF — nenhum projeto
+  muda sem a flag): projeto dormindo/subindo com `api_hold = true` no TOML NÃO
+  devolve página de espera/503; o router (`router.rs`) segura a request,
+  emite `docker start`, polla estado + porta TCP (mesmo probe do live) e
+  re-decide; teto de 90 s e fallback honesto. 34 (common) + 222 (fluxd, 2
+  testes novos) verdes no host.
+- **Projeto `zcode-api`** (`Documents/Projetos/zcode-api`, repo próprio:
+  `33a9b15`+`fd92398`): imagem `ghcr.io/tridefender/zcode-proxy:latest`,
+  `provider: zai`, `plan: coding-plan` (expõe `/v1/messages` formato
+  Anthropic → `api.z.ai/api/anthropic`), `[sleep] idle_minutes = 10,
+  api_hold = true`, health `/health`, sem `ZCODE_PROXY_API_KEY` (LAN-only —
+  chave quebraria o health probe do flux, ver NUNCA fazer). Secret de
+  credenciais em `.env` (gitignored, `flux env push`).
+- **RAM 6144 → 6644 MB** (`modifyvm` com a VM desligada; poweroff→modifyvm→
+  start). Spec 01 atualizada.
+- **Caddy**: bloco `http://zcode-api-d.bitello.xyz → 127.0.0.1:8080`
+  (HTTP puro, LAN-only; `cloudflared` segue inativo). Wildcard HTTPS e os
+  demais hosts intocados (`vippers-d` continua 308 → HTTPS, controle OK).
+- **fluxd novo deployado** na VM (41 s de build; backup
+  `/usr/local/bin/fluxd.bak-20261018-preapihold`) e `flux.exe` rebuilt no
+  host (precisa parsear `api_hold`).
+- **Hold provado em runtime**: request com o projeto em crash-loop segurou
+  exatamente os 90 s do teto e caiu no fallback (200 página de espera — o
+  cliente curl era browser). Journal: `hold: porta de zcode-api
+  (172.21.0.2:8080) não abriu em tempo — segue fluxo normal`.
+
+**Resolvido na sequência (mesmo dia)**: OAuth `auth login zai` concluído;
+credenciais em `/srv/flux/secrets/zcode-api/credentials.json` — **fora da
+árvore de sync**: arquivos que nasciam no bind `./dados/credenciais` sumiam
+em segundos (3 probes: escreve no container → some do host; sessão mutagen
+sadia e sem propagar; causa raiz não perseguida até o fim — suspeito
+mutagen, FATO = dir sincronizado não é storage de segredo). **Wake medido
+com o hold real**: `docker stop` → request pelo chain Caddy→fluxd→proxy →
+HTTP 200 em **0,85 s (frio) / 0,84 s (morno)**; acordado, `/health` = 34 ms.
+`POST /v1/messages` respondeu **200 em formato Anthropic** (`type: message`,
+thinking, usage) com `glm-5.3-flash` em 3,4 s; `/v1/models` lista 11 GLM.
+Uso pelo IDE: **Claude Code CLI conectado e provado** — hosts do PC com
+`192.168.140.2 zcode-api-d.bitello.xyz` (entrada elevada, UAC) e
+`~/.claude/settings.json` com `env.ANTHROPIC_BASE_URL=http://zcode-api-d.bitello.xyz`,
+`ANTHROPIC_AUTH_TOKEN=zcode-lan-local` (proxy não valida), main
+`ANTHROPIC_MODEL=glm-5.3` (sonnet/opus mapeados idem) e haiku/small =
+`glm-5.3-flash`; `claude -p "responda apenas: ok"` → **`ok`** (aviso
+cosmético de contexto desconhecido — assume 200k). Nota: `claim` automático
+do proxy falha preview com `(3001) parameter error` e re-tenta em 600 s —
+erro do endpoint de promoção upstream, sem impacto no proxy.
+
+**Janela de contexto configurada (19/10)**: docs do Claude Code
+(`code.claude.com/docs/en/model-config`) + docs do z.ai: GLM-5.3 = **1M de
+contexto / 128K de saída**; glm-5.3-flash = 300K. Fix: env
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` no `settings.json` (vale pra IDs
+custom, que não começam com `claude-`) — o aviso de "assumes 200k" sumiu;
+resta só a tag `[claude-code:unrecognized_model]` (reconhecimento, sem efeito).
+Sufixo `glm-5.3[1m]` também funciona ponta a ponta (testado).
+
+**Verificação a pedido do Gabriel (19/10) — teto real medido na API**: a
+doc do z.ai lida DIRETO (não snippet) confirma 1M/128K pro 5.3; e o próprio
+upstream DECLARA o teto no erro 1210: `max_tokens ... 限制数值范围[1,131072]`
+— **131072 aceito e 200000 rejeitado, no glm-5.3 E no glm-5.3-flash**
+(128K da doc = 131072 binário). Com o cap do flash conhecido e IGUAL,
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS=131072` setado e testado — ganho real pro
+5.3 always-thinking (thinking conta no `max_tokens`; o 1º teste cortou no
+`max_tokens=16`). Contexto de 1M NÃO foi testado de verdade (1M de input
+queima cota) — é claim da doc. Se o Gabriel viu 300K, era o CONTEXTO do
+flash; 200K é o default do Claude Code pra modelo desconhecido.
+
+**Doc complementar (19/10, ok do Gabriel)**: `flux.toml.example` documenta
+`[sleep] api_hold` (`258db66`); spec 03 ganhou o padrão "host LAN-only sem
+Cloudflare = bloco `http://` por host no Caddy" com a prova do não-vazamento
+(`973b177`); plano da auditoria (`audit/modularizacao`) ganhou seção
+"Delta 19/10" registrando o código pós-auditoria — `api_hold` no
+`router.rs`/`config.rs` — e que nenhuma proposta ficou obsoleta (`15c40c2`).
+
+**Slots de modelo por esforço (19/10, pedido do Gabriel)**: haiku =
+flash+low, sonnet = flash+high, opus = flash+max, principal = glm-5.3 (o
+upstream defaulta `max`). Como os 3 slots compartilham o mesmo modelo
+upstream, virou **patch no proxy** (fork `Projetos/zcode-proxy-fork`,
+commit `43799ea`): sufixo no nome do modelo (`-low/-min/-high/-max`) é
+tirado e injetado como `reasoning_effort` no body (campo do endpoint
+Anthropic do z.ai; cliente ganha se mandar o campo; rollback
+`ZCODE_PROXY_EFFORT_SUFFIX=off`). 44 testes do transform verdes; imagem
+`zcode-proxy:effort` buildada na VM (`/srv/flux/build/zcode-proxy`, FORA da
+sync); `settings.json` com os 4 slots; provado por curl (low/max, log
+`[effort]` no container) e `claude -p` → `ok`. Patch arquivado em
+`Projetos/zcode-api/patches/` (`630ab1f`). Atualizar o fork upstream =
+re-aplicar patch → rebuild → recreate.
+
+**O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
+dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
+create failed` (por isso o `.gitkeep` em `dados/credenciais/`);
+`systemctl reload caddy` com `admin off` no Caddyfile (reload usa a API
+`:2019`, que está morta — usar `restart`, ~1 s de interrupção); subir
+`ZCODE_PROXY_API_KEY` sem antes resolver o `/health` que o fluxd sonda sem
+credencial (401 → projeto eternamente "falho" no painel); `flux env push`
+antes do diretório do projeto existir na VM (o push não cria pasta);
+**guardar segredo dentro da árvore sincronizada** (arquivos novos sumiram —
+segredo morre em `/srv/flux/secrets/`, fora do sync).
+
+## 18/10/2026 (parte 7) — redirects estáticos de host: entregues e DESLIGADOS no mesmo dia
+
+**Intenção** (pedido do Gabriel): DNS de `bitello.xyz` e `www.bitello.xyz`
+apontados pro túnel — o flux responderia 302 pro GitHub dele
+(`https://github.com/gabrielbitello`) em vez do 404 brandiado.
+
+**O que foi construído e revertido**: commits `cc791b1` (feat) + `aa01c61`
+(diário), revertidos por `9517331`/`b99e104`. `[redirects.hosts]` no config
+global: map host → destino, consultado pelo router ANTES da decisão de
+projeto, `302` + `Location` com `Cache-Control: no-store` (302 de propósito —
+trocar destino não fica preso em cache de browser). 4 testes novos, 34
+(flux-common) + 208 (fluxd) verdes, deployado, www provado pela internet.
+O código continua no histórico (`cc791b1`) — religar é revert do revert +
+seção no `/etc/fluxd/config.toml` + restart.
+
+**Por que desligou**: o apex `bitello.xyz` responde **200 com 0 bytes e sem
+Content-Type em qualquer path** e o journal do fluxd prova que a request
+NUNCA chega na VM (probe + `journalctl` no mesmo minuto, zero registro).
+As entradas do túnel estão iguais às do wildcard (`https://192.168.140.2:443`
+— Gabriel conferiu no painel), então o record DNS do apex aponta pra OUTRA
+coisa (túnel velho com `http_status:200` ou Worker route — decidir exige o
+painel CF, e ele não podia mexer na hora). Com só o www redirecionando, o
+estado ficava inconsistente; pedido dele: desfazer. VM restaurada dos
+backups (`fluxd.bak-20261018-redirects` volta a ser o binário vivo; binário
+com a feature salvo em `~/fluxd.com-redirects-20261018`; config
+`config.toml.bak-20261018` restaurado). Smoke pós-revert: www 404,
+vippers-d 200.
+
+**O que NUNCA fazer**: assumir que "apontar o DNS no painel" ligou o caminho
+até o fluxd — o record do apex era coisa distinta do túnel editado; provar
+sempre com probe externo + journal no mesmo instante. E `cp` em binário em
+uso é `Text file busy`: deploy de fluxd é `mv` (inode troca, processo vivo
+continua no arquivo velho).
+
 ## 18/10/2026 — fix da coleta de migrations (estado não mente mais sobre arquivo fora da sync) + reparo real da homolog vippers
 
 **Intenção** (pedido do Gabriel): durante o reparo da homolog do vippers
@@ -102,6 +533,112 @@ Lição registrada na spec 02: **ignorado ≠ commitado — repo trackeado é
 fonte da verdade e sincroniza; gerado em `public/build/` fica fora**.
 Sessões de sync vivas só pegam a lista nova recriadas (congela na
 criação) — vale para presente-digital e demais projetos.
+
+## 18/10/2026 (parte 4) — vendor/ ancorado na raiz: o tema blade do vippers nunca tinha sincronizado
+
+**Intenção** (pedido do Gabriel): "-d ainda diferente da prod — faltam
+botão de estatísticas, 'Last day', e os erros do F12 não existem na
+prod". Dica dele fechou o caso: a diferença NÃO era banco seed (1 vs 15
+afiliados) nem idioma (EN dev vs PT hml = dados), era o TEMA inteiro.
+
+**Causa raiz**: padrão `vendor/` solto na `GLOBAL_IGNORES` casa o
+segmento em QUALQUER nível (semântica gitignore) — engoliu
+`resources/views/vendor/filament-tables/` (override de blade Laravel
+OFICIAL: o tema custom do painel, 4 arquivos trackeados). O painel dev
+caía na toolbar default do Filament: sem dropdown de período
+("Last day"), sem painel de indicadores, sem stats. Probe reproduziu:
+sync não replica nada sob `resources/views/vendor/`. E os
+ReferenceErrors do F12 que ele viu no dev (zero na prod) caíram junto —
+pós-fix, página com **0 erros**.
+
+**Resultado real**: commits `ba83621` + `9faf85c`. `GLOBAL_IGNORES` com
+`/vendor/`, `/node_modules/`, `/storage/` ANCORADOS na raiz (dir gerado é
+o da raiz; aninhado é código). Bug no caminho: `padrao_casa` fazia
+`strip_suffix('/')` antes da âncora — `/vendor/` virava o segmento
+literal `"/vendor"` e não filtrava NADA (apanhado pelo
+`hash_da_arvore_ignora_globais_e_muda_com_conteudo`, que o pipeline com
+grep engoliu e commitou vermelho — violação da regra "pipeline nunca
+termina em grep"; consertado no commit seguinte com a suíte inteira sob
+`pipefail`, 86 verdes). Sessão recriada, blades na VM, Playwright:
+toolbar completa ("Last day" + toggle de tema), botão marrom
+`rgb(104, 26, 9)` = tema aplicado, 0 erros. Nota: o `<link>` do tema
+aponta pra URL que o vite dev serve como módulo JS (tag morta) — o CSS
+chega pelo pipeline de módulos; inofensivo.
+
+**O que NUNCA fazer**: pipeline de verificação terminando em `grep` sem
+`pipefail` (engole exit code de teste falho e commita vermelho); confiar
+que "não aparece na VM" = "não está no repo" — diff `git ls-files` vs
+árvore da VM antes de culpar a sync.
+
+## 18/10/2026 (parte 5) — live idempotente: fim do dev server duplicado e do hot órfão que apagava o CSS
+
+**Intenção** (ok do Gabriel sobre a proposta do incidente): o dev server
+do vite morreu silenciosamente no meio da tarde (SIGKILL sem rastro —
+sem OOM no dmesg, container sem restart; dado não encontrado), o hot
+file ficou órfão e o `/@vite` devolveu página failed em HTML — MIME
+text/html derrubou CSS e Alpine de uma vez. E cada `flux up` re-disparava
+`npm run dev` SEM dedup: segundo nascia de "Port in use" na 5174,
+invisível ao roteamento.
+
+**Resultado real**: commits `523e656` (feat) + `10a008e` (clippy). No up,
+`decidir_live` (puro, testado) decide sobre DUAS fontes — hot file +
+TCP connect na :5173 do container: ambas vivas = evento "live server já
+ativo" e NADA é re-disparado; qualquer caída = remove hot órfão, mata
+zumbis de vite (loop `/proc` sem depender de ps/pkill — o sh/npm do
+wrapper sobrevive e completa o `rm -f public/hot` do contrato) e sobe de
+novo. No router, hot órfão EM TEMPO REAL: path do vite com live_ativo
+mas :5173 morta limpa o hot e cai pro FRANKENPHP (build) — página failed
+num path de módulo nunca mais. 205 testes do fluxd verdes (1 novo),
+clippy -D warnings limpo.
+
+**Validado na VM com o ambiente real**: up duplo = UM dev server (3
+listeners, sem 5174); kill -9 no vite → `/@vite/client` 404 do
+frankenphp + home apontando `/build/` (site vivo com build); `flux up`
+seguinte ressuscita (hot recriado, client 200 JS). Nota que o fallback
+expôs: os assets do build de hoje carregam URL absoluta com IP de
+container (`http://172.18.0.4/build/…`) — build gerado dentro do
+container sem ASSET_URL correto; latente do modo build, não do fallback.
+
+**O que NUNCA fazer**: confiar no wrapper sozinho para limpar hot —
+com SIGKILL no sh o `rm` não roda; a limpeza precisa existir fora do
+processo moribundo (up idempotente + fallback por request).
+
+## 18/10/2026 (parte 6) — ASSET_URL injetado no override + zumbi-killer que funcionava errado
+
+**Intenção** (pergunta do Gabriel): "não dá pra fazer igual o db, que
+injeta no env os dados corretos?" — sobre o asset do build montado com o
+IP interno do container (`http://172.18.0.4/build/…`).
+
+**Causa** (fechada com dado, não suposição): o proxy reescreve o header
+`Host` para o IP do container (`proxy.rs` forward) — no modo build o
+Laravel monta asset E ROTAS pelo Host percebido. `ASSET_URL` nem existia
+no `.env` (verificado). E o mecanismo do DB (`DB_HOST` no override,
+vencendo o `.env`) era aplicável: a plataforma injeta infraestrutura, o
+`.env` do projeto não manda.
+
+**Resultado real**: commits `095551e` (override injeta `ASSET_URL` —
+dev = host `-d`, prod = host raiz, mesmo mecanismo do `DB_HOST`) e `c148850` (pid correto no zumbi-killer). Dose de humildade: o
+`matar_vite_zumbis` comitado de dia usava `kill "${p#/proc/}"` —
+devolvia `"72/cmdline"` pro kill (EINVAL silencioso, nada morria);
+apanhado validando ao vivo contra o live legítimo do próprio Gabriel
+(pid 48/72, vivo desde o boot do container). Corrigido com
+`basename(dirname())` + redeploy. O projeto precisou também do
+`config/vite.php` (não existe no scaffold dele): sem o arquivo o Laravel
+nem lê `ASSET_URL` — o flux injeta a env, o config do projeto a lê
+(espelho exato de `config/database.php` + `DB_HOST`). Fim a fim
+verificado: `env` e `config('vite.asset_url')` = `https://vippers-d.
+bitello.xyz` no container; kill real do vite → `/@vite/client` 404 do
+frankenphp + hot limpo → `flux up` ressuscita (client 200).
+
+**E o "aberto" acima fechou no mesmo dia** (commit seguinte, deployado):
+o lado Laravel já estava pronto — o vippers tem
+`trustProxies(at: '*')` no `bootstrap/app.php` — faltava só o fluxd
+injetar `X-Forwarded-Host` (host original) + `X-Forwarded-Proto: https`
+no forward. Validado: zero `172.18` no HTML, `signin` =
+`https://vippers-d.bitello.xyz/signin`. Com isso rotas, assets e Livewire
+montam URL pública em QUALQUER modo (live ou build), sem patch por
+projeto e sem depender de `ASSET_URL` — que segue de pé como cinto e
+suspenders.
 
 ## 17/10/2026 (parte 2) — chaves mortas do flux.toml viram função: [domains], [db] rebuild_policy, [health] real, [branding]
 

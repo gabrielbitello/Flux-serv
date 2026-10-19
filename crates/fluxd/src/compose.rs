@@ -88,6 +88,7 @@ pub fn override_yaml(
     env: &str,
     stripped: &[String],
     publicar_vite: bool,
+    asset_host: &str,
 ) -> String {
     let mut y = String::from("services:\n");
     for svc in stripped {
@@ -104,6 +105,12 @@ pub fn override_yaml(
         y.push_str("    restart: \"no\"\n");
         y.push_str("    labels:\n      flux.managed: \"true\"\n");
         y.push_str("    environment:\n      DB_HOST: flux-db\n      DB_PORT: \"3306\"\n");
+        // ASSET_URL público (06/live): o proxy do fluxd reescreve o Host para
+        // o IP do container — sem esta env o Laravel monta asset do BUILD com
+        // o IP interno (http://172.18.0.4/…), que o browser do dev não
+        // alcança. Mesmo mecanismo do DB_HOST: a plataforma injeta por cima
+        // do .env, que não manda em infraestrutura.
+        y.push_str(&format!("      ASSET_URL: \"{asset_host}\"\n"));
         y.push_str("    networks: !override [default, flux-net]\n");
     }
     y.push_str("networks:\n  flux-net:\n    external: true\n");
@@ -250,7 +257,7 @@ pub async fn garantir_rede(nome: &str) -> Result<(), String> {
 /// estado/proxy_target gravados. Cada passo vira evento — nada silencioso.
 pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, env: String) {
     let projeto = format!("flux-{name}-{env}");
-    let dir = PathBuf::from(crate::temporary::PROJECTS_ROOT_PADRAO).join(&name);
+    let dir = PathBuf::from(crate::paths::PROJECTS_ROOT_PADRAO).join(&name);
     let st = &app.state;
 
     if !dir.is_dir() {
@@ -400,9 +407,19 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         .and_then(|d| d.live)
         .map(|l| !l.trim().is_empty())
         .unwrap_or(false);
+    // ASSET_URL público por ambiente (06/live): dev = host -d, prod = host
+    // raiz — a env injetada vence o .env, igual DB_HOST.
+    let asset_host = if env == "dev" {
+        format!(
+            "https://{}{}.{}",
+            name, app.domain.dev_suffix, app.domain.zone
+        )
+    } else {
+        format!("https://{}.{}", name, app.domain.zone)
+    };
     if let Err(e) = std::fs::write(
         &override_path,
-        override_yaml(&services, &env, &strip, publicar_vite),
+        override_yaml(&services, &env, &strip, publicar_vite, &asset_host),
     ) {
         events::event(
             st,
@@ -502,12 +519,22 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             flux_common::protocol::Env::Dev
         };
         let estado = src.env_state(&name, env_enum);
-        let _ = st.set_env_state(&name, env_enum, estado);
-        if let Some(target) = src.proxy_target(&name, env_enum) {
-            let _ = st.set_proxy_target(&name, env_enum, &target);
+        // L3.4: falha de REGISTRO depois de um up bem-sucedido NÃO é
+        // silenciosa — o modo degradado (SQLite) serviria alvo/estado velho
+        // sem ninguém saber. Warn com a causa; fluxo/status HTTP intocados
+        // (o compose up já aconteceu).
+        if let Err(e) = st.set_env_state(&name, env_enum, estado) {
+            tracing::warn!("{projeto}: registro do estado pós-up falhou: {e}");
+        }
+        if let Some(target) = src.proxy_target(&name, env_enum)
+            && let Err(e) = st.set_proxy_target(&name, env_enum, &target)
+        {
+            tracing::warn!("{projeto}: registro do proxy_target pós-up falhou: {e}");
         }
     }
-    let _ = st.touch_interaction(&name, flux_common::protocol::Env::Dev);
+    if let Err(e) = st.touch_interaction(&name, flux_common::protocol::Env::Dev) {
+        tracing::warn!("{projeto}: touch_interaction pós-up falhou: {e}");
+    }
     events::event(
         st,
         "info",
@@ -525,8 +552,69 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         } else {
             services[0].clone()
         };
-        subir_live_se_configurado(st, &name, &projeto, &principal).await;
+        // IP do container (proxy_target `ip:80` → ip): a porta do dev server
+        // é conferida na MÁQUINA/VM, não dentro do container.
+        use crate::decision::HostSource;
+        let ip = if let Some(d) = &app.docker {
+            crate::docker::DockerSource::new(d.clone(), st)
+                .proxy_target(&name, flux_common::protocol::Env::Dev)
+        } else {
+            crate::sqlite_source::SqliteSource::new(st)
+                .proxy_target(&name, flux_common::protocol::Env::Dev)
+        }
+        .and_then(|t| {
+            t.rsplit_once(':')
+                .map(|(parte_ip, _porta): (&str, &str)| parte_ip.to_owned())
+        });
+        subir_live_se_configurado(st, &app, &name, &projeto, &principal, ip.as_deref()).await;
     }
+}
+
+/// Decisão do live server no up (06/live) — PURA, para testar sem engine.
+/// O `public/hot` é o contrato do Vite e a :5173 é a porta fixa do
+/// roteamento same-origin; as DUAS fontes juntas fecham os dois sintomas de
+/// 18/10: dev server DUPLICADO (cada `up` re-disparava `npm run dev` — o
+/// segundo via de "Port in use" pra 5174, invisível ao roteamento) e hot
+/// ÓRFÃO (npm morto com SIGKILL não roda o `rm -f public/hot` do wrapper e o
+/// Laravel segue apontando pro servidor morto — site sem CSS).
+pub enum AcaoLive {
+    /// hot vivo + porta respondendo: live já de pé — não duplica.
+    Pular,
+    /// alguma das duas fontes caiu: remover hot órfão (se houver), matar
+    /// node zumbis (se houver) e subir de novo.
+    Ressuscitar,
+}
+
+pub fn decidir_live(hot: bool, porta_viva: bool) -> AcaoLive {
+    if hot && porta_viva {
+        AcaoLive::Pular
+    } else {
+        AcaoLive::Ressuscitar
+    }
+}
+
+/// A porta do dev server responde no IP do container? TCP connect rápido —
+/// não importa O QUE escuta na porta para o "já está de pé" do up; o
+/// roteamento same-origin do router valida o tráfego por cima.
+pub(crate) async fn porta_tcp_viva(ip: &str, porta: u16) -> bool {
+    let Ok(addr) = format!("{ip}:{porta}").parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(400), async {
+        tokio::net::TcpStream::connect(addr).await.is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Raiz da árvore sincronizada do projeto na VM — mesma derivação do router
+/// (`state_dir` `/srv/flux/state` → irmão `projects`). `None` = fora da VM
+/// (testes/dev host) — nada de live nem de limpeza de hot.
+pub(crate) fn raiz_arvore(app: &crate::AppState, name: &str) -> Option<std::path::PathBuf> {
+    app.state_dir
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("projects").join(name))
 }
 
 /// Monta os argumentos do live server: `docker compose -p {projeto} exec -d
@@ -555,14 +643,60 @@ fn comando_live_args(projeto: &str, service: &str, live: &str) -> Vec<String> {
     ]
 }
 
+/// Mata `vite` zumbis dentro do service — loop `/proc` direto, sem depender
+/// de ps/pkill no container. O sh/npm do wrapper SOBREVIVE (cmdline não tem
+/// "vite") e completa o ciclo sozinho: filho morto → `rm -f public/hot` do
+/// wrapper → exit. Erro é evento warn; o disparo do live segue de pé.
+async fn matar_vite_zumbis(st: &crate::state::State, projeto: &str, service: &str) {
+    // `${p#/proc/}` devolve "72/cmdline" — kill nesse argumento é EINVAL
+    // silencioso (apanhado ao vivo: zumbi da 5174 sobreviveu a rodadas de
+    // kill). O PID é basename(dirname(cmdline)).
+    let script = "for p in /proc/[0-9]*/cmdline; do grep -qa vite \"$p\" 2>/dev/null && kill \"$(basename \"$(dirname \"$p\")\")\" 2>/dev/null; done; exit 0";
+    let saida = tokio::process::Command::new("docker")
+        .args([
+            "compose", "-p", projeto, "exec", "-T", service, "sh", "-c", script,
+        ])
+        .output()
+        .await;
+    match saida {
+        Ok(s) if s.status.success() => events::event(
+            st,
+            "info",
+            "up",
+            &format!("{projeto}: zumbis de vite mortos antes do re-disparo do live"),
+        ),
+        Ok(s) => {
+            let cauda: String = String::from_utf8_lossy(&s.stderr)
+                .lines()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            events::event(
+                st,
+                "warn",
+                "up",
+                &format!("{projeto}: falha matando zumbis de vite: {cauda}"),
+            );
+        }
+        Err(e) => events::event(
+            st,
+            "warn",
+            "up",
+            &format!("{projeto}: falha executando limpeza de zumbis: {e}"),
+        ),
+    }
+}
+
 /// Dispara o live server de dev quando o flux.toml do projeto (lido do state,
 /// como o temporary lê) declara `[dev] live`. NUNCA falha o up: todo erro é
 /// evento warn com a causa real.
 async fn subir_live_se_configurado(
     st: &crate::state::State,
+    app: &crate::AppState,
     name: &str,
     projeto: &str,
     service: &str,
+    ip: Option<&str>,
 ) {
     let toml_src = match st.project_toml(name) {
         Ok(Some(t)) => t,
@@ -600,6 +734,61 @@ async fn subir_live_se_configurado(
             &format!("{projeto}: [dev] live declarado VAZIO no flux.toml — nada a executar"),
         );
         return;
+    }
+
+    // Idempotência (06/live): hot + porta = live já de pé, NÃO re-dispara
+    // (o segundo `npm run dev` ia de "Port in use" pra 5174 e ficava
+    // invisível ao roteamento). Qualquer uma das fontes caída = zumbi/órfão:
+    // limpa e ressuscita.
+    let hot_vivo = raiz_arvore(app, name)
+        .as_ref()
+        .is_some_and(|r| r.join("public/hot").is_file());
+    let porta_viva = match ip {
+        Some(ip) => porta_tcp_viva(ip, crate::decision::VITE_PORT).await,
+        None => false, // sem IP no state = não dá para conferir; tratar como caído
+    };
+    if let AcaoLive::Pular = decidir_live(hot_vivo, porta_viva) {
+        events::event(
+            st,
+            "info",
+            "up",
+            &format!(
+                "{projeto}: live server já ativo (hot vivo + :{} respondendo) — \
+                 pulando re-disparo",
+                crate::decision::VITE_PORT
+            ),
+        );
+        return;
+    }
+    if hot_vivo {
+        // Porta morta com hot de pé = órfão: o wrapper do npm morto com
+        // SIGKILL não rodou o `rm -f public/hot`. Remover ANTES de subir,
+        // senão o Laravel segue apontando pro servidor morto (site sem CSS).
+        if let Some(r) = raiz_arvore(app, name) {
+            match std::fs::remove_file(r.join("public/hot")) {
+                Ok(()) => events::event(
+                    st,
+                    "warn",
+                    "up",
+                    &format!(
+                        "{projeto}: hot ÓRFÃO removido — dev server morto sem a porta {}",
+                        crate::decision::VITE_PORT
+                    ),
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => events::event(
+                    st,
+                    "warn",
+                    "up",
+                    &format!("{projeto}: falha removendo hot órfão: {e}"),
+                ),
+            }
+        }
+    }
+    if porta_viva {
+        // Porta viva SEM hot = npm zumbi que perdeu o contrato — mata antes
+        // de subir o novo, senão o novo nasce na 5174 fora do roteamento.
+        matar_vite_zumbis(st, projeto, service).await;
     }
     events::event(
         st,
@@ -660,7 +849,6 @@ fn tunel_classificar(
     projeto: &str,
     services: &[String],
 ) -> Vec<(String, String)> {
-    let mut achados = Vec::new();
     let Ok(saida) = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             tokio::process::Command::new("docker")
@@ -673,11 +861,21 @@ fn tunel_classificar(
                 .await
         })
     }) else {
-        return achados;
+        return Vec::new();
     };
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&saida.stdout) else {
-        return achados;
+        return Vec::new();
     };
+    // L6.2: a REGRA é a mesma fn que o teste exercita — cópia apagada
+    // (bug na regra real nunca mais passa batido pelo teste da cópia).
+    classificar_de(&v, services)
+}
+
+/// Regra PURA do túnel (L6.2): `[(service, imagem)]` dos services cuja
+/// imagem resolvida é cloudflared. Testada direto (o teste da cópia foi
+/// apagado — era o único lugar onde a regra rodava).
+fn classificar_de(v: &serde_json::Value, services: &[String]) -> Vec<(String, String)> {
+    let mut achados = Vec::new();
     for svc in services {
         let Some(imagem) = v["services"][svc]["image"].as_str() else {
             continue;
@@ -691,217 +889,6 @@ fn tunel_classificar(
 }
 
 // --------------------------------------------------- blue-green (10, R12)
-
-/// Teto do drain da cor velha (10: HTTP 60 s; worker termina o job atual —
-/// a semântica `queue:restart` entra com o deploy de Laravel, F9).
-pub const DRAIN_PADRAO_SECS: u64 = 30;
-
-/// Teto do poll de saúde ([health] path, 06): 30 tentativas × 1 s, cada uma
-/// com timeout de 2 s — o app tem ~30 s para responder depois de RUNNING.
-pub const HEALTH_TENTATIVAS: u32 = 30;
-pub const HEALTH_INTERVALO_SECS: u64 = 1;
-pub const HEALTH_TIMEOUT_SECS: u64 = 2;
-
-/// Um probe de saúde: `GET http://{target}{path}` no MESMO cliente do proxy
-/// (rede docker do host é alcançável). 2xx-3xx = saudável; conexão recusada,
-/// 4xx/5xx, timeout ou URI impossível = não saudável — path errado tem de
-/// aparecer como falha, nunca virar "RUNNING e pronto".
-pub async fn saude_ok(http: &crate::proxy::ProxyClient, target: &str, path: &str) -> bool {
-    let caminho = if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("/{path}")
-    };
-    let Ok(uri) = format!("http://{target}{caminho}").parse::<axum::http::Uri>() else {
-        return false;
-    };
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(HEALTH_TIMEOUT_SECS),
-        http.get(uri),
-    )
-    .await
-    {
-        Ok(Ok(resp)) => resp.status().is_success() || resp.status().is_redirection(),
-        _ => false,
-    }
-}
-
-/// Espera o container `app` RESPONDER no `[health] path` antes de confiar na
-/// cor (06 — fecha o F9): RUNNING não garante HTTP. Falha depois do teto é
-/// ERRO — o chamador aborta a operação (troca de cor, up).
-pub async fn esperar_saude(
-    docker: &bollard::Docker,
-    http: &crate::proxy::ProxyClient,
-    name: &str,
-    projeto: &str,
-    health_path: &str,
-) -> Result<String, String> {
-    let target = crate::docker::alvo_app(docker, projeto)
-        .await?
-        .ok_or_else(|| {
-            format!("{projeto}: container app ausente ou sem rede — sem probe de saúde")
-        })?;
-    for _ in 0..HEALTH_TENTATIVAS {
-        if saude_ok(http, &target, health_path).await {
-            return Ok(target);
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(HEALTH_INTERVALO_SECS)).await;
-    }
-    Err(format!(
-        "{name}: app não respondeu GET {health_path} em \
-         {}×{HEALTH_TIMEOUT_SECS}s (alvo {target}) — verifique `[health] path` no flux.toml \
-         e os logs do container; operação abortada",
-        HEALTH_TENTATIVAS
-    ))
-}
-
-/// Troca de versão invisível (10/R12): aponta o ponteiro para a cor nova
-/// (requests novos já nascem nela) e drena a velha com `docker stop -t`.
-/// A cor nova PRECISA já estar no ar (o deploy sobe a inativa; aqui é só
-/// a troca). Cor velha igual à nova = no-op honesto.
-///
-/// Retorna (cor_velha, drenada) para o evento/handler.
-pub async fn trocar_cor(
-    app: std::sync::Arc<crate::AppState>,
-    name: &str,
-    color: &str,
-    drain_secs: u64,
-) -> Result<(Option<String>, bool), String> {
-    if color != "blue" && color != "green" {
-        return Err(format!("cor '{color}' inválida (use blue|green)"));
-    }
-    let st = &app.state;
-    let velha = st.active_color(name).map_err(|e| e.to_string())?;
-    if velha.as_deref() == Some(color) {
-        return Ok((velha, false));
-    }
-
-    // A cor nova tem que estar de pé (o deploy sobe a INATIVA antes da troca).
-    let docker = app.docker.clone().ok_or("fluxd sem Docker conectado")?;
-    let projeto_novo = format!("flux-{name}-prod-{color}");
-    let containers = lista_do_projeto(&docker, &projeto_novo).await?;
-    if containers.is_empty() {
-        return Err(format!(
-            "cor {color} de {name} não está no ar (nenhum container em {projeto_novo}) —              o deploy sobe a cor inativa ANTES da troca (10)"
-        ));
-    }
-
-    // Health mínimo v1: app RUNNING...
-    for c in &containers {
-        let svc = c
-            .labels
-            .as_ref()
-            .and_then(|l| l.get("com.docker.compose.service"))
-            .cloned()
-            .unwrap_or_default();
-        let rodando = c
-            .state
-            .as_ref()
-            .is_some_and(|st| matches!(st, bollard::models::ContainerSummaryStateEnum::RUNNING));
-        if svc == "app" && !rodando {
-            return Err(format!(
-                "app da cor {color} não está RUNNING — troca abortada (sem downtime assumido)"
-            ));
-        }
-    }
-
-    // Health REAL ([health] path, 06 — fecha o F9): RUNNING não garante HTTP.
-    // A troca só acontece com o path de saúde RESPONDENDO na cor nova; path
-    // errado ou app quebrado aborta a troca ANTES do ponteiro se mover.
-    let toml_src = st
-        .project_toml(name)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("{name}: projeto sem flux.toml gravado no estado"))?;
-    let toml = flux_common::config::ProjectToml::parse_str(&toml_src)
-        .map_err(|e| format!("flux.toml de {name} inválido: {e}"))?;
-    let health_path = toml.health_path().to_owned();
-    esperar_saude(&docker, &app.http, name, &projeto_novo, &health_path).await?;
-    events::event(
-        st,
-        "info",
-        "deploy",
-        &format!("{name}: cor {color} respondeu GET {health_path} — saudável"),
-    );
-
-    // TROCA ATÔMICA: ponteiro novo (requests novos nascem na cor nova). O
-    // proxy_target do DockerSource resolve SEMPRE pela cor ativa do SQLite
-    // (compose_project_cor) — o ponteiro É a troca.
-    st.set_active_color(name, color)
-        .map_err(|e| e.to_string())?;
-    events::event(
-        st,
-        "info",
-        "deploy",
-        &format!("{name}: cor ativa → {color} (requests novos nascem nela)"),
-    );
-
-    // DRAIN da velha: stop -t (SIGTERM, conexões/job atual terminam no grace).
-    let mut drenada = false;
-    if let Some(cor_velha) = velha.clone() {
-        let projeto_velho = format!("flux-{name}-prod-{cor_velha}");
-        let velhos = lista_do_projeto(&docker, &projeto_velho).await?;
-        for c in velhos {
-            let Some(id) = c.id.clone() else {
-                continue;
-            };
-            let rodando = c.state.as_ref().is_some_and(|st| {
-                matches!(st, bollard::models::ContainerSummaryStateEnum::RUNNING)
-            });
-            if !rodando {
-                continue;
-            }
-            let stop = tokio::process::Command::new("docker")
-                .args(["stop", "-t", &drain_secs.to_string(), &id])
-                .output()
-                .await;
-            match stop {
-                Ok(s) if s.status.success() => drenada = true,
-                Ok(s) => events::event(
-                    st,
-                    "error",
-                    "deploy",
-                    &format!(
-                        "{name}: drain da cor {cor_velha} falhou em {}: {}",
-                        id,
-                        String::from_utf8_lossy(&s.stderr).trim()
-                    ),
-                ),
-                Err(e) => events::event(st, "error", "deploy", &format!("{name}: drain {id}: {e}")),
-            }
-        }
-        events::event(
-            st,
-            "info",
-            "deploy",
-            &format!(
-                "{name}: cor velha {cor_velha} drenada (grace {drain_secs} s, jobs em voo terminaram nela)"
-            ),
-        );
-    }
-    Ok((velha, drenada))
-}
-
-/// Containers do compose project (resumo cru) — lista vazia quando não há.
-async fn lista_do_projeto(
-    docker: &bollard::Docker,
-    projeto: &str,
-) -> Result<Vec<bollard::models::ContainerSummary>, String> {
-    use bollard::query_parameters::ListContainersOptionsBuilder;
-    let mut filters = std::collections::HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec![format!("com.docker.compose.project={projeto}")],
-    );
-    docker
-        .list_containers(Some(
-            ListContainersOptionsBuilder::new()
-                .all(true)
-                .filters(&filters)
-                .build(),
-        ))
-        .await
-        .map_err(|e| e.to_string())
-}
 
 /// Varre `base` (até `profundidade` 3) coletando compose*/Dockerfile* para o
 /// guard — (caminho relativo, tipo, conteúdo).
@@ -947,6 +934,7 @@ mod tests {
             "dev",
             &["mysql".into()],
             false,
+            "https://vippers-d.bitello.xyz",
         );
         assert!(y.contains("  app:\n"));
         assert!(y.contains("  worker:\n"));
@@ -969,6 +957,10 @@ mod tests {
             "dev não compete com o sono"
         );
         assert!(y.contains("DB_HOST: flux-db"));
+        assert!(
+            y.contains("ASSET_URL: \"https://vippers-d.bitello.xyz\""),
+            "asset público injetado por cima do .env (mesmo mecanismo do DB)"
+        );
         assert!(y.contains("networks: !override [default, flux-net]"));
         assert!(y.contains("external: true"), "flux-net é a rede do flux-db");
         // Nada publicado = portscan da 09 continua só 22/80/443.
@@ -977,8 +969,8 @@ mod tests {
 
     #[test]
     fn override_com_live_publica_a_porta_do_dev_server() {
-        let sem = override_yaml(&["app".into()], "dev", &[], false);
-        let com = override_yaml(&["app".into()], "dev", &[], true);
+        let sem = override_yaml(&["app".into()], "dev", &[], false, "https://v-d.x");
+        let com = override_yaml(&["app".into()], "dev", &[], true, "https://v-d.x");
         assert!(
             !sem.contains("5173:5173"),
             "sem live declarado, nada publicado"
@@ -1024,6 +1016,24 @@ mod tests {
             },
         ];
         assert_eq!(strip_list(&renderizado, &block), vec!["mysql".to_owned()]);
+    }
+
+    #[test]
+    fn decidir_live_cobre_as_quatro_combinacoes() {
+        use AcaoLive::*;
+        assert!(
+            matches!(decidir_live(true, true), Pular),
+            "tudo vivo = pular"
+        );
+        assert!(
+            matches!(decidir_live(true, false), Ressuscitar),
+            "hot órfão = ressuscitar"
+        );
+        assert!(
+            matches!(decidir_live(false, true), Ressuscitar),
+            "porta viva sem contrato = zumbi, ressuscitar"
+        );
+        assert!(matches!(decidir_live(false, false), Ressuscitar));
     }
 
     #[test]
@@ -1097,10 +1107,8 @@ mod escolha {
 
 #[cfg(test)]
 mod tunel {
-    // A classificação testada aqui é a MESMA lógica que o tunel_classificar
-    // aplica (match de imagem em minúsculas) — testada inline para não rodar
-    // docker compose no unit test.
-    #[allow(unused_imports)]
+    // L6.2: os testes exercitam a REGRA REAL (`classificar_de` de compose.rs)
+    // — a cópia local foi apagada (era o único lugar onde a regra rodava).
     use super::*;
 
     fn config_com(servicos: serde_json::Value) -> serde_json::Value {
@@ -1139,43 +1147,5 @@ mod tunel {
         }));
         let achados = classificar_de(&v, &["app".to_owned()]);
         assert!(achados.is_empty());
-    }
-
-    fn classificar_de(v: &serde_json::Value, services: &[String]) -> Vec<(String, String)> {
-        let mut achados = Vec::new();
-        for svc in services {
-            if let Some(imagem) = v["services"][svc]["image"].as_str() {
-                let baixo = imagem.to_lowercase();
-                if baixo.contains("cloudflared") || baixo.contains("cloudflare/cloudflared") {
-                    achados.push((svc.clone(), imagem.to_owned()));
-                }
-            }
-        }
-        achados
-    }
-}
-
-#[cfg(test)]
-mod troca {
-    use super::*;
-
-    #[test]
-    fn cor_invalida_recusa_sem_tocar_nada() {
-        // trocar_cor valida ANTES de qualquer efeito: cor ruim = Err seco.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let st = crate::state::State::in_memory().unwrap();
-            st.register_project("x", "name = \"x\"", "h").unwrap();
-            let app = std::sync::Arc::new(crate::AppState::new(
-                st,
-                &flux_common::config::GlobalConfig::default(),
-                None,
-            ));
-            let r = trocar_cor(app, "x", "roxa", 30).await;
-            assert!(r.is_err(), "cor inválida não passa");
-        });
     }
 }

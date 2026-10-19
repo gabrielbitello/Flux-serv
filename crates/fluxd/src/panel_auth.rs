@@ -123,7 +123,7 @@ impl Default for LoginLimiter {
 pub struct PanelAuth {
     pub sessions: SessionStore,
     pub limiter: LoginLimiter,
-    pub hash_path: PathBuf,
+    hash_path: PathBuf,
 }
 
 impl PanelAuth {

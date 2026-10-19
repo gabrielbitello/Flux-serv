@@ -27,14 +27,14 @@ pub fn now_epoch() -> i64 {
 }
 
 /// Decisão pura de dormir — todos os inputs explícitos, testável sem Docker.
+/// (A guarda real de CPU roda FORA da decisão, em `SleepManager::sweep_one` —
+/// aqui só se decide entre esperar, segurar e dormir.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepDecision {
     /// Continua acordado: faltam N segundos para o limite.
     KeepAwake { remaining_secs: i64 },
     /// Sinal ativo: lease ou cooldown ainda válidos.
     Held,
-    /// CPU acima do teto — zera o timer (teste/build rodando, 04).
-    Busy,
     /// Dormir agora (dev: stop; prod: pause conforme `[sleep] prod_mode`).
     Sleep,
 }
@@ -230,7 +230,7 @@ impl<'a> SleepManager<'a> {
                     return Some(format!("{name}/{env}: CPU {cpu:.1}% > teto — timer zerado"));
                 }
                 let resultado = match acao {
-                    "pause" => src.pause(name, env).await,
+                    "pause" => src.pause(name, env).await.map_err(|e| e.to_string()),
                     _ => src.sleep(name, env).await,
                 };
                 match resultado {
@@ -252,7 +252,6 @@ impl<'a> SleepManager<'a> {
                     }
                 }
             }
-            SleepDecision::Busy => Some(format!("{name}/{env}: CPU alta — acordado")),
             SleepDecision::Held => None,
             SleepDecision::KeepAwake { .. } => None,
         }

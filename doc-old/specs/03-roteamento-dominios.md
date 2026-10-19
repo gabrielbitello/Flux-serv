@@ -71,6 +71,31 @@ de Caddy por deploy, nenhuma config dinâmica para quebrar.
   host continua sendo o `fluxd` pelo header `Host`.
 - Caddy roda como systemd com capacidades de bind 443 (pacote oficial já trata).
 
+#### Host LAN-only sem Cloudflare: bloco `http://` dedicado (18/10/2026, caso `zcode-api`)
+
+Cliente que não é browser (IDE apontando `ANTHROPIC_BASE_URL`) não lida bem
+com o 308 → HTTPS do curinga nem com o `tls internal` (a CA do Caddy não é
+confiada no PC). Padrão: um bloco **HTTP puro, por host**, no Caddyfile — o
+resto do curinga segue intocado:
+
+```caddy
+# zcode-api (18/10): LAN-only, HTTP puro, sem Cloudflare — roteado pelo fluxd
+# (Host header) que acorda o container dormindo antes de proxyar.
+http://zcode-api-d.bitello.xyz {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+- No PC: `192.168.140.2 zcode-api-d.bitello.xyz` no hosts — tráfego só na
+  rede host-only (01); o `cloudflared` nem precisa estar de pé.
+- O fluxd decide por `Host` exatamente como nos hosts públicos: sleep/wake,
+  matriz de erros e o hold de API (`[sleep] api_hold`, 04) valem igual.
+- Prova do não-vazamento: no mesmo `restart`, os demais hosts no :80
+  continuaram no `308` do curinga (`vippers-d` conferido) — o bloco
+  específico vence o redirect só para o host declarado.
+- `admin off` mata o `systemctl reload` (a API :2019 não existe): mudança no
+  Caddyfile é `systemctl restart` (~1 s de interrupção).
+
 ### fluxd router (o "porteiro" do Flux)
 
 - Dispatch por `Host` exato: `flux.bitello.xyz` → painel; `{name}-d.bitello.xyz`

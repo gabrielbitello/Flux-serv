@@ -65,6 +65,13 @@ storage/
 > recriadas (`mutagen sync terminate` + `flux up`).
 
 - `respectGitignore = true` (o `.gitignore` do projeto entra de graça).
+  > **ATUALIZAÇÃO (19/10/2026) — INTENÇÃO vs. RESULTADO: NUNCA implementado.**
+  > O `create_args` (flux-cli/src/sync.rs) nunca mandou o flag (desde F2,
+  > e959857) — `.gitignore` NÃO filtra a sessão; o que cruza é só
+  > GLOBAL_IGNORES + `[sync] extra_ignore`. Descoberto pelo gate do mutagen
+  > no CI (L0.3): o teste gated_sync_real_exclui_globais codificava a
+  > promessa e falhava; hoje codifica o contrato REAL com o gap anotado.
+  > Implementar o flag = feature, fora da refatoração (regra do Gabriel).
 - Projeto pode **adicionar** excludes em `flux.toml` (`[sync] extra_ignore`),
   nunca remover os globais.
 - `.env` fica EXCLUSIVO do lado VM: `flux env pull` copia para o Windows como

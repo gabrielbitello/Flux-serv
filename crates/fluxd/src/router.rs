@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderName, HeaderValue, header};
+use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use axum::routing::post;
 use flux_common::config::{GlobalConfig, ProjectToml};
@@ -22,6 +22,7 @@ use crate::events;
 use crate::pages;
 use crate::proxy;
 use crate::sqlite_source::SqliteSource;
+use crate::ui::{NOINDEX, x_robots_tag};
 use crate::waf::WafLayer;
 
 /// `global` alimenta a borda R30 (teto de body vem do config, 09; o resto é
@@ -51,13 +52,21 @@ pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) ->
         .with_state((app, panel))
 }
 
-fn x_robots_tag() -> HeaderName {
-    HeaderName::from_static("x-robots-tag")
-}
-
 /// Adaptador de estado do `POST /__flux/beat` (04): o router carrega
 /// `(Arc<AppState>, Router)` e o handler de beat.rs extrai `State<Arc<AppState>>`
 /// — axum-core só tem `FromRef` identidade, então a tupla é desembrulhada aqui.
+/// Cooldown anti-flapping (04) quando o projeto ACORDOU — a parte da
+/// política que estava escrita 2× nos braços Proxy e Wait (L5.6). Os verbos
+/// de acordar ficam em cada braço de propósito: `ensure_awake` (só o app,
+/// erro tratado local) no Proxy; `wake` (projeto inteiro, `Result`) no Wait.
+fn cooldown_se_acordou(app: &AppState, nome: &str, env: flux_common::protocol::Env, acordou: bool) {
+    if acordou {
+        let _ = app
+            .state
+            .set_cooldown(nome, env, crate::sleep::WAKE_COOLDOWN_SECS);
+    }
+}
+
 async fn beat_roteado(
     State((app, _panel)): State<(Arc<AppState>, Router)>,
     headers: axum::http::HeaderMap,
@@ -65,8 +74,12 @@ async fn beat_roteado(
     beat::beat(State(app), headers).await
 }
 
-const NOINDEX: &str = "noindex, nofollow, noarchive";
-
+/// Teto do hold de API (`[sleep] api_hold`): tempo máximo que a request fica
+/// segurada acordando o container antes de cair no fluxo normal (página de
+/// espera/503 honestos). Bun acorda em segundos; 90 s cobre boot lento sem
+/// pendurar cliente eternamente. (O `NOINDEX` que o master tinha aqui virou
+/// `crate::ui::NOINDEX` no L4.4 — fonte única das constantes de UI.)
+const WAKE_HOLD_TIMEOUT_SECS: u64 = 90;
 /// Fonte da decisão: Docker quando existe (estado/alto do engine — verdade,
 /// 07), SQLite como fallback (dev/testes sem engine).
 enum Source<'a> {
@@ -143,8 +156,77 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
         None => Source::Sqlite(SqliteSource::new(&app.state)),
     };
-    let Decision { host, action } =
+    let Decision { host, mut action } =
         decision::decide(&host_raw, &path, wants_json, &app.domain, &src);
+
+    // Hold de API (`[sleep] api_hold`, 18/10): projeto dormindo/subindo com a
+    // flag ligada NÃO devolve página de espera/503 — a request é SEGURA aqui
+    // enquanto o container acorda e a porta responde, e a decisão é refeita
+    // com o estado novo. IDEs quebram com recusa, toleram espera (pedido do
+    // Gabriel p/ zcode-api). Default OFF: sem a flag, nenhum projeto muda.
+    if matches!(action, Action::Wait { .. } | Action::ApiWaking { .. })
+        && let Some(nome) = projeto_do_host(&host)
+        && api_hold_ativo(&app.state, &nome)
+        && let Some(d) = app.docker.clone()
+    {
+        let env = host_env(&host);
+        use crate::decision::HostSource as _;
+        let _ = app.state.touch_interaction(&nome, env);
+        let acordador = DockerSource::new(d, &app.state);
+        if let Err(e) = acordador.wake(&nome, env).await {
+            tracing::warn!("hold: wake de {nome} falhou: {e}");
+        }
+        let prazo =
+            std::time::Instant::now() + std::time::Duration::from_secs(WAKE_HOLD_TIMEOUT_SECS);
+        let mut acordou = false;
+        while std::time::Instant::now() < prazo {
+            if matches!(
+                acordador.env_state(&nome, env),
+                flux_common::protocol::ContainerState::Awake
+                    | flux_common::protocol::ContainerState::Paused
+            ) {
+                acordou = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if acordou {
+            let _ = app
+                .state
+                .set_cooldown(&nome, env, crate::sleep::WAKE_COOLDOWN_SECS);
+            let Decision { action: nova, .. } =
+                decision::decide(&host_raw, &path, wants_json, &app.domain, &src);
+            // Container RUNNING ainda não é app pronto: com Proxy em mãos,
+            // espera a porta TCP viva (mesmo probe do live, 06) antes de
+            // assumir a ação — boot do processo ainda em curso devolve o
+            // fluxo original, nunca conexão recusada no cliente.
+            if let Action::Proxy { target, .. } = &nova {
+                let alvo = target.clone();
+                let (ip, porta) = match alvo.rsplit_once(':') {
+                    Some((i, p)) => (i.to_owned(), p.parse::<u16>().unwrap_or(80)),
+                    None => (alvo.clone(), 80),
+                };
+                while std::time::Instant::now() < prazo {
+                    if crate::compose::porta_tcp_viva(&ip, porta).await {
+                        action = nova;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                if !matches!(action, Action::Proxy { .. }) {
+                    tracing::warn!(
+                        "hold: porta de {nome} ({alvo}) não abriu em tempo — segue fluxo normal"
+                    );
+                }
+            } else {
+                action = nova;
+            }
+        } else {
+            tracing::warn!(
+                "hold: {nome} não acordou em {WAKE_HOLD_TIMEOUT_SECS}s — segue fluxo normal"
+            );
+        }
+    }
 
     let mut resp = match action {
         Action::Proxy { name, target, .. } => {
@@ -155,12 +237,25 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
             // < 1 s — 11; erros são logados e o forward reavalia).
             if let Some(d) = &app.docker {
                 let src = DockerSource::new(d.clone(), &app.state);
-                if src.ensure_awake(&name, env).await {
-                    // Acabou de acordar: cooldown anti-flapping (04).
-                    let _ = app
-                        .state
-                        .set_cooldown(&name, env, crate::sleep::WAKE_COOLDOWN_SECS);
-                }
+                let acordou = src.ensure_awake(&name, env).await;
+                // Acabou de acordar: cooldown anti-flapping (04).
+                cooldown_se_acordou(&app, &name, env, acordou);
+            }
+            // X-Forwarded (03): o forward reescreve o HOST para o IP do
+            // container — sem o original em X-Forwarded-Host, o Laravel
+            // monta url()/rotas com o IP interno (http://172.18.0.4/signin)
+            // que o browser do dev não alcança. O projeto confia no proxy
+            // (trustProxies) e usa o host público. Proto é sempre https:
+            // na frente do fluxd só existe o TLS do Caddy.
+            if let Ok(hv) = HeaderValue::from_str(&host_raw) {
+                parts.headers.insert(
+                    axum::http::header::HeaderName::from_static("x-forwarded-host"),
+                    hv,
+                );
+                parts.headers.insert(
+                    axum::http::header::HeaderName::from_static("x-forwarded-proto"),
+                    HeaderValue::from_static("https"),
+                );
             }
             // Live same-origin (06/live, método do devserver velho): com o
             // dev server de pé (`public/hot` é o contrato do Vite — nasce
@@ -169,6 +264,10 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
             // e HMR saem pelo próprio domínio, sem cross-origin/CORS; tudo
             // que não é path do vite (Laravel, Livewire, `public/`) segue
             // pro frankenphp intacto. Pedido com `Upgrade` usa o túnel ws.
+            // Hot órfão EM TEMPO REAL (npm morreu com SIGKILL — o wrapper
+            // não rodou o rm): :5173 não responde → limpa o hot e CAI PRO
+            // FRANKENPHP (build) em vez de devolver página failed para um
+            // path de módulo — MIME text/html derruba CSS e Alpine inteiros.
             let mut target = target;
             let mut upgrade = None;
             if host.is_dev() && decision::eh_path_vite(&path) && live_ativo(&app, &name) {
@@ -176,12 +275,22 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                     .rsplit_once(':')
                     .map(|(ip, _)| ip.to_owned())
                     .unwrap_or_else(|| target.clone());
-                target = format!("{ip}:{}", decision::VITE_PORT);
-                // OnUpgrade mora nas extensions do request: retirar ANTES do
-                // forward — o `into_parts` já aconteceu no topo do handler.
-                upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
-                if upgrade.is_some() {
-                    tracing::debug!(host = %host_raw, path, "ws do HMR → {target}");
+                if crate::compose::porta_tcp_viva(&ip, decision::VITE_PORT).await {
+                    target = format!("{ip}:{}", decision::VITE_PORT);
+                    // OnUpgrade mora nas extensions do request: retirar ANTES
+                    // do forward — o `into_parts` já aconteceu no topo.
+                    upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
+                    if upgrade.is_some() {
+                        tracing::debug!(host = %host_raw, path, "ws do HMR → {target}");
+                    }
+                } else if let Some(r) = crate::compose::raiz_arvore(&app, &name) {
+                    match std::fs::remove_file(r.join("public/hot")) {
+                        Ok(()) => {
+                            tracing::warn!(host = %host_raw, "dev server morto com hot órfão — hot removido, build assumindo")
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => tracing::warn!("falha removendo hot órfão: {e}"),
+                    }
                 }
             }
             let encaminhado = if upgrade.is_some() {
@@ -220,15 +329,7 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                 tokio::spawn(async move {
                     let src = DockerSource::new(d, &st.state);
                     match src.wake(&nome, env).await {
-                        Ok(acordou) => {
-                            if acordou {
-                                let _ = st.state.set_cooldown(
-                                    &nome,
-                                    env,
-                                    crate::sleep::WAKE_COOLDOWN_SECS,
-                                );
-                            }
-                        }
+                        Ok(acordou) => cooldown_se_acordou(&st, &nome, env, acordou),
                         Err(e) => tracing::warn!("wake de {nome} falhou: {e}"),
                     }
                 });
@@ -322,6 +423,31 @@ fn host_env(host: &flux_common::host::ManagedHost) -> flux_common::protocol::Env
     }
 }
 
+/// Projeto de um host gerenciado — painel e desconhecido não têm (só eles
+/// interessam ao hold, que roda depois de uma decisão Wait/ApiWaking).
+fn projeto_do_host(host: &flux_common::host::ManagedHost) -> Option<String> {
+    match host {
+        flux_common::host::ManagedHost::Prod { name }
+        | flux_common::host::ManagedHost::Dev { name, .. }
+        | flux_common::host::ManagedHost::Custom { name, .. }
+        | flux_common::host::ManagedHost::Vite { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// Flag por projeto (`[sleep] api_hold`): TOML ausente/quebrado/sem a chave =
+/// `false` — igual ao logo (15), decoração nunca vira 500.
+fn api_hold_ativo(state: &crate::state::State, name: &str) -> bool {
+    state
+        .project_toml(name)
+        .ok()
+        .flatten()
+        .and_then(|src| ProjectToml::parse_str(&src).ok())
+        .and_then(|t| t.sleep)
+        .and_then(|s| s.api_hold)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +506,29 @@ mod tests {
         );
         let (last, _, _, _) = app.state.sleep_row("vipers", Env::Dev).unwrap();
         assert!(last.is_some(), "beat zera o timer (touch_interaction, 04)");
+    }
+
+    /// Hold de API (18/10): a flag `[sleep].api_hold` é lida do TOML gravado;
+    /// projeto sem a chave (ou inexistente) fica OFF — comportamento atual.
+    #[test]
+    fn api_hold_ativo_le_flag_do_toml_gravado() {
+        let app = app();
+        app.state
+            .register_project(
+                "zcode-api",
+                "name = \"zcode-api\"\n[sleep]\napi_hold = true\n",
+                "h",
+            )
+            .unwrap();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        assert!(api_hold_ativo(&app.state, "zcode-api"), "flag ligada");
+        assert!(
+            !api_hold_ativo(&app.state, "vipers"),
+            "sem a chave = OFF (default)"
+        );
+        assert!(!api_hold_ativo(&app.state, "fantasma"));
     }
 
     /// Host NÃO gerenciado no beat → 404 SEM tocar nada (rota responde antes

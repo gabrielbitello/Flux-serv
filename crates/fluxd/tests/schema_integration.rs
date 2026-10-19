@@ -3,8 +3,8 @@
 //! com migration mutada em prod bloqueia SEM executar nada.
 
 use flux_common::protocol::Env;
-use fluxd::db::{self, SchemaOutcome};
 use fluxd::docker::{self, DockerSource};
+use fluxd::migrations::{self, SchemaOutcome};
 use fluxd::state::State;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,7 +36,7 @@ async fn migrate_cmd_roda_dentro_do_container() {
 
     let toml =
         "framework = \"custom\"\n[db]\nmigrate_cmd = \"sh -c 'echo migrado > /tmp/flux-ok'\"\n";
-    let out = db::ensure_schema(&engine, &st, "schema", Env::Dev, toml, &[])
+    let out = migrations::ensure_schema(&engine, &st, "schema", Env::Dev, toml, &[])
         .await
         .expect("ensure_schema");
     let SchemaOutcome::MigrateCmd { output } = out else {
@@ -56,7 +56,7 @@ async fn migrate_cmd_roda_dentro_do_container() {
     let files = vec![("2024_x.php".to_owned(), "hash_novo".to_owned())];
     st.record_migration("bloq", Env::Prod, "2024_x.php", "hash_velho")
         .unwrap();
-    let err = db::ensure_schema(
+    let err = migrations::ensure_schema(
         &engine,
         &st,
         "bloq",
@@ -74,7 +74,7 @@ async fn migrate_cmd_roda_dentro_do_container() {
         .expect("limpar");
 }
 
-/// exec rápido `cat /tmp/flux-ok` via db:: — valida que o marker ficou no FS
+/// exec rápido `cat /tmp/flux-ok` via migrations:: — valida que o marker ficou no FS
 /// do container (reusa o caminho interno pelo caminho público ensure_schema?).
 /// Simples: exec via DockerSource não expõe exec — faz via bollard direto.
 async fn dbg_probe(engine: &bollard::Docker) -> (String, i64) {

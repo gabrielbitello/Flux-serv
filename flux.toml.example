@@ -38,9 +38,6 @@
 # node/rust: schema command run INSIDE the dev container. Empty/absent = no
 # automatic pipeline (fluxd warns, never stays silent).
 #migrate_cmd = "php artisan migrate --force"
-# Refuse compose images from the blocked list (mysql/redis/... by default).
-# Default: true (platform decision 13/10/2026).
-#image_guard = true
 # Seconds the `database/migrations` tree must stay UNCHANGED before `flux up`
 # collects it (silence window, 02) — collecting mid-write would produce a
 # hash that diverges from what the sync replicates. Default: 5.
@@ -76,6 +73,10 @@
 #prod_idle_minutes = 30
 # CPU ceiling (%) that counts as "still busy" for the idle timer. Default: 5.0.
 #cpu_percent_teto = 5.0
+# Hold API requests while the project wakes up instead of answering 503:
+# the router starts the container and proxies once it is serving (for APIs
+# behind IDEs — clients break on refusals, tolerate waiting). Default: false.
+#api_hold = false
 
 # ---------------------------------------------------------------------------
 # Per-project prod limits (11).

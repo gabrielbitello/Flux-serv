@@ -109,7 +109,6 @@ pub struct DbSection {
     /// node/rust: comando de schema dentro do container (06); vazio = sem
     /// pipeline automático (fluxd avisa, nunca silêncio).
     pub migrate_cmd: Option<String>,
-    pub image_guard: Option<bool>,
     /// Janela de silêncio da árvore ANTES da coleta de migrations no `flux up`
     /// (02): a coleta lê `database/migrations` do disco local e o hash vai
     /// para o plano de rebuild — coletar no meio de uma escrita diverge do
@@ -180,6 +179,11 @@ pub struct SleepSection {
     pub prod_mode: Option<ProdSleepMode>,
     pub prod_idle_minutes: Option<u32>,
     pub cpu_percent_teto: Option<f64>,
+    /// Hold de API (18/10, pedido do Gabriel p/ zcode-api): com `true`, request
+    /// de API para projeto dormindo/subindo é SEGURA enquanto o container
+    /// acorda — nunca 503 de volta (IDEs quebram com recusa, toleram espera).
+    /// Default `false` = comportamento atual (503 + Retry-After, 12).
+    pub api_hold: Option<bool>,
 }
 
 /// Limites INDIVIDUAIS de prod (11).
@@ -320,7 +324,6 @@ pub struct GlobalConfig {
     pub domain: DomainConfig,
     pub api: Option<ApiSection>,
     pub defaults: Option<DefaultsSection>,
-    pub image_guard: Option<ImageGuardSection>,
     pub limits: Option<GlobalLimitsSection>,
     pub queue: Option<QueueSection>,
     pub logs: Option<LogsSection>,
@@ -435,61 +438,16 @@ impl ProjectToml {
     /// começar com `vite-` (prefixo reservado do dev server) nem o rótulo
     /// terminar com o `dev_suffix` (colide com a derivação de dev). Charset
     /// de host legal. Erro SEMPRE cita a chave. Os hosts derivados continuam
-    /// valendo — `[domains]` ADICIONA, nunca remove.
+    /// `[domains]` (09): valida e normaliza os hosts custom do projeto →
+    /// `(prod, dev)`. DELEGAÇÃO de 1 linha — a REGRA vive em `host.rs`
+    /// (L2.3): quem valida na escrita e quem interpreta na leitura (`vite-`,
+    /// `dev_suffix`) precisam ser o mesmo arquivo, senão nasce host que
+    /// valida no registro mas não roteia na borda (ou vice-versa).
     pub fn hosts_custom(
         &self,
         domain: &DomainConfig,
     ) -> Result<(Option<String>, Option<String>), String> {
-        let validar = |valor: Option<&String>, chave: &str| -> Result<Option<String>, String> {
-            let Some(h) = valor else {
-                return Ok(None);
-            };
-            let h = h.trim().to_ascii_lowercase();
-            let zona = format!(".{}", domain.zone);
-            let Some(rotulo) = h.strip_suffix(&zona) else {
-                return Err(format!(
-                    "[domains] {chave} = \"{h}\" está fora da zona .{} — a plataforma só \
-                     roteia hosts dentro da zona (o túnel cobre *.{}); host externo precisa \
-                     de DNS/ingress próprios e NÃO é suportado",
-                    domain.zone, domain.zone
-                ));
-            };
-            if rotulo.is_empty() {
-                return Err(format!(
-                    "[domains] {chave} é a zona pelada — falta o rótulo"
-                ));
-            }
-            if h == domain.panel_host {
-                return Err(format!(
-                    "[domains] {chave} = \"{h}\" colide com o host do painel — escolha outro"
-                ));
-            }
-            if rotulo.starts_with("vite-") {
-                return Err(format!(
-                    "[domains] {chave}: prefixo \"vite-\" é reservado do dev server (06)"
-                ));
-            }
-            if rotulo.ends_with(domain.dev_suffix.as_str()) {
-                return Err(format!(
-                    "[domains] {chave}: rótulo termina com \"{}\" — colide com a derivação \
-                     de dev; escolha um rótulo sem o sufixo",
-                    domain.dev_suffix
-                ));
-            }
-            if !h
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
-            {
-                return Err(format!(
-                    "[domains] {chave} = \"{h}\" tem caractere fora de [a-z0-9-.]"
-                ));
-            }
-            Ok(Some(h))
-        };
-        let domains = self.domains.as_ref();
-        let prod = validar(domains.and_then(|d| d.prod.as_ref()), "prod")?;
-        let dev = validar(domains.and_then(|d| d.dev.as_ref()), "dev")?;
-        Ok((prod, dev))
+        crate::host::validar_hosts_custom(self.domains.as_ref(), domain)
     }
 }
 
@@ -685,47 +643,6 @@ rate = 500
         assert_eq!(sync.dockerignore_path(), "config/.dockerignore");
     }
 
-    /// `[domains]` (09): validação dos hosts custom na borda do registro.
-    #[test]
-    fn hosts_custom_valida_zona_reservas_e_charset() {
-        let domain = DomainConfig::default();
-        let parse = |src: &str| ProjectToml::parse_str(src).unwrap();
-
-        // Ambos válidos: vêm em minúsculas, host inteiro.
-        let (prod, dev) =
-            parse("[domains]\nprod = \"VIP.bitello.xyz\"\ndev = \"Vip-Dev.bitello.xyz\"")
-                .hosts_custom(&domain)
-                .unwrap();
-        assert_eq!(prod.as_deref(), Some("vip.bitello.xyz"));
-        assert_eq!(dev.as_deref(), Some("vip-dev.bitello.xyz"));
-
-        // Sem seção: nada a validar.
-        let (prod, dev) = parse("").hosts_custom(&domain).unwrap();
-        assert_eq!(prod, None);
-        assert_eq!(dev, None);
-
-        // Fora da zona (inclui a zona pelada — sufixo não casa): erro com a
-        // chave na mensagem.
-        for (src, parte) in [
-            ("[domains]\nprod = \"vippers.com.br\"", "fora da zona"),
-            ("[domains]\nprod = \"bitello.xyz\"", "fora da zona"),
-        ] {
-            let err = parse(src).hosts_custom(&domain).unwrap_err();
-            assert!(err.contains(parte), "caso {src}: {err}");
-        }
-
-        // Painel, prefixo vite-, sufixo de dev, charset.
-        for (src, parte) in [
-            ("[domains]\nprod = \"flux.bitello.xyz\"", "painel"),
-            ("[domains]\ndev = \"vite-x.bitello.xyz\"", "vite-"),
-            ("[domains]\nprod = \"x-d.bitello.xyz\"", "-d\""),
-            ("[domains]\nprod = \"a_b.bitello.xyz\"", "[a-z0-9-.]"),
-        ] {
-            let err = parse(src).hosts_custom(&domain).unwrap_err();
-            assert!(err.contains(parte), "caso {src}: {err}");
-        }
-    }
-
     #[test]
     fn flux_toml_vazio_usa_defaults() {
         let t = ProjectToml::parse_str("").unwrap();
@@ -743,6 +660,16 @@ rate = 500
     fn flux_toml_chave_desconhecida_e_erro() {
         let err = ProjectToml::parse_str("naame = \"vipers\"").unwrap_err();
         assert!(err.to_string().contains("naame"), "mensagem: {err}");
+    }
+
+    /// Hold de API (18/10): `[sleep].api_hold` parseia; ausente = None
+    /// (default OFF — nenhum projeto muda de comportamento sem a flag).
+    #[test]
+    fn sleep_api_hold_parseia_e_default_e_off() {
+        let t = ProjectToml::parse_str("[sleep]\napi_hold = true\nidle_minutes = 10\n").unwrap();
+        assert_eq!(t.sleep.as_ref().and_then(|s| s.api_hold), Some(true));
+        let vazio = ProjectToml::parse_str("").unwrap();
+        assert_eq!(vazio.sleep.and_then(|s| s.api_hold), None);
     }
 
     /// Chaves novas da 02: `[db].silence_window_secs` (default 5) e a seção
@@ -944,9 +871,8 @@ node = "node:22"
 
     #[test]
     fn guard_bloqueia_redis_por_decisao_da_pergunta_3() {
-        let c = GlobalConfig::parse_str("").unwrap();
         let fallback = ImageGuardSection::default();
-        let block = c.image_guard.as_ref().unwrap_or(&fallback).block_list();
+        let block = fallback.block_list();
         for img in [
             "mysql",
             "mariadb",

@@ -13,12 +13,15 @@
 use std::collections::HashMap;
 
 use bollard::Docker;
+use bollard::container::LogOutput;
+use bollard::exec::CreateExecOptions;
 use bollard::models::{
     ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, ContainerSummary,
     ContainerSummaryStateEnum,
 };
 use bollard::query_parameters::{CreateContainerOptionsBuilder, ListContainersOptionsBuilder};
 use flux_common::protocol::{ContainerState, Env};
+use futures_util::StreamExt;
 
 use crate::decision::HostSource;
 use crate::state::State;
@@ -28,39 +31,108 @@ pub fn compose_project(name: &str, env: Env) -> String {
     format!("flux-{name}-{env}")
 }
 
-/// TODOS os containers do compose project (sono de dev é do PROJETO inteiro:
-/// só o app parado deixava worker/reverb rodando à toa — salada que o
-/// Gabriel apontou). Flux-db e cia NUNCA entram: não têm o label.
-async fn containers_do_projeto(docker: &Docker, project: &str) -> Vec<ContainerSummary> {
+/// Rótulo DEV com a regra F9 (06): RUNNING só é "awake" com o `[health]`
+/// RESPONDENDO; app no ar sem responder = "waking" (o `flux up` continua
+/// esperando em vez de celebrar cedo). Demais estados passam CRU — nunca
+/// inventado. Função PURA: os 3 ramos caracterizados sem engine (L5.4).
+pub(crate) fn rotulo_dev(estado: ContainerState, saudavel: bool) -> &'static str {
+    if estado == ContainerState::Awake {
+        if saudavel { "awake" } else { "waking" }
+    } else {
+        estado.as_str()
+    }
+}
+
+/// Tudo que o handler de status precisa para o rótulo DEV: estado do engine
+/// (verdade) + probe de saúde sobre o alvo do app. `probe` INJETÁVEL — o
+/// real é `bluegreen::saude_ok(&http, target, path)`; o path de health vem do
+/// TOML gravado (default `/up`). Sem engine → estado cru da fonte SQLite.
+pub(crate) async fn estado_dev_rotulado<P, Fut>(
+    docker: &Docker,
+    st: &crate::state::State,
+    name: &str,
+    client: crate::proxy::ProxyClient,
+    probe: P,
+) -> String
+where
+    P: FnOnce(crate::proxy::ProxyClient, String, String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    use crate::decision::HostSource as _;
+    let estado = DockerSource::new(docker.clone(), st).env_state(name, Env::Dev);
+    if estado != ContainerState::Awake {
+        return estado.as_str().to_owned();
+    }
+    let saudavel = match alvo_app(docker, &compose_project(name, Env::Dev)).await {
+        Ok(Some(target)) => {
+            let path = st
+                .project_toml(name)
+                .ok()
+                .flatten()
+                .and_then(|s| flux_common::config::ProjectToml::parse_str(&s).ok())
+                .map(|t| t.health_path().to_owned())
+                .unwrap_or_else(|| "/up".into());
+            probe(client.clone(), target, path).await
+        }
+        _ => false,
+    };
+    rotulo_dev(estado, saudavel).to_owned()
+}
+
+/// Filtro de label de compose project — montagem PURA (testável sem engine).
+/// `Some(projeto)` = match exato; `None` = TODOS com o label (o chamador
+/// filtra prefixo — forma do teardown de worktrees, temporary.rs).
+fn filtros_label(projeto: Option<&str>) -> HashMap<String, Vec<String>> {
     let mut filters = HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec![format!("com.docker.compose.project={project}")],
-    );
+    let valor = match projeto {
+        Some(p) => format!("com.docker.compose.project={p}"),
+        None => "com.docker.compose.project".to_owned(),
+    };
+    filters.insert("label".to_owned(), vec![valor]);
+    filters
+}
+
+/// FONTE ÚNICA de listagem por label (L3.1 — eram 4 cópias com erros
+/// divergentes: `unwrap_or_default` engolia falha de engine e wake/sleep
+/// agiam como lista vazia; `.ok()?` não distinguia "sem container" de
+/// "engine falhou"). ERRO PROPAGA — mudança DECLARADA no plano: os
+/// chamadores de wake/sleep já tratam `Err` com evento/warn. Flux-db e cia
+/// NUNCA entram no match exato: não têm o label.
+pub(crate) async fn listar_label(
+    docker: &Docker,
+    projeto: Option<&str>,
+) -> Result<Vec<ContainerSummary>, String> {
     let options = ListContainersOptionsBuilder::default()
         .all(true)
-        .filters(&filters)
+        .filters(&filtros_label(projeto))
         .build();
     docker
         .list_containers(Some(options))
         .await
-        .unwrap_or_default()
+        .map_err(|e| format!("listagem de containers (projeto {projeto:?}): {e}"))
+}
+
+/// TODOS os containers do compose project (sono de dev é do PROJETO inteiro:
+/// só o app parado deixava worker/reverb rodando à toa — salada que o
+/// Gabriel apontou).
+async fn containers_do_projeto(
+    docker: &Docker,
+    project: &str,
+) -> Result<Vec<ContainerSummary>, String> {
+    listar_label(docker, Some(project)).await
 }
 
 pub async fn find_app_container(
     docker: &Docker,
     project: &str,
 ) -> Option<ContainerInspectResponse> {
-    let mut filters = HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec![format!("com.docker.compose.project={project}")],
-    );
-    let options = ListContainersOptionsBuilder::default()
-        .all(true)
-        .filters(&filters)
-        .build();
-    let list = docker.list_containers(Some(options)).await.ok()?;
+    let list = match listar_label(docker, Some(project)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("find_app_container {project}: {e}");
+            return None;
+        }
+    };
     let id = list
         .iter()
         .find(|c| {
@@ -92,6 +164,117 @@ pub fn map_state(c: &ContainerInspectResponse) -> ContainerState {
         Some(ContainerStateStatusEnum::PAUSED) => ContainerState::Paused,
         _ => ContainerState::Sleeping,
     }
+}
+
+/// Especificação de um `docker exec` no container app (L3.3) — as diferenças
+/// deliberadas dos 2 consumidores são CAMPOS, não cópias:
+/// - `wrap_sh`: migrations roda `sh -c "<cmd>"` (string única); ciclo passa
+///   argv verbatim.
+/// - `workdir`: `Some` = fixo (ciclo passa o workdir do SERVICE derivado do
+///   inspect); `None` = não seta (container default — migrations).
+/// - `teto_bytes`: teto de saída combinada; estourou com o exec AINDA
+///   RODANDO → exit `-1` (desconhecido, convenção do ciclo). `None` = sem
+///   teto (evite: saída infinita enche a memória do fluxd).
+pub(crate) struct ExecSpec {
+    pub cmd: Vec<String>,
+    pub wrap_sh: bool,
+    pub workdir: Option<String>,
+    pub teto_bytes: Option<usize>,
+}
+
+/// Saída combinada stdout+stderr do exec.
+pub(crate) struct ExecOutput {
+    pub saida: String,
+    pub truncado: bool,
+    pub code: i64,
+}
+
+/// `docker exec` no container `id` — esqueleto ÚNICO (L3.3: eram 2 cópias
+/// com contratos já divergidos — db sem teto, ciclo com regra -1). create_exec
+/// (attach stdout+stderr, SEM TTY) + start coletando a saída combinada +
+/// inspect para o exit. Erros sempre com origem (`{projeto}: ...`), nunca
+/// silenciosos.
+pub(crate) async fn exec_no_app(
+    docker: &Docker,
+    projeto: &str,
+    id: &str,
+    spec: &ExecSpec,
+) -> Result<ExecOutput, String> {
+    let cmd = if spec.wrap_sh {
+        vec!["sh".to_owned(), "-c".to_owned(), spec.cmd.join(" ")]
+    } else {
+        spec.cmd.clone()
+    };
+    let exec = docker
+        .create_exec(
+            id,
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(false),
+                cmd: Some(cmd),
+                working_dir: spec.workdir.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("{projeto}: create_exec: {e}"))?;
+
+    let output = match docker.start_exec(&exec.id, None).await {
+        Ok(bollard::exec::StartExecResults::Attached { output, .. }) => output,
+        Ok(bollard::exec::StartExecResults::Detached) => {
+            return Err(format!(
+                "{projeto}: exec voltou Detached inesperadamente (esperava attach)"
+            ));
+        }
+        Err(e) => return Err(format!("{projeto}: start_exec: {e}")),
+    };
+
+    let mut saida = String::new();
+    let mut truncado = false;
+    let mut output = output;
+    while let Some(chunk) = output.next().await {
+        match chunk {
+            Ok(LogOutput::StdOut { message }) | Ok(LogOutput::StdErr { message }) => {
+                if let Some(teto) = spec.teto_bytes {
+                    let livre = teto.saturating_sub(saida.len());
+                    if livre == 0 {
+                        truncado = true;
+                        break;
+                    }
+                    let fatia = &message[..message.len().min(livre)];
+                    saida.push_str(&String::from_utf8_lossy(fatia));
+                    if saida.len() >= teto {
+                        truncado = true;
+                        break;
+                    }
+                } else {
+                    saida.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("{projeto}: stream do exec: {e}")),
+        }
+    }
+
+    let inspect = docker
+        .inspect_exec(&exec.id)
+        .await
+        .map_err(|e| format!("{projeto}: inspect_exec: {e}"))?;
+    // Contrato: truncado com o exec AINDA RODANDO = exit desconhecido (-1).
+    // O ExitCode que o Docker serializa durante Running é 0 — repassar seria
+    // falso sucesso (o CLI usa o código como exit próprio do `flux exec`).
+    // Exec que TERMINOU com saída acima do teto mantém o exit real.
+    let code = if truncado && inspect.running.unwrap_or(false) {
+        -1
+    } else {
+        inspect.exit_code.unwrap_or(-1)
+    };
+    Ok(ExecOutput {
+        saida,
+        truncado,
+        code,
+    })
 }
 
 /// IP do container na rede do compose — alvo do proxy (03). Porta: `80` é o
@@ -169,10 +352,16 @@ impl<'a> DockerSource<'a> {
     /// tem cor.
     fn compose_project_cor(&self, name: &str, env: Env) -> String {
         let base = compose_project(name, env);
-        if env == Env::Prod
-            && let Ok(Some(cor)) = self.sqlite.active_color(name)
-        {
-            return format!("{base}-{cor}");
+        if env == Env::Prod {
+            match self.sqlite.active_color(name) {
+                Ok(Some(cor)) => return format!("{base}-{cor}"),
+                Ok(None) => {}
+                // L3.2: falha de leitura NÃO é "sem cor" silencioso — em prod
+                // isso decidiria o compose project ERRADO. Warn com a causa.
+                Err(e) => {
+                    tracing::warn!("active_color de {name} falhou — usando o project base: {e}")
+                }
+            }
         }
         base
     }
@@ -211,10 +400,10 @@ impl<'a> DockerSource<'a> {
 
     /// `docker start` — o wake da página de espera (03) e do sleep manager (F4).
     /// Devolve `true` quando o container estava parado e foi acordado.
-    pub async fn wake(&self, name: &str, env: Env) -> Result<bool, bollard::errors::Error> {
+    pub async fn wake(&self, name: &str, env: Env) -> Result<bool, String> {
         let project = self.compose_project_cor(name, env);
         let mut acordou_algum = false;
-        for c in containers_do_projeto(&self.docker, &project).await {
+        for c in containers_do_projeto(&self.docker, &project).await? {
             let parado = c
                 .state
                 .as_ref()
@@ -223,7 +412,10 @@ impl<'a> DockerSource<'a> {
                 continue;
             }
             let id = c.id.clone().unwrap_or_default();
-            self.docker.start_container(&id, None).await?;
+            self.docker
+                .start_container(&id, None)
+                .await
+                .map_err(|e| e.to_string())?;
             acordou_algum = true;
         }
         Ok(acordou_algum)
@@ -252,9 +444,9 @@ impl<'a> DockerSource<'a> {
     }
 
     /// `docker stop` — sono de dev (04).
-    pub async fn sleep(&self, name: &str, env: Env) -> Result<(), bollard::errors::Error> {
+    pub async fn sleep(&self, name: &str, env: Env) -> Result<(), String> {
         let project = self.compose_project_cor(name, env);
-        for c in containers_do_projeto(&self.docker, &project).await {
+        for c in containers_do_projeto(&self.docker, &project).await? {
             let rodando = c.state.as_ref().is_some_and(|st| {
                 matches!(
                     st,
@@ -266,7 +458,8 @@ impl<'a> DockerSource<'a> {
             }
             self.docker
                 .stop_container(c.id.as_deref().unwrap_or_default(), None)
-                .await?;
+                .await
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -274,7 +467,7 @@ impl<'a> DockerSource<'a> {
 
 impl HostSource for DockerSource<'_> {
     fn project_exists(&self, name: &str) -> bool {
-        self.sqlite_project_exists(name)
+        self.fonte_sqlite().project_exists(name)
     }
 
     fn env_state(&self, name: &str, env: Env) -> ContainerState {
@@ -295,13 +488,7 @@ impl HostSource for DockerSource<'_> {
     /// Hosts custom de `[domains]` (09): consulta SQLite direta (a engine não
     /// participa — host é registro do estado).
     fn host_custom(&self, host: &str) -> Option<(String, bool)> {
-        match self.sqlite.host_custom(host) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("consulta de host custom {host:?} falhou: {e}");
-                None
-            }
-        }
+        self.fonte_sqlite().host_custom(host)
     }
 
     fn proxy_target(&self, name: &str, env: Env) -> Option<String> {
@@ -314,29 +501,18 @@ impl HostSource for DockerSource<'_> {
     }
 
     fn release_flags(&self, name: &str) -> (bool, bool) {
-        self.sqlite_release_flags(name)
+        self.fonte_sqlite().release_flags(name)
     }
 }
 
-// Helpers delegando ao SQLite (mesmo código do SqliteSource, reusado aqui
-// para projetos/flags — estado de projeto NUNCA mora no Docker).
+/// L3.2: as consultas de estado de projeto (existência, flags, hosts custom)
+/// têm UMA implementação — o `SqliteSource`. O `DockerSource` delega em vez
+/// de copiar o SQL (as cópias engoliam erro SEM log: `.is_ok()` e
+/// `unwrap_or((false, false))` — numa falha de leitura o router fingia
+/// "projeto inexistente"/"sem flags").
 impl DockerSource<'_> {
-    fn sqlite_project_exists(&self, name: &str) -> bool {
-        self.sqlite
-            .with(|c| c.query_row("SELECT 1 FROM projects WHERE name = ?1", [name], |_| Ok(())))
-            .is_ok()
-    }
-
-    fn sqlite_release_flags(&self, name: &str) -> (bool, bool) {
-        self.sqlite
-            .with(|c| {
-                c.query_row(
-                    "SELECT has_robots, has_sitemap FROM active_color WHERE project = ?1",
-                    [name],
-                    |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
-                )
-            })
-            .unwrap_or((false, false))
+    fn fonte_sqlite(&self) -> crate::sqlite_source::SqliteSource<'_> {
+        crate::sqlite_source::SqliteSource::new(self.sqlite)
     }
 }
 
@@ -385,6 +561,42 @@ mod tests {
     use super::*;
 
     // Sem engine de Docker nos testes unitários: exercita só o mapeamento puro.
+
+    /// L3.1: montagem de filtro pura — as duas formas (exato / todos com label).
+    #[test]
+    fn filtros_label_monta_exato_e_coringa() {
+        let exato = filtros_label(Some("flux-pedi-dev"));
+        assert_eq!(
+            exato.get("label"),
+            Some(&vec!["com.docker.compose.project=flux-pedi-dev".to_owned()])
+        );
+        let todos = filtros_label(None);
+        assert_eq!(
+            todos.get("label"),
+            Some(&vec!["com.docker.compose.project".to_owned()])
+        );
+    }
+
+    /// L5.4: os 3 ramos do rótulo F9, caracterizados SEM engine.
+    #[test]
+    fn rotulo_dev_cobre_os_tres_ramos() {
+        use flux_common::protocol::ContainerState;
+        assert_eq!(
+            rotulo_dev(ContainerState::Sleeping, true),
+            "sleeping",
+            "não-Running passa cru — nunca inventado"
+        );
+        assert_eq!(
+            rotulo_dev(ContainerState::Awake, true),
+            "awake",
+            "Running + health respondendo = awake"
+        );
+        assert_eq!(
+            rotulo_dev(ContainerState::Awake, false),
+            "waking",
+            "Running sem health = waking (o up continua esperando)"
+        );
+    }
 
     #[test]
     fn compose_project_segue_convencao_da_spec_06() {

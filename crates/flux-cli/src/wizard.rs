@@ -5,9 +5,16 @@
 //! Regras: `flux.toml` existente = RECUSA (nunca sobrescreve silencioso);
 //! Ctrl+C/EOF no meio = nada é escrito; tudo tem default no Enter. Zero
 //! dependência nova — stdin com `read_line`, igual ao resto do CLI.
+//! L2.6: a MONTAGEM é função pura (`montar_manifesto`) — valida entrada
+//! hostil (aspa/barra invertida em `health` gerava TOML inválido que
+//! explodia longe da causa, no parse do próximo `up`) e faz ROUND-TRIP
+//! (`ProjectToml::parse_str` tem que aceitar o que o wizard escreve).
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+
+use flux_common::config::ProjectToml;
+use flux_common::nomes::projeto_valido;
 
 /// Resultado do wizard — o TOML já foi gravado na raiz; o resumo existe para
 /// o chamador exibir/logar.
@@ -31,15 +38,11 @@ pub fn gerar(raiz: &Path, pasta: &str) -> io::Result<Option<ManifestoGerado>> {
 
     println!("flux up -m — gerando o flux.toml (Enter aceita o default; Ctrl+C aborta)");
 
-    // 1. Nome: default = pasta em kebab-case.
+    // 1. Nome: default = pasta em kebab-case (contrato único: nomes.rs, L2.1).
     let nome_default = pasta.to_lowercase();
     let nome = pergunta("nome do projeto (domínios derivam dele)", &nome_default)?;
     let nome = if nome.is_empty() { nome_default } else { nome };
-    if !nome
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        || nome.is_empty()
-    {
+    if !projeto_valido(&nome) {
         eprintln!(
             "erro: nome '{nome}' inválido — só minúscula, dígito e traço \
              (ele vira domínio e sufixo de container)"
@@ -47,7 +50,8 @@ pub fn gerar(raiz: &Path, pasta: &str) -> io::Result<Option<ManifestoGerado>> {
         return Ok(None);
     }
 
-    // 2. Framework: auto-detecta e confirma.
+    // 2. Framework: auto-detecta e confirma (L2.4: lista executável única =
+    //    o FromStr do flux-common).
     let sugerido = detectar_framework(raiz);
     let fw = pergunta("framework (laravel|node|rust|static|custom)", sugerido)?;
     let fw = if fw.is_empty() {
@@ -55,13 +59,6 @@ pub fn gerar(raiz: &Path, pasta: &str) -> io::Result<Option<ManifestoGerado>> {
     } else {
         fw
     };
-    if !matches!(
-        fw.as_str(),
-        "laravel" | "node" | "rust" | "static" | "custom"
-    ) {
-        eprintln!("erro: framework '{fw}' não é um dos: laravel, node, rust, static, custom");
-        return Ok(None);
-    }
 
     // 3. Health path (06: node/rust DEVEM declarar).
     let health_default = if fw == "laravel" { "/up" } else { "" };
@@ -69,15 +66,9 @@ pub fn gerar(raiz: &Path, pasta: &str) -> io::Result<Option<ManifestoGerado>> {
         "health path (caminho que responde OK no container)",
         health_default,
     )?;
-    if health.is_empty() && fw != "laravel" && fw != "static" {
-        eprintln!(
-            "erro: node/rust exigem health path explícito (a plataforma confirma \
-             'acordado e saudável' por ele)"
-        );
-        return Ok(None);
-    }
 
-    // 4. Temporário? (14)
+    // 4. Temporário? (14) — o TTL é parseado na borda de I/O; a REGRA
+    //    (0 h = recusa) vive na montagem pura.
     let temporario = pergunta(
         "dev TEMPORÁRIO? apaga da VM após TTL sem interação (s/N)",
         "n",
@@ -86,23 +77,28 @@ pub fn gerar(raiz: &Path, pasta: &str) -> io::Result<Option<ManifestoGerado>> {
         temporario.trim().to_lowercase().as_str(),
         "s" | "sim" | "y" | "yes"
     );
-    let mut toml = format!("name = \"{nome}\"\nframework = \"{fw}\"\n");
-    if !health.is_empty() {
-        toml.push_str(&format!("\n[health]\npath = \"{health}\"\n"));
-    }
+    let mut ttl: Option<u64> = None;
     if temporario {
-        let ttl = pergunta("TTL em horas sem interação nenhuma", "6")?;
-        let Ok(horas) = ttl.parse::<u64>() else {
-            eprintln!("erro: TTL '{ttl}' não é um número de horas");
+        let resposta = pergunta("TTL em horas sem interação nenhuma", "6")?;
+        let Ok(horas) = resposta.parse::<u64>() else {
+            eprintln!("erro: TTL '{resposta}' não é um número de horas");
             return Ok(None);
         };
-        if horas == 0 {
-            eprintln!("erro: TTL 0 h apagaria na primeira varredura — mínimo sensível é 1");
+        ttl = Some(horas);
+    }
+
+    let toml = match montar_manifesto(&nome, &fw, &health, temporario, ttl) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("erro: {e}");
             return Ok(None);
         }
-        toml.push_str(&format!(
-            "\n[temporary]\nenabled = true\nttl_hours = {horas}\n"
-        ));
+    };
+    // Round-trip (L2.6): o wizard NUNCA escreve um TOML que o parse da
+    // plataforma recuse — a falha antiga aparecia longe da causa.
+    if let Err(e) = ProjectToml::parse_str(&toml) {
+        eprintln!("erro: o TOML gerado não parseia ({e}) — nada foi escrito");
+        return Ok(None);
     }
 
     println!();
@@ -120,6 +116,58 @@ pub fn gerar(raiz: &Path, pasta: &str) -> io::Result<Option<ManifestoGerado>> {
     std::fs::write(&caminho, &toml)?;
     println!("escrito em {}", caminho.display());
     Ok(Some(ManifestoGerado { toml }))
+}
+
+/// Monta o `flux.toml` — função PURA, sem I/O: toda validação acontece aqui
+/// e nada é escrito pelo chamador enquanto ela devolver `Err` (L2.6).
+fn montar_manifesto(
+    nome: &str,
+    fw: &str,
+    health: &str,
+    temporario: bool,
+    ttl: Option<u64>,
+) -> Result<String, String> {
+    if !projeto_valido(nome) {
+        return Err(format!(
+            "nome '{nome}' inválido — só minúscula, dígito e traço \
+             (ele vira domínio e sufixo de container)"
+        ));
+    }
+    fw.parse::<flux_common::framework::Framework>()
+        .map_err(|e| format!("framework '{fw}' — {e}"))?;
+    if health.is_empty() && fw != "laravel" && fw != "static" {
+        return Err(
+            "node/rust exigem health path explícito (a plataforma confirma \
+             'acordado e saudável' por ele)"
+                .to_owned(),
+        );
+    }
+    // Aspa e barra invertida no `health` interpolam mal no TOML
+    // (`path = "{health}"`) — antes gravava manifesto INVÁLIDO.
+    if health.contains('"') || health.contains('\\') {
+        return Err(format!(
+            "health path '{health}' tem aspa ou barra invertida — \
+             não é um caminho HTTP válido e quebraria o TOML"
+        ));
+    }
+    if temporario {
+        let horas = ttl.ok_or("TTL ausente para projeto temporário")?;
+        if horas == 0 {
+            return Err("TTL 0 h apagaria na primeira varredura — mínimo sensível é 1".to_owned());
+        }
+    }
+
+    let mut toml = format!("name = \"{nome}\"\nframework = \"{fw}\"\n");
+    if !health.is_empty() {
+        toml.push_str(&format!("\n[health]\npath = \"{health}\"\n"));
+    }
+    if temporario {
+        toml.push_str(&format!(
+            "\n[temporary]\nenabled = true\nttl_hours = {}\n",
+            ttl.unwrap_or_default()
+        ));
+    }
+    Ok(toml)
 }
 
 fn pergunta(rotulo: &str, default: &str) -> io::Result<String> {
@@ -185,5 +233,41 @@ mod tests {
             antes,
             "arquivo intocado"
         );
+    }
+
+    /// L2.6: caracterização da montagem pura — caso de ouro do TOML.
+    #[test]
+    fn montar_manifesto_caso_de_ouro() {
+        let toml = montar_manifesto("pedi", "laravel", "/up", true, Some(6)).unwrap();
+        assert_eq!(
+            toml,
+            "name = \"pedi\"\nframework = \"laravel\"\n\n[health]\npath = \"/up\"\n\n[temporary]\nenabled = true\nttl_hours = 6\n"
+        );
+    }
+
+    /// L2.6: aspa e barra invertida no health são recusadas ANTES de gerar.
+    #[test]
+    fn montar_manifesto_recusa_health_hostil() {
+        for health in ["/up?x=\"", "/up\\\\ok", "\""] {
+            let e = montar_manifesto("pedi", "node", health, false, None)
+                .expect_err(&format!("health {health:?} deveria ser recusado"));
+            assert!(
+                e.contains("aspa") || e.contains("barra"),
+                "erro fala do problema real: {e}"
+            );
+        }
+    }
+
+    /// L2.6: TTL 0 e node sem health continuam recusados (regras pré-existentes).
+    #[test]
+    fn montar_manifesto_recusa_ttl_zero_e_node_sem_health() {
+        let e =
+            montar_manifesto("pedi", "laravel", "/up", true, Some(0)).expect_err("TTL 0 recusa");
+        assert!(e.contains("TTL 0"), "erro: {e}");
+        let e =
+            montar_manifesto("pedi", "node", "", false, None).expect_err("node sem health recusa");
+        assert!(e.contains("health path"), "erro: {e}");
+        // E nome inválido também é da montagem (contrato único do L2.1).
+        assert!(montar_manifesto("Pedi", "laravel", "/up", false, None).is_err());
     }
 }

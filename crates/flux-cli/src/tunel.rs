@@ -15,8 +15,9 @@ use std::time::Duration;
 /// Porta da API de controle (07).
 pub const API_PORT: u16 = 7420;
 /// Host SSH da VM (01/09, rede host-only).
-pub const VM_HOST: &str = "192.168.140.2";
-pub const VM_USER: &str = "flux";
+// L2.5: fonte única em sync.rs (a ponte #[path] exige sync.rs
+// autossuficiente); aqui é só reexport para os consumidores do túnel.
+pub use crate::sync::{VM_HOST, VM_USER};
 /// Janela de espera pela porta depois de lançar o ssh (16 × 500 ms = 8 s).
 const TENTATIVAS: usize = 16;
 const PASSO: Duration = Duration::from_millis(500);

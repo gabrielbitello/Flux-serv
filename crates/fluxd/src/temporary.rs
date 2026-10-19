@@ -20,24 +20,24 @@ use flux_common::config::ProjectToml;
 use crate::events;
 use crate::state::State;
 
-/// Raiz dos projetos na VM (02) — o `serve` passa o default; testes passam
-/// tempdir.
-pub const PROJECTS_ROOT_PADRAO: &str = "/srv/flux/projects";
-
-/// Nome seguro para virar sufixo de glob de diretório: só minúscula, dígito
-/// e traço. Qualquer outra coisa (herança de pasta ruim) NUNCA entra em
-/// padrão de remoção — o projeto é pulado com erro visível.
+/// Nome seguro para virar sufixo de glob de diretório: o CONTRATO de nome de
+/// projeto (flux_common::nomes). Qualquer outra coisa (herança de pasta
+/// ruim) NUNCA entra em padrão de remoção — o projeto é pulado com erro
+/// visível.
 fn nome_seguro(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    flux_common::nomes::projeto_valido(name)
 }
 
 /// Varredura da expiração: chamada pelo sweep (60 s) DEPOIS do ciclo de sono.
 /// `agora` epoch em segundos (injetável para testes).
 pub async fn expire_check(st: &State, docker: Option<Docker>, agora: i64) {
-    expire_check_em(st, docker, agora, Path::new(PROJECTS_ROOT_PADRAO)).await;
+    expire_check_em(
+        st,
+        docker,
+        agora,
+        Path::new(crate::paths::PROJECTS_ROOT_PADRAO),
+    )
+    .await;
 }
 
 pub async fn expire_check_em(st: &State, docker: Option<Docker>, agora: i64, raiz: &Path) {
@@ -172,22 +172,10 @@ async fn teardown(
 /// `com.docker.compose.project` começando em `flux-{nome}-` (dev e
 /// worktrees; NUNCA casa `flux-{outro}` — o traço final é parte do match).
 async fn compose_projects_do(d: &Docker, nome: &str) -> Result<Vec<String>, String> {
-    use bollard::query_parameters::ListContainersOptionsBuilder;
-    use std::collections::HashMap;
-
-    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
-    filters.insert(
-        "label".to_owned(),
-        vec!["com.docker.compose.project".to_owned()],
-    );
-    let opts = ListContainersOptionsBuilder::new()
-        .all(true)
-        .filters(&filters)
-        .build();
-    let containers = d
-        .list_containers(Some(opts))
-        .await
-        .map_err(|e| e.to_string())?;
+    // L3.1: listagem vem da FONTE ÚNICA (docker::listar_label, forma
+    // "todos com label") — o filtro de prefixo fica aqui, é o contrato
+    // deste teardown (dev + worktrees; NUNCA casa flux-{outro}).
+    let containers = crate::docker::listar_label(d, None).await?;
     let prefixo = format!("flux-{nome}-");
     let mut projetos: Vec<String> = containers
         .iter()

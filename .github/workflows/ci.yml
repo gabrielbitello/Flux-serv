@@ -11,7 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Mesma versão do rust-toolchain.toml (L0.1) — instalar os componentes
+        # NA toolchain pinada; @stable instala no stable e o rustup baixa a
+        # pinada sem clippy/rustfmt (o cargo fmt morre "not installed").
+      - uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: clippy, rustfmt
 
@@ -24,4 +27,51 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
+        run: cargo test --workspace
+
+  # L0.2: engine real de Docker — os 3 testes gated (docker/sleep/schema
+  # integration) retornavam cedo sem FLUX_DOCKER_URL e passavam VAZIOS.
+  # Suíte COMPLETA (ajuste vinculante do revisor: pega de graça os gated
+  # embutidos — ciclo.rs exec/logs/SSE, panel.rs fonte docker).
+  test-engine:
+    runs-on: ubuntu-latest
+    services:
+      docker:
+        image: docker:dind
+        options: >-
+          --privileged
+          --health-cmd "docker info"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 2375:2375
+        env:
+          DOCKER_TLS_CERTDIR: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mesma versão do rust-toolchain.toml (L0.1) — instalar os componentes
+        # NA toolchain pinada; @stable instala no stable e o rustup baixa a
+        # pinada sem clippy/rustfmt (o cargo fmt morre "not installed").
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # L0.3: mutagen binário PINADO (mesma versão do host) — os 3 testes
+      # gated de sync real (sync_tests.rs:482-669) passavam vazios sem
+      # MUTAGEN_BIN. Checksum do release oficial mutagen-io/mutagen.
+      - name: baixar mutagen 0.18.1 pinado
+        run: |
+          curl -fsSL -o /tmp/mutagen.tar.gz "https://github.com/mutagen-io/mutagen/releases/download/v0.18.1/mutagen_linux_amd64_v0.18.1.tar.gz"
+          echo "7735286c778cc438418209f24d03a64f3a0151c8065ef0fe079cfaf093af6f8f  /tmp/mutagen.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/mutagen-bin
+          tar -xzf /tmp/mutagen.tar.gz -C /tmp/mutagen-bin mutagen
+          echo "MUTAGEN_BIN=/tmp/mutagen-bin/mutagen" >> "$GITHUB_ENV"
+
+      - name: test com engine real
+        env:
+          FLUX_DOCKER_URL: tcp://127.0.0.1:2375
         run: cargo test --workspace

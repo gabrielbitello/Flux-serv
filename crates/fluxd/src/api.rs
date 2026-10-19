@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use flux_common::config::ProjectToml;
@@ -25,19 +25,19 @@ use flux_common::framework::Framework;
 use flux_common::protocol::{ApiErrorBody, Env, HealthBody, ProjectSummary};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::ciclo;
-use crate::db::{self, SchemaOutcome};
 use crate::events;
-// O extrator `State` do axum ocupa o nome; o estado do banco entra como DbState.
+use crate::migrations::{self, SchemaOutcome};
+// O extrator `State` do axum ocupa o nome; o estado do banco entra como DbState
+// (usado só nos testes — o gate 09 vive em auth.rs).
+#[cfg(test)]
 use crate::state::State as DbState;
 use crate::sync;
-
-/// Chave em `settings` com o sha256 do token da API (09: hash no SQLite,
-/// token claro só no arquivo do usuário).
-const TOKEN_KEY: &str = "api_token_hash";
+mod auth;
+use auth::auth;
+pub(crate) use auth::{bearer_token, hash_confere, sha256_hex};
 
 /// Teto de lease aceito pela API (04): uma sessão de CLI/painel renova em
 /// linha; nada legítimo pede meia hora de garantia de uma vez.
@@ -82,94 +82,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
 
 // ------------------------------------------------------------------ gate 09
 
-async fn auth(
-    State(app): State<Arc<AppState>>,
-    headers: HeaderMap,
-    req: Request,
-    next: Next,
-) -> Response {
-    let Some(hash) = stored_token_hash(&app.state) else {
-        return erro(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "api de controle não configurada: não há api_token_hash no estado — gere o token no `flux setup vm` e defina-o no banco (spec 09)",
-        );
-    };
-    let enviado = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(bearer_token);
-    // Recusa quando: sem header OU hash divergente (comparação em tempo
-    // constante — ver `hash_confere`).
-    if enviado.is_none_or(|t| !hash_confere(&sha256_hex(t.as_bytes()), &hash)) {
-        // Recusa vira evento (09 critério 3) — o painel mostra tentativa de
-        // acesso com token ruim, o CLI recebe a causa.
-        events::event(
-            &app.state,
-            "warn",
-            "auth",
-            "token da API de controle recusado (header ausente, malformado ou hash divergente)",
-        );
-        return erro(
-            StatusCode::UNAUTHORIZED,
-            "token da API de controle recusado — repasse o Bearer gerado no `flux setup vm` (no CLI, env FLUX_API_TOKEN)",
-        );
-    }
-    next.run(req).await
-}
-
-/// Lê o hash do token do estado. Qualquer falha de leitura fecha a API
-/// (fail closed): erro de banco não pode virar porta aberta.
-fn stored_token_hash(st: &DbState) -> Option<String> {
-    match st.with(|c| {
-        c.query_row(
-            "SELECT v FROM settings WHERE k = ?1",
-            params![TOKEN_KEY],
-            |r| r.get::<_, String>(0),
-        )
-    }) {
-        Ok(h) => Some(h),
-        Err(crate::state::StateError::Sql(rusqlite::Error::QueryReturnedNoRows)) => None,
-        Err(e) => {
-            tracing::error!("não consegui ler {TOKEN_KEY} do estado — recusando requisições: {e}");
-            None
-        }
-    }
-}
-
-/// `Authorization: Bearer <token>` → `<token>`. `pub(crate)` SÓ para o
-/// handler de deploy (deploy.rs) reusar o mesmo parse — build_api e as rotas
-/// da :7420 seguem intocados (a rota de deploy NUNCA entra aqui).
-pub(crate) fn bearer_token(v: &str) -> Option<&str> {
-    v.strip_prefix("Bearer ").filter(|t| !t.is_empty())
-}
-
-/// sha256 em hex lowercase de 64 chars — formato gravado pelo
-/// `flux project token` e esperado pelo handler de deploy nos DOIS lados.
-pub(crate) fn sha256_hex(data: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(data);
-    let mut s = String::with_capacity(64);
-    for b in h.finalize() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-/// Compara dois hashes hex em TEMPO CONSTANTE (XOR acumulado, sem early-exit):
-/// o `!=` de String abandona no primeiro byte divergente e mede timing por
-/// byte num processo local. O bind 127.0.0.1 já mitiga (lib.rs), mas o gate
-/// de auth usa o padrão — custo trivial. Divergência de tamanho é pública
-/// (sha256 hex são sempre 64 chars) e sai cedo sem vazar conteúdo.
-/// `pub(crate)` SÓ para o handler de deploy comparar o token do projeto.
-pub(crate) fn hash_confere(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-fn erro(status: StatusCode, msg: impl Into<String>) -> Response {
+pub(crate) fn erro(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ApiErrorBody { error: msg.into() })).into_response()
 }
 
@@ -198,11 +111,7 @@ struct RegisterBody {
 /// adiante (06: chave desconhecida é erro).
 async fn register(State(app): State<Arc<AppState>>, Json(b): Json<RegisterBody>) -> Response {
     let nome = b.name.trim();
-    if nome.is_empty()
-        || !nome
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    if !flux_common::nomes::projeto_valido(nome) {
         return erro(
             StatusCode::UNPROCESSABLE_ENTITY,
             "nome de projeto inválido: use minúsculas, dígitos e '-' (vira host {name}.bitello.xyz)",
@@ -460,40 +369,21 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
     // E RUNNING deixa de valer "awake" (06, fecha o F9): só merece "awake"
     // com o `[health] path` RESPONDENDO; app no ar sem responder = "waking" —
     // o `flux up` continua esperando em vez de celebrar cedo.
+    // L5.4: a regra F9 (RUNNING + health → awake/waking) vive em
+    // docker::estado_dev_rotulado — handler vira mapeamento HTTP. JSON igual.
     let dev_container_state = match app.docker.as_ref() {
-        Some(d) => Some({
-            use crate::decision::HostSource;
-            let estado =
-                crate::docker::DockerSource::new(d.clone(), &app.state).env_state(&name, Env::Dev);
-            if estado == flux_common::protocol::ContainerState::Awake {
-                let saudavel = match crate::docker::alvo_app(
-                    d,
-                    &crate::docker::compose_project(&name, Env::Dev),
-                )
-                .await
-                {
-                    Ok(Some(target)) => {
-                        let path = app
-                            .state
-                            .project_toml(&name)
-                            .ok()
-                            .flatten()
-                            .and_then(|s| ProjectToml::parse_str(&s).ok())
-                            .map(|t| t.health_path().to_owned())
-                            .unwrap_or_else(|| "/up".into());
-                        crate::compose::saude_ok(&app.http, &target, &path).await
-                    }
-                    _ => false,
-                };
-                if saudavel {
-                    "awake".to_owned()
-                } else {
-                    "waking".to_owned()
-                }
-            } else {
-                estado.as_str().to_owned()
-            }
-        }),
+        Some(d) => Some(
+            crate::docker::estado_dev_rotulado(
+                d,
+                &app.state,
+                &name,
+                app.http.clone(),
+                |client, target, path| async move {
+                    crate::bluegreen::saude_ok(&client, &target, &path).await
+                },
+            )
+            .await,
+        ),
         None => None,
     };
 
@@ -610,7 +500,7 @@ async fn grant_lease(
 
 /// Existência do projeto — erro vira 404 com causa (nunca criar sleep_state
 /// de projeto fantasma).
-fn garante_projeto(app: &AppState, name: &str) -> Result<(), Box<Response>> {
+pub(crate) fn garante_projeto(app: &AppState, name: &str) -> Result<(), Box<Response>> {
     match app.state.list_projects() {
         Ok(l) if l.iter().any(|n| n == name) => Ok(()),
         Ok(_) => Err(Box::new(erro(
@@ -657,7 +547,7 @@ impl From<SchemaOutcome> for SchemaReply {
     }
 }
 
-/// POST /projects/{name}/schema — dispara `db::ensure_schema_com_seed` com os
+/// POST /projects/{name}/schema — dispara `migrations::ensure_schema_com_seed` com os
 /// arquivos informados e o override de seed do corpo (05: `Some` vence o
 /// toml; `None` = decidir pelo flux.toml). Exige engine: sem Docker não há
 /// container onde rodar migrate, e simular sucesso seria pior que recusar (05).
@@ -680,8 +570,10 @@ async fn run_schema(
         Ok(src) => src,
         Err(r) => return *r,
     };
-    match db::ensure_schema_com_seed(&docker, &app.state, &name, env, &toml_src, &b.files, b.seed)
-        .await
+    match migrations::ensure_schema_com_seed(
+        &docker, &app.state, &name, env, &toml_src, &b.files, b.seed,
+    )
+    .await
     {
         Ok(o) => Json(SchemaReply::from(o)).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -714,14 +606,14 @@ async fn trocar(
     let color = corpo.color.unwrap_or_else(|| "blue".to_owned());
     let drain = corpo
         .drain_secs
-        .unwrap_or(crate::compose::DRAIN_PADRAO_SECS);
+        .unwrap_or(crate::bluegreen::DRAIN_PADRAO_SECS);
     if drain > 300 {
         return erro(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("drain_secs {drain} acima do teto da 10 (300 s)"),
         );
     }
-    match crate::compose::trocar_cor(app, &name, &color, drain).await {
+    match crate::bluegreen::trocar_cor(app, &name, &color, drain).await {
         Ok((velha, drenada)) => Json(SwitchOut {
             project: name,
             cor_nova: color,
@@ -766,7 +658,7 @@ async fn fresh_forcado(
         Ok(t) => t,
         Err(r) => return *r,
     };
-    match db::fresh_dev_forcado(&docker, &app.state, &name, &toml_src, corpo.seed).await {
+    match migrations::fresh_dev_forcado(&docker, &app.state, &name, &toml_src, corpo.seed).await {
         Ok(output) => (StatusCode::OK, output).into_response(),
         Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -875,7 +767,7 @@ async fn subir(
         return *r;
     }
     // Pasta sincronizada tem que existir — sem sync não há compose para subir.
-    let dir = std::path::Path::new(crate::temporary::PROJECTS_ROOT_PADRAO).join(&name);
+    let dir = std::path::Path::new(crate::paths::PROJECTS_ROOT_PADRAO).join(&name);
     if !dir.is_dir() {
         return erro(
             StatusCode::CONFLICT,
@@ -1005,7 +897,7 @@ mod tests {
             st.with(|c| {
                 c.execute(
                     "INSERT INTO settings(k, v) VALUES (?1, ?2)",
-                    params![TOKEN_KEY, h],
+                    params![auth::TOKEN_KEY, h],
                 )
             })
             .unwrap();

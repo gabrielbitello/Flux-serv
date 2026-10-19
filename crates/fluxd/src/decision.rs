@@ -194,11 +194,7 @@ pub fn eh_path_vite(path: &str) -> bool {
 fn rota_deploy(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/api/projects/")?;
     let name = rest.strip_suffix("/deploy")?;
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    if !flux_common::nomes::projeto_valido(name) {
         return None;
     }
     Some(name.to_owned())

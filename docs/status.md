@@ -10,7 +10,7 @@ Baseline: the matrix in
 [`doc-old/STATUS.md`](../doc-old/STATUS.md) (snapshot 14/10/2026 morning:
 11 SIM · 24 PARCIAL · 11 NÃO), updated with the real repository state and
 this session's deliveries. Scoreboard for **this** matrix:
-**19 SIM · 17 PARCIAL · 11 NÃO** (47 items).
+**19 SIM · 17 PARCIAL · 11 NÃO** (47 items) → **21 SIM · 15 PARCIAL · 11 NÃO** after 2026-10-18/19 (R21 and R4 moved).
 
 ## Platform base
 
@@ -37,7 +37,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R1 | Rust | **SIM** |
 | R2 | Docker inside a Debian VM | **SIM** — VirtualBox VM operational, router proxying real containers |
 | R3 | Interaction-based auto-sleep | **SIM** — slept (15 min), woke (~1.1 s), CLI lease, CPU sweep, and the injected `/__flux/beat` overlay (30 s throttle) proven end to end |
-| R4 | Never a raw 500/404: waiting page + wake | **PARCIAL** — full public chain proven through the internet (ghost ⇒ branded 404 in ~99 ms; panel ⇒ auth; valid TLS); waiting page for a **real sleeping project** through the internet still to capture |
+| R4 | Never a raw 500/404: waiting page + wake | **SIM** — full public chain proven through the internet, including the waiting page for a REAL sleeping project captured on 2026-10-19 (`https://djm-d.bitello.xyz/` with djm asleep: 200 + `x-robots-tag: noindex` + branding), plus branded 404 for unknown hosts |
 | R5 | Windows↔VM sync (mutagen) | **SIM** — real `one-way-replica` sessions; ignores hold (`.env`/`storage`/`vendor` stay VM-side); extended with `flux sync status/pause/resume/reset` + `flux watch` (commit `89886e0`), rescan queue and live panel state, and the `[sync] use_dockerignore` opt-in (2026-10-17) — unit/wiring-verified; the live `terminate + create` rescan round-trip through the panel button is still to be witnessed |
 | R6 | Single DB + migrations + guard | **PARCIAL** — pipeline complete and in the `up` path (real migrations, silence window, guard rescan, seed precedence, never in prod); the collection now filters by the sync ignores (GLOBAL + `[sync]`), so a file outside the sync can no longer be recorded as applied (commit `44f7373`, 2026-10-18 — found during the real vippers homolog repair); `fresh` not yet exercised live; `db status/dump/restore/console` pending |
 | R7 | Dev rebuilds / prod never | **PARCIAL** — rule implemented and tested (fresh+seed in dev; mutation blocked in prod); `[db] rebuild_policy` (auto/always/never) now honored in dev; not yet against a large real DB |
@@ -54,7 +54,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R18 | Encrypted `.env` + panel read-only | **NÃO** — F12 |
 | R19 | VM save after 30 days | **NÃO** — `savestate` mapped; F13 |
 | R20 | Central warden wakes the VM | **NÃO** — F13 |
-| R21 | API wakes without breaking apps | **PARCIAL** — 503 JSON + `Retry-After` tested; hold/queue pending |
+| R21 | API wakes without breaking apps | **SIM** — `[sleep] api_hold` (opt-in per project): the router holds the API request while the project wakes, polls the TCP port, re-decides (90 s cap) — never a 503 for opted projects; proven live with zcode-api (wake 0.85 s, `/v1/messages` 200); commit `cbfe02f`. Non-opted projects keep the 503 JSON + `Retry-After` |
 | R22 | Staging hidden from bots | **SIM** |
 | R23 | robots/sitemap autogen in prod | **SIM** |
 | R24 | Metrics + alerts + log rotation | **PARCIAL** — 30 s sampler → 1 min rollup, 24 h retention, peak forensics, `/observe` page; outbound alerts and long curves pending |
@@ -68,6 +68,17 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R32 | Headers + own WAF | **PARCIAL** — SQLi + path scan in **enforce** 403 with LAN allowlist (proven: internet 403, LAN 200); headers and bad bots pending |
 | R33 | Public status page with classified cause | **NÃO** — `Cause` enum exists; F20 |
 | R34 | Prod DB backup (48 h / 7 d) | **NÃO** — F16 |
+
+## Delivered 2026-10-18/19
+
+| Delivery | Where |
+|---|---|
+| `[sleep] api_hold` — API requests held while the project wakes (never a 503; 90 s cap) → R21 **SIM** | commit `cbfe02f`; `crates/fluxd/src/router.rs`; [04-adormecimento](../doc-old/specs/04-adormecimento.md) |
+| zcode-api deployed on the platform: LAN-only host (no Cloudflare), credentials outside the sync tree (`/srv/flux/secrets/`), wake 0.85 s proven | Projetos/zcode-api; [03-roteamento-dominios](../doc-old/specs/03-roteamento-dominios.md) |
+| VM RAM 6144 → 6644 MB (zcode-api headroom) | [01-vm-hyperv](../doc-old/specs/01-vm-hyperv.md) |
+| Toolchain pinned (`rust-toolchain.toml`, 1.92.0) — fmt/clippy no longer drift with the host toolchain | branch `audit/modularizacao`; commit from the refactoring batch |
+| CI: `test-engine` job (dind + `FLUX_DOCKER_URL`) — the 3 Docker-gated tests now run for real, no longer passing empty | branch `audit/modularizacao`; `.github/workflows/ci.yml` |
+| Modularization refactoring EXECUTED IN FULL and RUNTIME-VALIDATED: 41/41 plan steps; complete CLI matrix (up/exec/build/env/live/token/logs SSE) + fluxd deployed on the VM (backup kept) + public-chain regression (waiting page 200 noindex, branded 404, WAF 403, panel login, observe) all green on the new binaries | branch `audit/modularizacao`; [refactoring/execution-plan.md](refactoring/execution-plan.md) |
 
 ## Delivered in this session (2026-10-17)
 
@@ -115,3 +126,4 @@ matrix and its full history live in
 |---|---|
 | 2026-10-14 | Initial English documentation (matrix rebased on doc-old/STATUS.md + this session's deliveries) |
 | 2026-10-14 | Post-session pass: new entries anchored to their commits (`89886e0`, `66a22e5`); verification level recorded |
+| 2026-10-18/19 | R21 → SIM (`api_hold`, `cbfe02f`); R4 → SIM (real waiting page captured); zcode-api on the platform (LAN-only, secrets out of the sync tree); refactoring 41/41 executed, master merged in, pushed as PR #1, CI green (test + test-engine), CLI + fluxd runtime-validated end to end |
