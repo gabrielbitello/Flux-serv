@@ -176,8 +176,8 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         if let Err(e) = acordador.wake(&nome, env).await {
             tracing::warn!("hold: wake de {nome} falhou: {e}");
         }
-        let prazo = std::time::Instant::now()
-            + std::time::Duration::from_secs(WAKE_HOLD_TIMEOUT_SECS);
+        let prazo =
+            std::time::Instant::now() + std::time::Duration::from_secs(WAKE_HOLD_TIMEOUT_SECS);
         let mut acordou = false;
         while std::time::Instant::now() < prazo {
             if matches!(
