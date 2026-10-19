@@ -519,12 +519,22 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             flux_common::protocol::Env::Dev
         };
         let estado = src.env_state(&name, env_enum);
-        let _ = st.set_env_state(&name, env_enum, estado);
-        if let Some(target) = src.proxy_target(&name, env_enum) {
-            let _ = st.set_proxy_target(&name, env_enum, &target);
+        // L3.4: falha de REGISTRO depois de um up bem-sucedido NÃO é
+        // silenciosa — o modo degradado (SQLite) serviria alvo/estado velho
+        // sem ninguém saber. Warn com a causa; fluxo/status HTTP intocados
+        // (o compose up já aconteceu).
+        if let Err(e) = st.set_env_state(&name, env_enum, estado) {
+            tracing::warn!("{projeto}: registro do estado pós-up falhou: {e}");
+        }
+        if let Some(target) = src.proxy_target(&name, env_enum)
+            && let Err(e) = st.set_proxy_target(&name, env_enum, &target)
+        {
+            tracing::warn!("{projeto}: registro do proxy_target pós-up falhou: {e}");
         }
     }
-    let _ = st.touch_interaction(&name, flux_common::protocol::Env::Dev);
+    if let Err(e) = st.touch_interaction(&name, flux_common::protocol::Env::Dev) {
+        tracing::warn!("{projeto}: touch_interaction pós-up falhou: {e}");
+    }
     events::event(
         st,
         "info",
