@@ -2,6 +2,7 @@
 //! do main.rs. Cada um recebe o contexto do projeto de contexto.rs.
 
 pub(crate) mod build;
+pub(crate) mod ciclo;
 pub(crate) mod env_cmd;
 pub(crate) mod live;
 pub(crate) mod logs;
