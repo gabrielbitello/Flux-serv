@@ -54,6 +54,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # L0.3: mutagen binário PINADO (mesma versão do host) — os 3 testes
+      # gated de sync real (sync_tests.rs:482-669) passavam vazios sem
+      # MUTAGEN_BIN. Checksum do release oficial mutagen-io/mutagen.
+      - name: baixar mutagen 0.18.1 pinado
+        run: |
+          curl -fsSL -o /tmp/mutagen.tar.gz "https://github.com/mutagen-io/mutagen/releases/download/v0.18.1/mutagen_linux_amd64_v0.18.1.tar.gz"
+          echo "7735286c778cc438418209f24d03a64f3a0151c8065ef0fe079cfaf093af6f8f  /tmp/mutagen.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/mutagen-bin
+          tar -xzf /tmp/mutagen.tar.gz -C /tmp/mutagen-bin mutagen
+          echo "MUTAGEN_BIN=/tmp/mutagen-bin/mutagen" >> "$GITHUB_ENV"
+
       - name: test com engine real
         env:
           FLUX_DOCKER_URL: tcp://127.0.0.1:2375
