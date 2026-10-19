@@ -13,12 +13,15 @@
 use std::collections::HashMap;
 
 use bollard::Docker;
+use bollard::container::LogOutput;
+use bollard::exec::CreateExecOptions;
 use bollard::models::{
     ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, ContainerSummary,
     ContainerSummaryStateEnum,
 };
 use bollard::query_parameters::{CreateContainerOptionsBuilder, ListContainersOptionsBuilder};
 use flux_common::protocol::{ContainerState, Env};
+use futures_util::StreamExt;
 
 use crate::decision::HostSource;
 use crate::state::State;
@@ -113,6 +116,117 @@ pub fn map_state(c: &ContainerInspectResponse) -> ContainerState {
         Some(ContainerStateStatusEnum::PAUSED) => ContainerState::Paused,
         _ => ContainerState::Sleeping,
     }
+}
+
+/// Especificação de um `docker exec` no container app (L3.3) — as diferenças
+/// deliberadas dos 2 consumidores são CAMPOS, não cópias:
+/// - `wrap_sh`: migrations roda `sh -c "<cmd>"` (string única); ciclo passa
+///   argv verbatim.
+/// - `workdir`: `Some` = fixo (ciclo passa o workdir do SERVICE derivado do
+///   inspect); `None` = não seta (container default — migrations).
+/// - `teto_bytes`: teto de saída combinada; estourou com o exec AINDA
+///   RODANDO → exit `-1` (desconhecido, convenção do ciclo). `None` = sem
+///   teto (evite: saída infinita enche a memória do fluxd).
+pub(crate) struct ExecSpec {
+    pub cmd: Vec<String>,
+    pub wrap_sh: bool,
+    pub workdir: Option<String>,
+    pub teto_bytes: Option<usize>,
+}
+
+/// Saída combinada stdout+stderr do exec.
+pub(crate) struct ExecOutput {
+    pub saida: String,
+    pub truncado: bool,
+    pub code: i64,
+}
+
+/// `docker exec` no container `id` — esqueleto ÚNICO (L3.3: eram 2 cópias
+/// com contratos já divergidos — db sem teto, ciclo com regra -1). create_exec
+/// (attach stdout+stderr, SEM TTY) + start coletando a saída combinada +
+/// inspect para o exit. Erros sempre com origem (`{projeto}: ...`), nunca
+/// silenciosos.
+pub(crate) async fn exec_no_app(
+    docker: &Docker,
+    projeto: &str,
+    id: &str,
+    spec: &ExecSpec,
+) -> Result<ExecOutput, String> {
+    let cmd = if spec.wrap_sh {
+        vec!["sh".to_owned(), "-c".to_owned(), spec.cmd.join(" ")]
+    } else {
+        spec.cmd.clone()
+    };
+    let exec = docker
+        .create_exec(
+            id,
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(false),
+                cmd: Some(cmd),
+                working_dir: spec.workdir.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("{projeto}: create_exec: {e}"))?;
+
+    let output = match docker.start_exec(&exec.id, None).await {
+        Ok(bollard::exec::StartExecResults::Attached { output, .. }) => output,
+        Ok(bollard::exec::StartExecResults::Detached) => {
+            return Err(format!(
+                "{projeto}: exec voltou Detached inesperadamente (esperava attach)"
+            ));
+        }
+        Err(e) => return Err(format!("{projeto}: start_exec: {e}")),
+    };
+
+    let mut saida = String::new();
+    let mut truncado = false;
+    let mut output = output;
+    while let Some(chunk) = output.next().await {
+        match chunk {
+            Ok(LogOutput::StdOut { message }) | Ok(LogOutput::StdErr { message }) => {
+                if let Some(teto) = spec.teto_bytes {
+                    let livre = teto.saturating_sub(saida.len());
+                    if livre == 0 {
+                        truncado = true;
+                        break;
+                    }
+                    let fatia = &message[..message.len().min(livre)];
+                    saida.push_str(&String::from_utf8_lossy(fatia));
+                    if saida.len() >= teto {
+                        truncado = true;
+                        break;
+                    }
+                } else {
+                    saida.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("{projeto}: stream do exec: {e}")),
+        }
+    }
+
+    let inspect = docker
+        .inspect_exec(&exec.id)
+        .await
+        .map_err(|e| format!("{projeto}: inspect_exec: {e}"))?;
+    // Contrato: truncado com o exec AINDA RODANDO = exit desconhecido (-1).
+    // O ExitCode que o Docker serializa durante Running é 0 — repassar seria
+    // falso sucesso (o CLI usa o código como exit próprio do `flux exec`).
+    // Exec que TERMINOU com saída acima do teto mantém o exit real.
+    let code = if truncado && inspect.running.unwrap_or(false) {
+        -1
+    } else {
+        inspect.exit_code.unwrap_or(-1)
+    };
+    Ok(ExecOutput {
+        saida,
+        truncado,
+        code,
+    })
 }
 
 /// IP do container na rede do compose — alvo do proxy (03). Porta: `80` é o

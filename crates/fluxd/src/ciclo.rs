@@ -38,7 +38,6 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bollard::Docker;
 use bollard::container::LogOutput;
-use bollard::exec::CreateExecOptions;
 use bollard::query_parameters::{LogsOptions, LogsOptionsBuilder};
 use flux_common::protocol::{ApiErrorBody, Env};
 use futures_util::StreamExt;
@@ -367,11 +366,10 @@ pub async fn logs(
 
 // ---------------------------------------------------------------------- exec
 
-/// `docker exec` no container app: create_exec (attach stdout+stderr, SEM
-/// TTY, workdir `/var/www`) + start coletando a saída combinada. Devolve
-/// `(saída, truncado_no_teto, exit_code)` — exit vem do inspect; truncado
-/// com o exec ainda rodando devolve `-1` (desconhecido, mesma convenção do
-/// db.rs). Erros sempre com origem, nunca silenciosos.
+/// `docker exec` no container app — L3.3: esqueleto ÚNICO em
+/// `docker::exec_no_app`; aqui fica só o contrato deste módulo: workdir do
+/// SERVICE (inspect, fallback `/var/www`), argv verbatim, teto de 256 KB e
+/// exit `-1` quando truncou com o exec rodando (regra vive na capacidade).
 async fn rodar_exec(
     docker: &Docker,
     projeto: &str,
@@ -391,70 +389,19 @@ async fn rodar_exec(
             .to_owned(),
         Err(_) => EXEC_WORKDIR.to_owned(),
     };
-    let exec = docker
-        .create_exec(
-            id,
-            CreateExecOptions {
-                attach_stdin: Some(false),
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                tty: Some(false),
-                cmd: Some(cmd.to_vec()),
-                working_dir: Some(workdir),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| format!("{projeto}: create_exec: {e}"))?;
-
-    let output = match docker.start_exec(&exec.id, None).await {
-        Ok(bollard::exec::StartExecResults::Attached { output, .. }) => output,
-        Ok(bollard::exec::StartExecResults::Detached) => {
-            return Err(format!(
-                "{projeto}: exec voltou Detached inesperadamente (esperava attach)"
-            ));
-        }
-        Err(e) => return Err(format!("{projeto}: start_exec: {e}")),
-    };
-
-    let mut saida = String::new();
-    let mut truncado = false;
-    let mut output = output;
-    while let Some(chunk) = output.next().await {
-        match chunk {
-            Ok(LogOutput::StdOut { message }) | Ok(LogOutput::StdErr { message }) => {
-                let livre = EXEC_TETO_BYTES.saturating_sub(saida.len());
-                if livre == 0 {
-                    truncado = true;
-                    break;
-                }
-                let fatia = &message[..message.len().min(livre)];
-                saida.push_str(&String::from_utf8_lossy(fatia));
-                if saida.len() >= EXEC_TETO_BYTES {
-                    truncado = true;
-                    break;
-                }
-            }
-            Ok(_) => {}
-            Err(e) => return Err(format!("{projeto}: stream do exec: {e}")),
-        }
-    }
-
-    let inspect = docker
-        .inspect_exec(&exec.id)
-        .await
-        .map_err(|e| format!("{projeto}: inspect_exec: {e}"))?;
-    // Contrato do módulo: truncado com o exec AINDA RODANDO = exit
-    // desconhecido (-1). O ExitCode que o Docker serializa durante Running é
-    // 0 — repassar seria falso sucesso (o CLI usa o código como exit próprio
-    // do `flux exec`). Exec que TERMINOU com saída acima do teto mantém o
-    // exit real do inspect.
-    let code = if truncado && inspect.running.unwrap_or(false) {
-        -1
-    } else {
-        inspect.exit_code.unwrap_or(-1)
-    };
-    Ok((saida, truncado, code))
+    let out = docker::exec_no_app(
+        docker,
+        projeto,
+        id,
+        &docker::ExecSpec {
+            cmd: cmd.to_vec(),
+            wrap_sh: false,
+            workdir: Some(workdir),
+            teto_bytes: Some(EXEC_TETO_BYTES),
+        },
+    )
+    .await?;
+    Ok((out.saida, out.truncado, out.code))
 }
 
 /// POST /projects/{name}/exec?env=dev — roda `cmd` NO container app e devolve

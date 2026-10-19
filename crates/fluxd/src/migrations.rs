@@ -13,10 +13,8 @@
 //! (F2) — quem chama `ensure_schema` já passou pela janela.
 
 use bollard::Docker;
-use bollard::exec::CreateExecOptions;
 use flux_common::config::{ProjectToml, RebuildPolicy};
 use flux_common::protocol::Env;
-use futures_util::StreamExt;
 
 use crate::docker::{self, find_app_container};
 use crate::events;
@@ -378,47 +376,26 @@ async fn exec_in_container(
     let id =
         c.id.clone()
             .ok_or_else(|| format!("{name}/{env}: container sem id"))?;
-
-    let exec = docker
-        .create_exec(
-            &id,
-            CreateExecOptions {
-                cmd: Some(vec!["sh".to_owned(), "-c".to_owned(), cmd.to_owned()]),
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| format!("create_exec: {e}"))?;
-
-    let mut output = String::new();
-    match docker.start_exec(&exec.id, None).await {
-        Ok(bollard::exec::StartExecResults::Attached {
-            output: mut output_stream,
-            ..
-        }) => {
-            while let Some(chunk) = output_stream.next().await {
-                match chunk {
-                    Ok(bollard::container::LogOutput::StdOut { message })
-                    | Ok(bollard::container::LogOutput::StdErr { message }) => {
-                        output.push_str(&String::from_utf8_lossy(&message));
-                    }
-                    Ok(_) => {}
-                    Err(e) => return Err(format!("exec stream: {e}")),
-                }
-            }
-        }
-        Ok(bollard::exec::StartExecResults::Detached) => {}
-        Err(e) => return Err(format!("start_exec: {e}")),
-    }
-
-    let inspected = docker
-        .inspect_exec(&exec.id)
-        .await
-        .map_err(|e| format!("inspect_exec: {e}"))?;
-    let code = inspected.exit_code.unwrap_or(-1);
-    Ok((output.trim_end().to_owned(), code))
+    // L3.3: esqueleto ÚNICO em docker::exec_no_app. Wrap `sh -c` mantido
+    // (migrations recebe string única); workdir não setado (container
+    // default); teto GENEROSO de 4 MiB — antes NÃO HAVIA teto (saída infinita
+    // encheria a memória do fluxd). Mudança DECLARADA: saída acima do teto
+    // com o exec rodando → exit -1 → tratado como falha (nunca falso
+    // sucesso).
+    const TETO_MIGRACOES: usize = 4 * 1024 * 1024;
+    let out = docker::exec_no_app(
+        docker,
+        &format!("{name}/{env}"),
+        &id,
+        &docker::ExecSpec {
+            cmd: vec![cmd.to_owned()],
+            wrap_sh: true,
+            workdir: None,
+            teto_bytes: Some(TETO_MIGRACOES),
+        },
+    )
+    .await?;
+    Ok((out.saida.trim_end().to_owned(), out.code))
 }
 
 /// Fresh FORÇADO de dev por comando (`flux db fresh`, pedido do Gabriel
