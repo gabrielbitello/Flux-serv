@@ -24,8 +24,19 @@ pedido).
 
 **Push**: branch `audit/modularizacao` pushada para o origin (primeiro push
 — 68 commits locais). Master local e remoto INTOCADOS: landar a refatoração
-no master é a próxima decisão, depois de o Gabriel validar no uso. O CI
-(test-engine incluído) roda no push.
+no master é a próxima decisão, depois de o Gabriel validar no uso.
+
+**PR #1 aberto** (audit/modularizacao → master) — o ci.yml não dispara em
+push de branch qualquer (`on: push: branches: [main, master]` +
+`pull_request:`), então o PR é o gatilho do CI. 1ª rodada VERMELHA no `fmt`:
+o step `dtolnay/rust-toolchain@stable` instala clippy/rustfmt no STABLE, o
+rustup vê o `rust-toolchain.toml` (pin 1.92.0, L0.1) e baixa a pinada SEM
+componentes — `cargo-fmt is not installed`. Fix: os 2 steps do ci.yml
+passam a `@1.92.0` (mesma versão do pin). **2ª rodada 100% VERDE: job
+`test` ✓ e job `test-engine` ✓** (os 3 testes gated de Docker rodaram no
+dind do CI pela primeira vez na história do repo). Falha pré-existente do
+CI no MASTER desde 18/10 (21 s, mesmo drift de rustfmt) — o pin da branch
+conserta; o merge do PR apaga o vermelho.
 
 ## 19/10/2026 — L7.2–L7.5 fechados: refatoração 41/41, plano EXECUTADO POR INTEIRO
 
