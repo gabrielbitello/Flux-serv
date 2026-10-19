@@ -62,20 +62,23 @@ fn html_response(status: StatusCode, page: String) -> Response {
 /// Página de espera — sempre HTTP 200, auto-refresh a cada 3 s (03). O logo
 /// do projeto (`[branding] logo_url`) entra quando declarado.
 pub fn wait(name: &str, phase: WaitPhase, dev: bool, logo: Option<&str>) -> Response {
+    // L4.1: name vem do Host — SEMPRE escapado nos VALORES (html_page é o
+    // formato confiável). Mesmo contrato do not_found.
+    let seguro = html_escape(name);
     let (heading, detail) = match phase {
         WaitPhase::Waking => (
-            format!("Acordando {name}…"),
+            format!("Acordando {seguro}…"),
             "Subindo o container. A página atualiza sozinha em 3 segundos.",
         ),
         WaitPhase::Provisioning => (
-            format!("Preparando {name}…"),
+            format!("Preparando {seguro}…"),
             "Dependências e build em andamento. A página atualiza sozinha.",
         ),
     };
     html_response(
         StatusCode::OK,
         html_page(
-            &format!("Flux — {name}"),
+            &format!("Flux — {seguro}"),
             &heading,
             &format!("<p>{detail}</p>"),
             dev,
@@ -86,16 +89,18 @@ pub fn wait(name: &str, phase: WaitPhase, dev: bool, logo: Option<&str>) -> Resp
 
 /// Página de estado "falhou" — 200 honesta, com apontamento para o painel (03).
 pub fn failed(name: &str, dev: bool, logo: Option<&str>) -> Response {
+    // L4.1: name vem do Host — escapado nos VALORES.
+    let seguro = html_escape(name);
     let body = format!(
-        "<p><code>{name}</code> não subiu após o timeout de health.</p>\
+        "<p><code>{seguro}</code> não subiu após o timeout de health.</p>\
 <p>As últimas linhas de log do container aparecem aqui quando o módulo de \
 Docker estiver no ar; o diagnóstico completo é no painel.</p>"
     );
     html_response(
         StatusCode::OK,
         html_page(
-            &format!("Flux — {name}"),
-            &format!("{name} não subiu"),
+            &format!("Flux — {seguro}"),
+            &format!("{seguro} não subiu"),
             &body,
             dev,
             logo,
@@ -105,16 +110,20 @@ Docker estiver no ar; o diagnóstico completo é no painel.</p>"
 
 /// Branch de worktree não existe localmente (03): página brandiada com a saída.
 pub fn branch_missing(name: &str, branch: &str, dev: bool, logo: Option<&str>) -> Response {
+    // L4.1: branch VEM DO HOST (sem validação de charset até o F11 ligar
+    // branch_exists real) e name também — ambos escapados nos VALORES.
+    let nome_seguro = html_escape(name);
+    let branch_segura = html_escape(branch);
     let body = format!(
-        "<p>A branch <code>{branch}</code> do projeto <code>{name}</code> não \
+        "<p>A branch <code>{branch_segura}</code> do projeto <code>{nome_seguro}</code> não \
 está baixada localmente no Windows.</p>\
 <p>Crie o worktree e a sync entrega: \
-<code>git worktree add ../{name}-{branch} {branch}</code></p>"
+<code>git worktree add ../{nome_seguro}-{branch_segura} {branch_segura}</code></p>"
     );
     html_response(
         StatusCode::OK,
         html_page(
-            &format!("Flux — {name}"),
+            &format!("Flux — {nome_seguro}"),
             "Branch não encontrada localmente",
             &body,
             dev,
@@ -281,6 +290,46 @@ mod tests {
             String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
         assert!(body.contains("zzz.bitello.xyz"), "body: {body}");
         assert!(body.contains("Host desconhecido"));
+    }
+
+    // L4.1: branch hostil NUNCA vira HTML vivo na branch_missing.
+    #[tokio::test]
+    async fn branch_missing_escapa_branch_e_name() {
+        let r = branch_missing("pedi", "<img src=x onerror=alert(1)>", true, None);
+        assert_eq!(r.status(), StatusCode::OK);
+        let corpo =
+            String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(!corpo.contains("<img"), "HTML vivo vazou: {corpo}");
+        assert!(
+            corpo.contains("&lt;img"),
+            "versão escapada deveria aparecer: {corpo}"
+        );
+    }
+
+    // L4.1: name hostil NUNCA vira HTML vivo na wait e na failed.
+    #[tokio::test]
+    async fn wait_e_failed_escapam_o_name() {
+        let hostil = "<script>alert(1)</script>";
+        for pagina in [
+            wait(hostil, WaitPhase::Waking, true, None),
+            failed(hostil, true, None),
+        ] {
+            let corpo = String::from_utf8(
+                pagina
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(!corpo.contains("<script>"), "HTML vivo vazou: {corpo}");
+            assert!(
+                corpo.contains("&lt;script&gt;"),
+                "versão escapada deveria aparecer: {corpo}"
+            );
+        }
     }
 
     #[tokio::test]
