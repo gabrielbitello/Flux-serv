@@ -121,15 +121,19 @@ fn injeta_script(html: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Encaminha a requisição para `target` (`host:porta` do container) mantendo
-/// path/query. Erro volta para o router reavaliar estado — nunca 502 cru
-/// (matriz 03).
-pub async fn forward(
-    client: &ProxyClient,
-    mut parts: Parts,
+/// Montagem PURA do request upstream (L5.5 — eram ~25 l. gêmeas entre
+/// `forward` e `forward_ws` × 5 trechos): path/query preservado, URI apontando
+/// pro alvo, HOST reescrito, headers assumidos. `strip` = hop-by-hop do
+/// PEDIDO (SÓ `forward` — no ws, Connection/Upgrade SÃO o pedido; a resposta
+/// de downgrade continua stripada dentro do forward_ws). `contexto` só
+/// diferencia as mensagens de erro ("proxy" / "ws").
+fn montar_upstream(
+    parts: &mut Parts,
     body: Body,
     target: &str,
-) -> Result<Response, String> {
+    contexto: &str,
+    strip: bool,
+) -> Result<Request<Body>, String> {
     let pq = parts
         .uri
         .path_and_query()
@@ -140,27 +144,52 @@ pub async fn forward(
         .authority(target)
         .path_and_query(pq)
         .build()
-        .map_err(|e| format!("alvo de proxy inválido {target:?}: {e}"))?;
+        .map_err(|e| format!("alvo de {contexto} inválido {target:?}: {e}"))?;
 
-    strip_hop_by_hop(&mut parts.headers);
+    if strip {
+        strip_hop_by_hop(&mut parts.headers);
+    }
     parts.headers.insert(
         header::HOST,
         HeaderValue::from_str(target)
-            .map_err(|e| format!("alvo de proxy inválido {target:?}: {e}"))?,
+            .map_err(|e| format!("alvo de {contexto} inválido {target:?}: {e}"))?,
     );
 
     let mut builder = Request::builder().method(parts.method.clone()).uri(uri);
     if let Some(h) = builder.headers_mut() {
         *h = std::mem::take(&mut parts.headers);
     }
-    let req = builder
+    builder
         .body(body)
-        .map_err(|e| format!("montagem do request para {target:?}: {e}"))?;
+        .map_err(|e| format!("montagem do {contexto} para {target:?}: {e}"))
+}
 
-    let resp: HttpResponse<hyper::body::Incoming> = client
+/// Monta e envia — o par completo usado pelos dois fluxos.
+async fn montar_e_enviar(
+    client: &ProxyClient,
+    parts: &mut Parts,
+    body: Body,
+    target: &str,
+    contexto: &str,
+    strip: bool,
+) -> Result<HttpResponse<hyper::body::Incoming>, String> {
+    let req = montar_upstream(parts, body, target, contexto, strip)?;
+    client
         .request(req)
         .await
-        .map_err(|e| format!("upstream {target}: {e}"))?;
+        .map_err(|e| format!("upstream {contexto} {target}: {e}"))
+}
+
+/// Encaminha a requisição para `target` (`host:porta` do container) mantendo
+/// path/query. Erro volta para o router reavaliar estado — nunca 502 cru
+/// (matriz 03).
+pub async fn forward(
+    client: &ProxyClient,
+    mut parts: Parts,
+    body: Body,
+    target: &str,
+) -> Result<Response, String> {
+    let resp = montar_e_enviar(client, &mut parts, body, target, "proxy", true).await?;
     let (mut p2, b2) = resp.into_parts();
     strip_hop_by_hop(&mut p2.headers);
 
@@ -202,36 +231,7 @@ pub async fn forward_ws(
     target: &str,
     down: Option<hyper::upgrade::OnUpgrade>,
 ) -> Result<Response, String> {
-    let pq = parts
-        .uri
-        .path_and_query()
-        .map(|p| p.as_str().to_owned())
-        .unwrap_or_else(|| "/".to_owned());
-    let uri = Uri::builder()
-        .scheme("http")
-        .authority(target)
-        .path_and_query(pq)
-        .build()
-        .map_err(|e| format!("alvo de ws inválido {target:?}: {e}"))?;
-
-    parts.headers.insert(
-        header::HOST,
-        HeaderValue::from_str(target)
-            .map_err(|e| format!("alvo de ws inválido {target:?}: {e}"))?,
-    );
-
-    let mut builder = Request::builder().method(parts.method.clone()).uri(uri);
-    if let Some(h) = builder.headers_mut() {
-        *h = std::mem::take(&mut parts.headers);
-    }
-    let req = builder
-        .body(body)
-        .map_err(|e| format!("montagem do ws para {target:?}: {e}"))?;
-
-    let resp: HttpResponse<hyper::body::Incoming> = client
-        .request(req)
-        .await
-        .map_err(|e| format!("upstream ws {target}: {e}"))?;
+    let resp = montar_e_enviar(client, &mut parts, body, target, "ws", false).await?;
     let (mut p2, b2) = resp.into_parts();
 
     // Sem 101 o dev server recusou o upgrade (caiu no HTTP normal): devolve
@@ -274,6 +274,42 @@ pub async fn forward_ws(
 
 #[cfg(test)]
 mod tests {
+    /// L5.5: a montagem única preserva path/query, reescreve HOST e stripa
+    /// hop-by-hop do pedido SOMENTE quando pedida (ws mantém Connection).
+    #[test]
+    fn montar_upstream_igual_para_os_dois_fluxos() {
+        let montar = |strip: bool| {
+            let uri = "http://pedi-d.bitello.xyz/up?x=1".parse::<Uri>().unwrap();
+            let req = Request::builder()
+                .uri(uri)
+                .header(header::HOST, "pedi-d.bitello.xyz")
+                .header(header::CONNECTION, "keep-alive")
+                .body(())
+                .unwrap();
+            let (mut parts, ()) = req.into_parts();
+            montar_upstream(&mut parts, Body::empty(), "172.18.0.4:80", "proxy", strip).unwrap()
+        };
+
+        let (com_strip, _) = montar(true).into_parts();
+        assert_eq!(com_strip.uri.host(), Some("172.18.0.4"));
+        assert_eq!(com_strip.uri.path_and_query().unwrap(), "/up?x=1");
+        assert_eq!(
+            com_strip.headers.get(header::HOST).unwrap(),
+            "172.18.0.4:80"
+        );
+        assert!(
+            com_strip.headers.get(header::CONNECTION).is_none(),
+            "hop-by-hop do pedido sai no fluxo http"
+        );
+
+        let (sem_strip, _) = montar(false).into_parts();
+        assert_eq!(
+            sem_strip.headers.get(header::CONNECTION).unwrap(),
+            "keep-alive",
+            "ws mantém Connection (É o pedido de upgrade)"
+        );
+    }
+
     use super::*;
     use axum::Router;
     use axum::body::Bytes;
