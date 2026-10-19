@@ -849,7 +849,6 @@ fn tunel_classificar(
     projeto: &str,
     services: &[String],
 ) -> Vec<(String, String)> {
-    let mut achados = Vec::new();
     let Ok(saida) = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             tokio::process::Command::new("docker")
@@ -862,11 +861,21 @@ fn tunel_classificar(
                 .await
         })
     }) else {
-        return achados;
+        return Vec::new();
     };
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&saida.stdout) else {
-        return achados;
+        return Vec::new();
     };
+    // L6.2: a REGRA é a mesma fn que o teste exercita — cópia apagada
+    // (bug na regra real nunca mais passa batido pelo teste da cópia).
+    classificar_de(&v, services)
+}
+
+/// Regra PURA do túnel (L6.2): `[(service, imagem)]` dos services cuja
+/// imagem resolvida é cloudflared. Testada direto (o teste da cópia foi
+/// apagado — era o único lugar onde a regra rodava).
+fn classificar_de(v: &serde_json::Value, services: &[String]) -> Vec<(String, String)> {
+    let mut achados = Vec::new();
     for svc in services {
         let Some(imagem) = v["services"][svc]["image"].as_str() else {
             continue;
@@ -1098,10 +1107,8 @@ mod escolha {
 
 #[cfg(test)]
 mod tunel {
-    // A classificação testada aqui é a MESMA lógica que o tunel_classificar
-    // aplica (match de imagem em minúsculas) — testada inline para não rodar
-    // docker compose no unit test.
-    #[allow(unused_imports)]
+    // L6.2: os testes exercitam a REGRA REAL (`classificar_de` de compose.rs)
+    // — a cópia local foi apagada (era o único lugar onde a regra rodava).
     use super::*;
 
     fn config_com(servicos: serde_json::Value) -> serde_json::Value {
@@ -1140,18 +1147,5 @@ mod tunel {
         }));
         let achados = classificar_de(&v, &["app".to_owned()]);
         assert!(achados.is_empty());
-    }
-
-    fn classificar_de(v: &serde_json::Value, services: &[String]) -> Vec<(String, String)> {
-        let mut achados = Vec::new();
-        for svc in services {
-            if let Some(imagem) = v["services"][svc]["image"].as_str() {
-                let baixo = imagem.to_lowercase();
-                if baixo.contains("cloudflared") || baixo.contains("cloudflare/cloudflared") {
-                    achados.push((svc.clone(), imagem.to_owned()));
-                }
-            }
-        }
-        achados
     }
 }
