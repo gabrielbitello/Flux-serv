@@ -877,7 +877,7 @@ async fn subir(
         return *r;
     }
     // Pasta sincronizada tem que existir — sem sync não há compose para subir.
-    let dir = std::path::Path::new(crate::temporary::PROJECTS_ROOT_PADRAO).join(&name);
+    let dir = std::path::Path::new(crate::paths::PROJECTS_ROOT_PADRAO).join(&name);
     if !dir.is_dir() {
         return erro(
             StatusCode::CONFLICT,

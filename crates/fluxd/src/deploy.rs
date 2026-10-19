@@ -358,7 +358,7 @@ async fn preparar_release(
     actor: Option<&str>,
     run: Option<&str>,
 ) {
-    let repo = PathBuf::from(crate::temporary::PROJECTS_ROOT_PADRAO).join(name);
+    let repo = PathBuf::from(crate::paths::PROJECTS_ROOT_PADRAO).join(name);
     let release_root = PathBuf::from(RELEASES_ROOT_PADRAO);
     match preparar_release_em(&repo, &release_root, name, sha).await {
         Ok(dir) => {

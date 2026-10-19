@@ -17,6 +17,7 @@ pub mod observe_page;
 pub mod pages;
 pub mod panel;
 pub mod panel_auth;
+pub mod paths;
 pub mod proxy;
 pub mod router;
 pub mod sleep;

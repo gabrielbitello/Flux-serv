@@ -20,10 +20,6 @@ use flux_common::config::ProjectToml;
 use crate::events;
 use crate::state::State;
 
-/// Raiz dos projetos na VM (02) — o `serve` passa o default; testes passam
-/// tempdir.
-pub const PROJECTS_ROOT_PADRAO: &str = "/srv/flux/projects";
-
 /// Nome seguro para virar sufixo de glob de diretório: só minúscula, dígito
 /// e traço. Qualquer outra coisa (herança de pasta ruim) NUNCA entra em
 /// padrão de remoção — o projeto é pulado com erro visível.
@@ -37,7 +33,13 @@ fn nome_seguro(name: &str) -> bool {
 /// Varredura da expiração: chamada pelo sweep (60 s) DEPOIS do ciclo de sono.
 /// `agora` epoch em segundos (injetável para testes).
 pub async fn expire_check(st: &State, docker: Option<Docker>, agora: i64) {
-    expire_check_em(st, docker, agora, Path::new(PROJECTS_ROOT_PADRAO)).await;
+    expire_check_em(
+        st,
+        docker,
+        agora,
+        Path::new(crate::paths::PROJECTS_ROOT_PADRAO),
+    )
+    .await;
 }
 
 pub async fn expire_check_em(st: &State, docker: Option<Docker>, agora: i64, raiz: &Path) {

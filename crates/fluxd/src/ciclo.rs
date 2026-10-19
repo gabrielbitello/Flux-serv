@@ -169,7 +169,7 @@ pub async fn down(
         return *r;
     }
     let projeto = docker::compose_project(&name, env);
-    let dir = std::path::Path::new(crate::temporary::PROJECTS_ROOT_PADRAO).join(&name);
+    let dir = std::path::Path::new(crate::paths::PROJECTS_ROOT_PADRAO).join(&name);
     if !dir.is_dir() {
         // Sem pasta não há compose nem containers do projeto: 409 (o sync é
         // pré-condição do ciclo, 02) — nunca 500 genérico.

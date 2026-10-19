@@ -257,7 +257,7 @@ pub async fn garantir_rede(nome: &str) -> Result<(), String> {
 /// estado/proxy_target gravados. Cada passo vira evento — nada silencioso.
 pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, env: String) {
     let projeto = format!("flux-{name}-{env}");
-    let dir = PathBuf::from(crate::temporary::PROJECTS_ROOT_PADRAO).join(&name);
+    let dir = PathBuf::from(crate::paths::PROJECTS_ROOT_PADRAO).join(&name);
     let st = &app.state;
 
     if !dir.is_dir() {
