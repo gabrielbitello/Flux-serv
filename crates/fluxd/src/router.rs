@@ -55,6 +55,18 @@ pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) ->
 /// Adaptador de estado do `POST /__flux/beat` (04): o router carrega
 /// `(Arc<AppState>, Router)` e o handler de beat.rs extrai `State<Arc<AppState>>`
 /// — axum-core só tem `FromRef` identidade, então a tupla é desembrulhada aqui.
+/// Cooldown anti-flapping (04) quando o projeto ACORDOU — a parte da
+/// política que estava escrita 2× nos braços Proxy e Wait (L5.6). Os verbos
+/// de acordar ficam em cada braço de propósito: `ensure_awake` (só o app,
+/// erro tratado local) no Proxy; `wake` (projeto inteiro, `Result`) no Wait.
+fn cooldown_se_acordou(app: &AppState, nome: &str, env: flux_common::protocol::Env, acordou: bool) {
+    if acordou {
+        let _ = app
+            .state
+            .set_cooldown(nome, env, crate::sleep::WAKE_COOLDOWN_SECS);
+    }
+}
+
 async fn beat_roteado(
     State((app, _panel)): State<(Arc<AppState>, Router)>,
     headers: axum::http::HeaderMap,
@@ -150,12 +162,9 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
             // < 1 s — 11; erros são logados e o forward reavalia).
             if let Some(d) = &app.docker {
                 let src = DockerSource::new(d.clone(), &app.state);
-                if src.ensure_awake(&name, env).await {
-                    // Acabou de acordar: cooldown anti-flapping (04).
-                    let _ = app
-                        .state
-                        .set_cooldown(&name, env, crate::sleep::WAKE_COOLDOWN_SECS);
-                }
+                let acordou = src.ensure_awake(&name, env).await;
+                // Acabou de acordar: cooldown anti-flapping (04).
+                cooldown_se_acordou(&app, &name, env, acordou);
             }
             // X-Forwarded (03): o forward reescreve o HOST para o IP do
             // container — sem o original em X-Forwarded-Host, o Laravel
@@ -245,15 +254,7 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                 tokio::spawn(async move {
                     let src = DockerSource::new(d, &st.state);
                     match src.wake(&nome, env).await {
-                        Ok(acordou) => {
-                            if acordou {
-                                let _ = st.state.set_cooldown(
-                                    &nome,
-                                    env,
-                                    crate::sleep::WAKE_COOLDOWN_SECS,
-                                );
-                            }
-                        }
+                        Ok(acordou) => cooldown_se_acordou(&st, &nome, env, acordou),
                         Err(e) => tracing::warn!("wake de {nome} falhou: {e}"),
                     }
                 });
