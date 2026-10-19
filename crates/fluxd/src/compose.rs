@@ -865,9 +865,13 @@ pub async fn religar_live_pos_acordar(
     app: &crate::AppState,
     docker: &bollard::Docker,
     name: &str,
+    env: flux_common::protocol::Env,
 ) {
     let _guard = LIVE_REDISPATCH.lock().await;
-    let Some(c) = crate::docker::find_app_container(docker, name).await else {
+    // O label de compose project é `flux-{name}-{env}` (fonte única
+    // `compose_project`) — o nome cru do projeto NUNCA acha container.
+    let project = crate::docker::compose_project(name, env);
+    let Some(c) = crate::docker::find_app_container(docker, &project).await else {
         tracing::debug!(
             "religar live {name}: sem container app (sem engine ou sem labels) — no-op"
         );
