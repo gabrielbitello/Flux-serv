@@ -338,8 +338,10 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                             // request: erro é evento warn lá dentro. Só dev:
                             // live é contrato de `[dev] live`.
                             if env == flux_common::protocol::Env::Dev {
-                                crate::compose::religar_live_pos_acordar(&st.state, &st, &d, &nome)
-                                    .await;
+                                crate::compose::religar_live_pos_acordar(
+                                    &st.state, &st, &d, &nome, env,
+                                )
+                                .await;
                             }
                         }
                         Err(e) => tracing::warn!("wake de {nome} falhou: {e}"),
