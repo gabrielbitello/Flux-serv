@@ -1,8 +1,10 @@
-//! Testes do módulo de sync (spec 02). Ponte `#[path]` sobre `src/sync.rs`:
-//! o main.rs ainda não declara o módulo (o integrador liga), mas o target de
-//! testes o compila como módulo avulso — mesmas deps do pacote, sem tocar o
-//! binário. Quando o integrador declarar `mod sync;`, este arquivo segue
-//! válido (os testes passam a rodar contra o módulo declarado, não a cópia).
+//! Testes do módulo de sync (spec 02). Ponte `#[path]` sobre `src/sync.rs` —
+//! PERMANENTE, não transitória: `main.rs` JÁ declara `mod sync;`, mas crate
+//! só-binário (sem [lib]) não expõe módulos a testes de integração, então o
+//! target recompila `src/sync.rs` como módulo avulso — mesmas deps do pacote,
+//! sem tocar o binário. Constraint da ponte: `src/sync.rs` não pode
+//! referenciar `crate::` do main.rs (a quebra é pega pelo clippy
+//! --all-targets do ci.yml — barulhenta, não silenciosa).
 
 #[path = "../src/sync.rs"]
 mod sync;
