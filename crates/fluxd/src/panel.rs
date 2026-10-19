@@ -588,12 +588,11 @@ fn curva_eventos(app: &AppState) -> Result<Option<String>, String> {
 // ---------------------------------------------------------------- formato
 
 /// Escape HTML para TODA interpolação de dado (nome de projeto, mensagem de
-/// evento, host...). Mesmo conjunto de replaces de `pages::html_escape`.
+/// evento, host...). L4.3: UMA definição no crate — delega ao dono
+/// (`pages::html_escape`); a cópia local podia divergir silenciosamente numa
+/// correção futura. Call sites e testes intocados.
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    crate::pages::html_escape(s)
 }
 
 /// Escape do valor usado em `LIKE '%nome%'` (detalhe de projeto).
