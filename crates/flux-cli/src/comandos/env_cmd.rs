@@ -5,25 +5,14 @@
 /// envia o `.env` da pasta local (rascunho gitignored) pra VM; `pull` traz o
 /// da VM pra pasta local; `edit` puxa pra um temp FORA do repo, abre o
 /// $EDITOR e devolve. Conteúdo nunca é exibido nem logado; destino sempre
-/// chmod 600. Tudo por SSH com a chave da entrada do ~/.ssh/config.
-pub(crate) fn env_ssh_alvo() -> String {
-    format!("{}@{}", crate::tunel::VM_USER, crate::tunel::VM_HOST)
-}
-
+/// chmod 600. Tudo por SSH (ssh_util, L7.3 — fonte única do alvo e dos flags
+/// batch) com a chave da entrada do ~/.ssh/config.
 pub(crate) fn env_remoto(name: &str) -> String {
     format!("/srv/flux/projects/{name}/.env")
 }
 
 pub(crate) fn env_pull(name: &str) {
-    let saida = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            &env_ssh_alvo(),
-            &format!("cat {}", env_remoto(name)),
-        ])
+    let saida = crate::ssh_util::ssh_vm(&[&format!("cat {}", env_remoto(name))])
         .output()
         .unwrap_or_else(|e| {
             eprintln!("erro: não consegui lançar o ssh: {e}");
@@ -49,36 +38,28 @@ pub(crate) fn env_push(name: &str) {
         eprintln!("erro: sem .env na pasta local para enviar: {e} (use `flux env pull` primeiro)");
         std::process::exit(1);
     });
-    let saida = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            &env_ssh_alvo(),
-            &format!(
-                "cat > {} && chmod 600 {}",
-                env_remoto(name),
-                env_remoto(name)
-            ),
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut filho| {
-            use std::io::Write;
-            filho
-                .stdin
-                .as_mut()
-                .expect("stdin pipado")
-                .write_all(&corpo)?;
-            filho.wait_with_output()
-        })
-        .unwrap_or_else(|e| {
-            eprintln!("erro: não consegui enviar o .env por ssh: {e}");
-            std::process::exit(127);
-        });
+    let saida = crate::ssh_util::ssh_vm(&[&format!(
+        "cat > {} && chmod 600 {}",
+        env_remoto(name),
+        env_remoto(name)
+    )])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .and_then(|mut filho| {
+        use std::io::Write;
+        filho
+            .stdin
+            .as_mut()
+            .expect("stdin pipado")
+            .write_all(&corpo)?;
+        filho.wait_with_output()
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("erro: não consegui enviar o .env por ssh: {e}");
+        std::process::exit(127);
+    });
     if !saida.status.success() {
         let cauda = String::from_utf8_lossy(&saida.stderr).trim().to_owned();
         eprintln!("erro: push do .env falhou: {cauda}");
@@ -92,15 +73,7 @@ pub(crate) fn env_push(name: &str) {
 
 pub(crate) fn env_edit(name: &str) {
     let temp = std::env::temp_dir().join(format!("flux-env-{name}.env"));
-    let saida = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            &env_ssh_alvo(),
-            &format!("cat {}", env_remoto(name)),
-        ])
+    let saida = crate::ssh_util::ssh_vm(&[&format!("cat {}", env_remoto(name))])
         .output()
         .unwrap_or_else(|e| {
             eprintln!("erro: não consegui lançar o ssh: {e}");

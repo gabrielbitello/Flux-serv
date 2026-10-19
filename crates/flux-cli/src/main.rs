@@ -16,6 +16,9 @@ mod api;
 mod comandos;
 mod contexto;
 mod sync;
+// SSH batch p/ a VM (L7.3): fonte única dos flags e do alvo — os 9 sites
+// chamam ssh_vm(); o vm_ssh interativo fica fora de propósito.
+mod ssh_util;
 // Túnel SSH p/ a API de controle + config global do usuário (spec 09).
 mod tunel;
 // Wizard `flux up -m` que gera o flux.toml (spec 06).

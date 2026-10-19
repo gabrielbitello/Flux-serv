@@ -3,7 +3,6 @@
 use crate::contexto::{LEASE_UP_SECS, contexto_atual, falhar};
 
 use crate::api::ApiClient;
-use crate::comandos::env_cmd::env_ssh_alvo;
 use crate::comandos::live::container_do_servico;
 
 /// Teto próprio do `flux build` (02): build de assets legítimo roda minutos
@@ -152,15 +151,7 @@ pub(crate) fn rodar_build_na_vm(container: &str, comando: &str) -> i32 {
         "flock /srv/flux/build.lock docker exec {container} sh -lc {}",
         shell_aspas_simples(&format!("cd /var/www && {comando}"))
     );
-    let mut filho = match std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            &env_ssh_alvo(),
-            &remoto,
-        ])
+    let mut filho = match crate::ssh_util::ssh_vm(&[&remoto])
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()

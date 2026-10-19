@@ -56,15 +56,7 @@ pub(crate) fn aplicar_overlays(origem: &Path, name: &str) -> Result<usize, Strin
         .stderr(std::process::Stdio::null())
         .spawn()
         .and_then(|mut tar| {
-            let mut ssh = std::process::Command::new("ssh")
-                .args([
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=8",
-                    &format!("{}@{}", crate::tunel::VM_USER, crate::tunel::VM_HOST),
-                    &format!("tar xzf - -C {destino}"),
-                ])
+            let mut ssh = crate::ssh_util::ssh_vm(&[&format!("tar xzf - -C {destino}")])
                 .stdin(tar.stdout.take().expect("stdout do tar pipado"))
                 .stderr(std::process::Stdio::piped())
                 .spawn()?;

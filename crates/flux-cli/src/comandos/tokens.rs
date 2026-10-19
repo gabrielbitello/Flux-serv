@@ -32,22 +32,12 @@ pub(crate) fn vm_ssh() -> ! {
 pub(crate) fn token_generate() {
     let token = token_novo();
     let hash = sha256_hex(token.as_bytes());
-    let ssh_alvo = format!("{}@{}", crate::tunel::VM_USER, crate::tunel::VM_HOST);
+    let ssh_alvo = crate::ssh_util::ssh_alvo();
     let remoto = format!(
         "sudo sqlite3 /srv/flux/state/flux.sqlite3 \"INSERT OR REPLACE INTO \
          settings(k, v) VALUES ('api_token_hash', '{hash}');\""
     );
-    let saida = match std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            &ssh_alvo,
-            &remoto,
-        ])
-        .output()
-    {
+    let saida = match crate::ssh_util::ssh_vm(&[&remoto]).output() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("erro: ssh não lançado (OpenSSH no PATH?): {e}");
@@ -108,24 +98,14 @@ pub(crate) fn project_token(name: &str) {
     }
     let token = token_novo();
     let hash = sha256_hex(token.as_bytes());
-    let ssh_alvo = format!("{}@{}", crate::tunel::VM_USER, crate::tunel::VM_HOST);
+    let ssh_alvo = crate::ssh_util::ssh_alvo();
     // `nome` validado contra [a-z0-9-] acima e `hash` é hex fixo de 64
     // chars gerado aqui — nenhum dos dois injeta no shell remoto.
     let remoto = format!(
         "sudo sqlite3 /srv/flux/state/flux.sqlite3 \"INSERT OR REPLACE INTO \
          deploy_tokens(project, token_hash) VALUES ('{nome}', '{hash}');\""
     );
-    let saida = match std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            &ssh_alvo,
-            &remoto,
-        ])
-        .output()
-    {
+    let saida = match crate::ssh_util::ssh_vm(&[&remoto]).output() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("erro: ssh não lançado (OpenSSH no PATH?): {e}");

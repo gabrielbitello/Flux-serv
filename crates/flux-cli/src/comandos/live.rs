@@ -4,8 +4,6 @@ use std::path::Path;
 
 use crate::contexto::contexto_atual;
 
-use crate::comandos::env_cmd::env_ssh_alvo;
-
 /// `flux live [env]` — toggle do live server SEM down (06/live).
 ///
 /// OFF: mata os processos node do container, limpa o `public/hot` (o site
@@ -54,16 +52,7 @@ pub(crate) fn live_toggle(env: &str) {
                  < $d/cmdline 2>/dev/null); case \"$c\" in *node*) kill ${{d#/proc/}} \
                  2>/dev/null;; esac; done; rm -f public/hot'"
             );
-            let _ = std::process::Command::new("ssh")
-                .args([
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=8",
-                    &env_ssh_alvo(),
-                    &remote,
-                ])
-                .status();
+            let _ = crate::ssh_util::ssh_vm(&[&remote]).status();
         }
         println!("live OFF — dev server morto, public/hot limpo; site no manifest (F5)");
         println!("comando guardado em {} — `flux live` religa", bak.display());
@@ -102,20 +91,12 @@ pub(crate) fn container_do_projeto(name: &str, env: &str) -> Option<String> {
 /// num ponto sem os outros divide o nome em silêncio.
 pub(crate) fn container_do_servico(name: &str, env: &str, service: &str) -> Option<String> {
     let projeto = format!("flux-{name}-{env}");
-    let saida = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            &env_ssh_alvo(),
-            &format!(
-                "docker ps --filter label=com.docker.compose.project={projeto} \
+    let saida = crate::ssh_util::ssh_vm(&[&format!(
+        "docker ps --filter label=com.docker.compose.project={projeto} \
                  --filter label=com.docker.compose.service={service} --format {{{{.Names}}}}"
-            ),
-        ])
-        .output()
-        .ok()?;
+    )])
+    .output()
+    .ok()?;
     String::from_utf8_lossy(&saida.stdout)
         .lines()
         .map(str::trim)
