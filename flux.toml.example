@@ -73,6 +73,10 @@
 #prod_idle_minutes = 30
 # CPU ceiling (%) that counts as "still busy" for the idle timer. Default: 5.0.
 #cpu_percent_teto = 5.0
+# Hold API requests while the project wakes up instead of answering 503:
+# the router starts the container and proxies once it is serving (for APIs
+# behind IDEs — clients break on refusals, tolerate waiting). Default: false.
+#api_hold = false
 
 # ---------------------------------------------------------------------------
 # Per-project prod limits (11).

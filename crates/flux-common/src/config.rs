@@ -179,6 +179,11 @@ pub struct SleepSection {
     pub prod_mode: Option<ProdSleepMode>,
     pub prod_idle_minutes: Option<u32>,
     pub cpu_percent_teto: Option<f64>,
+    /// Hold de API (18/10, pedido do Gabriel p/ zcode-api): com `true`, request
+    /// de API para projeto dormindo/subindo é SEGURA enquanto o container
+    /// acorda — nunca 503 de volta (IDEs quebram com recusa, toleram espera).
+    /// Default `false` = comportamento atual (503 + Retry-After, 12).
+    pub api_hold: Option<bool>,
 }
 
 /// Limites INDIVIDUAIS de prod (11).
@@ -655,6 +660,16 @@ rate = 500
     fn flux_toml_chave_desconhecida_e_erro() {
         let err = ProjectToml::parse_str("naame = \"vipers\"").unwrap_err();
         assert!(err.to_string().contains("naame"), "mensagem: {err}");
+    }
+
+    /// Hold de API (18/10): `[sleep].api_hold` parseia; ausente = None
+    /// (default OFF — nenhum projeto muda de comportamento sem a flag).
+    #[test]
+    fn sleep_api_hold_parseia_e_default_e_off() {
+        let t = ProjectToml::parse_str("[sleep]\napi_hold = true\nidle_minutes = 10\n").unwrap();
+        assert_eq!(t.sleep.as_ref().and_then(|s| s.api_hold), Some(true));
+        let vazio = ProjectToml::parse_str("").unwrap();
+        assert_eq!(vazio.sleep.and_then(|s| s.api_hold), None);
     }
 
     /// Chaves novas da 02: `[db].silence_window_secs` (default 5) e a seção

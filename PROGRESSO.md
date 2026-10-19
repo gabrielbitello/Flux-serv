@@ -199,6 +199,113 @@ derrubou/ajustou os que não pagavam o custo); mover código sem teste de
 caracterização antes; executar proposta sem ler o veredito e o lote de que
 ela depende no execution-plan.
 
+## 18/10/2026 — zcode-api no flux (LAN-only, sem Cloudflare) + RAM 6,5 GB + hold de API
+
+**Pedido**: subir o zcode-proxy (`TriDefender/zcode-api`) DENTRO do flux na VM,
+exposto pro PC só na LAN; dormir podendo, mas dormir = demorar pra responder,
+nunca recusar (IDEs quebram); acordar rápido; responder no formato Anthropic;
++500 MB de RAM; spec atualizada depois da migrate; após isso, VM congelada
+até ordem.
+
+**Entregue**:
+
+- **Patch `feat(fluxd): [sleep] api_hold`** (default OFF — nenhum projeto
+  muda sem a flag): projeto dormindo/subindo com `api_hold = true` no TOML NÃO
+  devolve página de espera/503; o router (`router.rs`) segura a request,
+  emite `docker start`, polla estado + porta TCP (mesmo probe do live) e
+  re-decide; teto de 90 s e fallback honesto. 34 (common) + 222 (fluxd, 2
+  testes novos) verdes no host.
+- **Projeto `zcode-api`** (`Documents/Projetos/zcode-api`, repo próprio:
+  `33a9b15`+`fd92398`): imagem `ghcr.io/tridefender/zcode-proxy:latest`,
+  `provider: zai`, `plan: coding-plan` (expõe `/v1/messages` formato
+  Anthropic → `api.z.ai/api/anthropic`), `[sleep] idle_minutes = 10,
+  api_hold = true`, health `/health`, sem `ZCODE_PROXY_API_KEY` (LAN-only —
+  chave quebraria o health probe do flux, ver NUNCA fazer). Secret de
+  credenciais em `.env` (gitignored, `flux env push`).
+- **RAM 6144 → 6644 MB** (`modifyvm` com a VM desligada; poweroff→modifyvm→
+  start). Spec 01 atualizada.
+- **Caddy**: bloco `http://zcode-api-d.bitello.xyz → 127.0.0.1:8080`
+  (HTTP puro, LAN-only; `cloudflared` segue inativo). Wildcard HTTPS e os
+  demais hosts intocados (`vippers-d` continua 308 → HTTPS, controle OK).
+- **fluxd novo deployado** na VM (41 s de build; backup
+  `/usr/local/bin/fluxd.bak-20261018-preapihold`) e `flux.exe` rebuilt no
+  host (precisa parsear `api_hold`).
+- **Hold provado em runtime**: request com o projeto em crash-loop segurou
+  exatamente os 90 s do teto e caiu no fallback (200 página de espera — o
+  cliente curl era browser). Journal: `hold: porta de zcode-api
+  (172.21.0.2:8080) não abriu em tempo — segue fluxo normal`.
+
+**Resolvido na sequência (mesmo dia)**: OAuth `auth login zai` concluído;
+credenciais em `/srv/flux/secrets/zcode-api/credentials.json` — **fora da
+árvore de sync**: arquivos que nasciam no bind `./dados/credenciais` sumiam
+em segundos (3 probes: escreve no container → some do host; sessão mutagen
+sadia e sem propagar; causa raiz não perseguida até o fim — suspeito
+mutagen, FATO = dir sincronizado não é storage de segredo). **Wake medido
+com o hold real**: `docker stop` → request pelo chain Caddy→fluxd→proxy →
+HTTP 200 em **0,85 s (frio) / 0,84 s (morno)**; acordado, `/health` = 34 ms.
+`POST /v1/messages` respondeu **200 em formato Anthropic** (`type: message`,
+thinking, usage) com `glm-5.3-flash` em 3,4 s; `/v1/models` lista 11 GLM.
+Uso pelo IDE: **Claude Code CLI conectado e provado** — hosts do PC com
+`192.168.140.2 zcode-api-d.bitello.xyz` (entrada elevada, UAC) e
+`~/.claude/settings.json` com `env.ANTHROPIC_BASE_URL=http://zcode-api-d.bitello.xyz`,
+`ANTHROPIC_AUTH_TOKEN=zcode-lan-local` (proxy não valida), main
+`ANTHROPIC_MODEL=glm-5.3` (sonnet/opus mapeados idem) e haiku/small =
+`glm-5.3-flash`; `claude -p "responda apenas: ok"` → **`ok`** (aviso
+cosmético de contexto desconhecido — assume 200k). Nota: `claim` automático
+do proxy falha preview com `(3001) parameter error` e re-tenta em 600 s —
+erro do endpoint de promoção upstream, sem impacto no proxy.
+
+**Janela de contexto configurada (19/10)**: docs do Claude Code
+(`code.claude.com/docs/en/model-config`) + docs do z.ai: GLM-5.3 = **1M de
+contexto / 128K de saída**; glm-5.3-flash = 300K. Fix: env
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` no `settings.json` (vale pra IDs
+custom, que não começam com `claude-`) — o aviso de "assumes 200k" sumiu;
+resta só a tag `[claude-code:unrecognized_model]` (reconhecimento, sem efeito).
+Sufixo `glm-5.3[1m]` também funciona ponta a ponta (testado).
+
+**Verificação a pedido do Gabriel (19/10) — teto real medido na API**: a
+doc do z.ai lida DIRETO (não snippet) confirma 1M/128K pro 5.3; e o próprio
+upstream DECLARA o teto no erro 1210: `max_tokens ... 限制数值范围[1,131072]`
+— **131072 aceito e 200000 rejeitado, no glm-5.3 E no glm-5.3-flash**
+(128K da doc = 131072 binário). Com o cap do flash conhecido e IGUAL,
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS=131072` setado e testado — ganho real pro
+5.3 always-thinking (thinking conta no `max_tokens`; o 1º teste cortou no
+`max_tokens=16`). Contexto de 1M NÃO foi testado de verdade (1M de input
+queima cota) — é claim da doc. Se o Gabriel viu 300K, era o CONTEXTO do
+flash; 200K é o default do Claude Code pra modelo desconhecido.
+
+**Doc complementar (19/10, ok do Gabriel)**: `flux.toml.example` documenta
+`[sleep] api_hold` (`258db66`); spec 03 ganhou o padrão "host LAN-only sem
+Cloudflare = bloco `http://` por host no Caddy" com a prova do não-vazamento
+(`973b177`); plano da auditoria (`audit/modularizacao`) ganhou seção
+"Delta 19/10" registrando o código pós-auditoria — `api_hold` no
+`router.rs`/`config.rs` — e que nenhuma proposta ficou obsoleta (`15c40c2`).
+
+**Slots de modelo por esforço (19/10, pedido do Gabriel)**: haiku =
+flash+low, sonnet = flash+high, opus = flash+max, principal = glm-5.3 (o
+upstream defaulta `max`). Como os 3 slots compartilham o mesmo modelo
+upstream, virou **patch no proxy** (fork `Projetos/zcode-proxy-fork`,
+commit `43799ea`): sufixo no nome do modelo (`-low/-min/-high/-max`) é
+tirado e injetado como `reasoning_effort` no body (campo do endpoint
+Anthropic do z.ai; cliente ganha se mandar o campo; rollback
+`ZCODE_PROXY_EFFORT_SUFFIX=off`). 44 testes do transform verdes; imagem
+`zcode-proxy:effort` buildada na VM (`/srv/flux/build/zcode-proxy`, FORA da
+sync); `settings.json` com os 4 slots; provado por curl (low/max, log
+`[effort]` no container) e `claude -p` → `ok`. Patch arquivado em
+`Projetos/zcode-api/patches/` (`630ab1f`). Atualizar o fork upstream =
+re-aplicar patch → rebuild → recreate.
+
+**O que NUNCA fazer**: confiar em diretório vazio na sync — mutagen não cria
+dir sem arquivo, e bind mount de dir inexistente falha com `OCI runtime
+create failed` (por isso o `.gitkeep` em `dados/credenciais/`);
+`systemctl reload caddy` com `admin off` no Caddyfile (reload usa a API
+`:2019`, que está morta — usar `restart`, ~1 s de interrupção); subir
+`ZCODE_PROXY_API_KEY` sem antes resolver o `/health` que o fluxd sonda sem
+credencial (401 → projeto eternamente "falho" no painel); `flux env push`
+antes do diretório do projeto existir na VM (o push não cria pasta);
+**guardar segredo dentro da árvore sincronizada** (arquivos novos sumiram —
+segredo morre em `/srv/flux/secrets/`, fora do sync).
+
 ## 18/10/2026 (parte 7) — redirects estáticos de host: entregues e DESLIGADOS no mesmo dia
 
 **Intenção** (pedido do Gabriel): DNS de `bitello.xyz` e `www.bitello.xyz`

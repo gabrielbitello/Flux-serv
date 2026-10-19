@@ -62,6 +62,18 @@ Limitações conhecidas documentadas no README do porteiro (o Flux resolve):
   por flag em memória (lição direta do porteiro).
 - **Cooldown anti-flapping (novo vs porteiro)**: após acordar, projeto fica
   imune a dormir por 5 min (evita loop acorda-dorme em visits curtos com cache).
+- **Hold de API (`[sleep] api_hold`, 18/10/2026)**: opt-in por projeto
+  (default OFF — sem a chave, nada muda). Com `api_hold = true`, request de
+  API para projeto `Sleeping`/`Starting` NÃO recebe a página de espera nem o
+  503 + Retry-After: o router (`router.rs`) SEGURA a request no ar, emite
+  `docker start`, polla o estado do container e a porta TCP (mesmo probe do
+  live, 06) e re-decide antes de responder — o cliente de API só vê a espera
+  e o proxy normal quando o app responde. Teto de 90 s
+  (`WAKE_HOLD_TIMEOUT_SECS`): estourou, cai no fluxo original (página/503
+  honestos — falha REAL não vira espera infinita). Motivação: IDEs apontadas
+  para uma API quebram com recusa e toleram espera (caso do
+  `zcode-api`/zcode-proxy na VM). Sem a flag o comportamento segue a matriz
+  da [12](12-vm-hibernacao-porteiro-central.md).
 - **Re-sync externo**: além do sweep de 60 s, o `fluxd` escuta `docker events`
   (die/start/stop) e re-sincroniza na hora — o porteiro espera o próximo sweep;
   o Flux reage em segundos.
