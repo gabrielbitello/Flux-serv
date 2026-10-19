@@ -3,7 +3,7 @@
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
 
-## 18/10/2026 (parte 9) — execução da refatoração: 29/34 passos, TRIO+G verdes, VM clone para teste
+## 18/10/2026 (parte 9) — execução da refatoração: 37/41 passos, TRIO+G verdes, VM clone para teste
 
 **Pedido do Gabriel**: "vai com tudo" — executar o plano, subindo uma CÓPIA
 da VM para teste (nada de derrubar o que estava em uso).
@@ -60,13 +60,16 @@ viva do L0.1. Corrigidos como commits separados antes de qualquer movimento.
   imports; o algoritmo está correto, o volume é grande demais para
   uma passada).
 
-**Estado final (19/10, fechamento)**: 49 commits na branch
-`audit/modularizacao` (30 passos do plano + 3 baseline + docs/specs/diário;
-59 arquivos, +5613/−3428). TRIO local + gate G (via clone) 100% verdes no
-último commit de código (L7.1, 92778dd). Zero push. VM original INTACTA e
-rodando. Clone `FluxTest` desligado e APAGADO no fechamento (regra:
-infra de teste não sobra) — 45 GB liberados em E:\flux\vms, zero snapshot
-restando em qualquer VM.
+**Estado final (19/10, fechamento)**: 51 commits na branch
+`audit/modularizacao` — **37 dos 41 passos do plano v2** (L0–L6 e L7.1;
+contagem corrigida 19/10: "30/34" contava só os commits com tag literal
+`refactor(L*)` — L0 veio como ci/test, L4.1 como fix, L1.6/L1.7 como docs;
+"34" era a frase da revisão v2 tomada como total) + 3 baseline de estilo +
+docs/specs/diário; 59 arquivos, +5613/−3428. TRIO local + gate G (via clone)
+100% verdes no último commit de código (L7.1, 92778dd). Zero push. VM
+original INTACTA e rodando. Clone `FluxTest` desligado e APAGADO no
+fechamento (regra: infra de teste não sobra) — 45 GB liberados em
+E:\flux\vms, zero snapshot restando em qualquer VM.
 
 **O que NUNCA fazer**: confiar no pipe `cargo ... | tail` para exit code
 (engole falhas de compile/clippy — usar `bash trio.sh` com pipefail ou

@@ -78,7 +78,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | VM RAM 6144 → 6644 MB (zcode-api headroom) | [01-vm-hyperv](../doc-old/specs/01-vm-hyperv.md) |
 | Toolchain pinned (`rust-toolchain.toml`, 1.92.0) — fmt/clippy no longer drift with the host toolchain | branch `audit/modularizacao`; commit from the refactoring batch |
 | CI: `test-engine` job (dind + `FLUX_DOCKER_URL`) — the 3 Docker-gated tests now run for real, no longer passing empty | branch `audit/modularizacao`; `.github/workflows/ci.yml` |
-| Modularization refactoring EXECUTED: 30 of 34 plan steps (L0–L6 + L7.1), 49 commits, TRIO + real-engine gate green; L7.2–L7.5 documented as mechanical follow-ups | branch `audit/modularizacao`; [refactoring/execution-plan.md](refactoring/execution-plan.md) |
+| Modularization refactoring EXECUTED: 37 of 41 plan steps (L0–L6 + L7.1), TRIO + real-engine gate green; L7.2–L7.5 documented as mechanical follow-ups | branch `audit/modularizacao`; [refactoring/execution-plan.md](refactoring/execution-plan.md) |
 
 ## Delivered in this session (2026-10-17)
 
@@ -126,4 +126,4 @@ matrix and its full history live in
 |---|---|
 | 2026-10-14 | Initial English documentation (matrix rebased on doc-old/STATUS.md + this session's deliveries) |
 | 2026-10-14 | Post-session pass: new entries anchored to their commits (`89886e0`, `66a22e5`); verification level recorded |
-| 2026-10-18/19 | R21 → SIM (`api_hold`, `cbfe02f`); zcode-api on the platform (LAN-only, secrets out of the sync tree); refactoring executed on `audit/modularizacao` (30/34 steps, structural only, zero behavior change) |
+| 2026-10-18/19 | R21 → SIM (`api_hold`, `cbfe02f`); zcode-api on the platform (LAN-only, secrets out of the sync tree); refactoring executed on `audit/modularizacao` (37/41 steps, structural only, zero behavior change) |
