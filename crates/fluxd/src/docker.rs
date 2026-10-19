@@ -45,7 +45,7 @@ pub(crate) fn rotulo_dev(estado: ContainerState, saudavel: bool) -> &'static str
 
 /// Tudo que o handler de status precisa para o rótulo DEV: estado do engine
 /// (verdade) + probe de saúde sobre o alvo do app. `probe` INJETÁVEL — o
-/// real é `compose::saude_ok(&http, target, path)`; o path de health vem do
+/// real é `bluegreen::saude_ok(&http, target, path)`; o path de health vem do
 /// TOML gravado (default `/up`). Sem engine → estado cru da fonte SQLite.
 pub(crate) async fn estado_dev_rotulado<P, Fut>(
     docker: &Docker,

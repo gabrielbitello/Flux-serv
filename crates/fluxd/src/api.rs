@@ -379,7 +379,7 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
                 &name,
                 app.http.clone(),
                 |client, target, path| async move {
-                    crate::compose::saude_ok(&client, &target, &path).await
+                    crate::bluegreen::saude_ok(&client, &target, &path).await
                 },
             )
             .await,
@@ -606,14 +606,14 @@ async fn trocar(
     let color = corpo.color.unwrap_or_else(|| "blue".to_owned());
     let drain = corpo
         .drain_secs
-        .unwrap_or(crate::compose::DRAIN_PADRAO_SECS);
+        .unwrap_or(crate::bluegreen::DRAIN_PADRAO_SECS);
     if drain > 300 {
         return erro(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("drain_secs {drain} acima do teto da 10 (300 s)"),
         );
     }
-    match crate::compose::trocar_cor(app, &name, &color, drain).await {
+    match crate::bluegreen::trocar_cor(app, &name, &color, drain).await {
         Ok((velha, drenada)) => Json(SwitchOut {
             project: name,
             cor_nova: color,

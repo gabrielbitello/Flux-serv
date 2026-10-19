@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod beat;
+pub mod bluegreen;
 pub mod ciclo;
 pub mod compose;
 pub mod decision;
