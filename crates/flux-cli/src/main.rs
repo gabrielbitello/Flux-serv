@@ -10,6 +10,7 @@ mod api;
 // Sync contínua (spec 02): monta argumentos e executa o mutagen — consumida
 // por `flux sync`, `flux build`, `flux watch` e pelo `flux up` (fase 02
 // ligada; o allow de dead_code do módulo saiu junto com o motivo).
+mod contexto;
 mod sync;
 // Túnel SSH p/ a API de controle + config global do usuário (spec 09).
 mod tunel;
@@ -19,17 +20,12 @@ mod wizard;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use flux_common::config::ProjectToml;
+use contexto::{LEASE_UP_SECS, contexto_atual, falhar, parse_env, sha256_hex};
 use flux_common::protocol::Env;
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 
 use crate::api::{ApiClient, ApiError};
-
-/// Lease do `flux up` (04): cobre uma sessão de trabalho padrão; renovado a
-/// cada ttl/2 enquanto o comando vive e morrendo sozinho depois (o sono é o
-/// padrão da plataforma, não exceção).
-const LEASE_UP_SECS: i64 = 15 * 60;
 
 /// Teto de espera pelo acordar do container no `flux up` (build de primeira
 /// subida é de minutos; acima disso o problema é visível no painel).
@@ -445,96 +441,6 @@ async fn main() {
 }
 
 // ------------------------------------------------------------- contexto 06
-
-/// Projeto do diretório atual (06: "diretório = contexto"). `flux.toml`
-/// explícito vence; sem ele, detecção mínima pelo nome da pasta com AVISO —
-/// nunca dedução silenciosa.
-struct Contexto {
-    name: String,
-    toml: String,
-    toml_hash: String,
-    /// Raiz do repo (alpha da sync, 02).
-    dir: std::path::PathBuf,
-}
-
-fn contexto_atual() -> Contexto {
-    let cwd = match std::env::current_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("erro: não consegui ler o diretório atual: {e}");
-            std::process::exit(1);
-        }
-    };
-    let pasta = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            eprintln!(
-                "erro: diretório atual sem nome de pasta utilizável: {}",
-                cwd.display()
-            );
-            std::process::exit(1);
-        });
-    let caminho = cwd.join("flux.toml");
-    let dir = cwd.clone();
-    let (toml, name) = if caminho.exists() {
-        let src = match std::fs::read_to_string(&caminho) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("erro: lendo {}: {e}", caminho.display());
-                std::process::exit(1);
-            }
-        };
-        let parsed = match ProjectToml::parse_str(&src) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("erro: {} inválido: {e}", caminho.display());
-                std::process::exit(2);
-            }
-        };
-        (src, parsed.effective_name(&pasta).to_owned())
-    } else {
-        eprintln!(
-            "aviso: sem flux.toml em {} — projeto herdando o nome da pasta ({pasta}) e defaults da plataforma",
-            cwd.display()
-        );
-        (String::new(), pasta)
-    };
-    Contexto {
-        toml_hash: sha256_hex(toml.as_bytes()),
-        name,
-        toml,
-        dir,
-    }
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(data);
-    let mut s = String::with_capacity(64);
-    for b in h.finalize() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-fn parse_env(env: &str) -> Env {
-    match env.parse() {
-        Ok(e) => e,
-        Err(m) => {
-            eprintln!("erro: {m}");
-            std::process::exit(2);
-        }
-    }
-}
-
-/// Saída de erro padronizada: causa do `ApiError` no stderr + exit code do
-/// erro (06: erro nunca sai com exit 0; 09: causa sempre visível).
-fn falhar(e: ApiError) -> ! {
-    eprintln!("erro: {e}");
-    std::process::exit(e.exit_code())
-}
 
 // ------------------------------------------------------- token da API (09)
 
