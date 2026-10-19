@@ -8,3 +8,4 @@ pub(crate) mod live;
 pub(crate) mod logs;
 pub(crate) mod sync_cmd;
 pub(crate) mod tokens;
+pub(crate) mod watch;
