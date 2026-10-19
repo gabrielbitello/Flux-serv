@@ -1,4 +1,4 @@
-//! Testes do módulo de sync (spec 02). Ponte `#[path]` sobre `src/sync.rs` —
+//! Testes do módulo de sync (spec 02). Ponte `#[path]` sobre `src/sync/mod.rs` —
 //! PERMANENTE, não transitória: `main.rs` JÁ declara `mod sync;`, mas crate
 //! só-binário (sem [lib]) não expõe módulos a testes de integração, então o
 //! target recompila `src/sync.rs` como módulo avulso — mesmas deps do pacote,
@@ -6,7 +6,7 @@
 //! referenciar `crate::` do main.rs (a quebra é pega pelo clippy
 //! --all-targets do ci.yml — barulhenta, não silenciosa).
 
-#[path = "../src/sync.rs"]
+#[path = "../src/sync/mod.rs"]
 mod sync;
 
 use std::path::{Path, PathBuf};
