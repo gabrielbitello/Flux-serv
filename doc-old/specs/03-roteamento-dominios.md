@@ -96,6 +96,47 @@ http://zcode-api-d.bitello.xyz {
 - `admin off` mata o `systemctl reload` (a API :2019 não existe): mudança no
   Caddyfile é `systemctl restart` (~1 s de interrupção).
 
+#### Fechamento do padrão: gate de token + HTTPS negado (19/10/2026)
+
+O túnel público da CF entra no `*.bitello.xyz` **:443** (TLS) — o bloco
+coringa — e o fluxd roteava `zcode-api-d` do mesmo jeito: **a URL pública
+ficava aberta** (o `zcode-proxy` ignora credenciais de entrada; POST com
+`x-api-key` mentirosa retornava 200 e queimava a cota z.ai — provado). Três
+camadas fecharam, todas na borda (sem rebuild do container):
+
+```caddy
+# 1. HTTPS desse host = só existe para o túnel público — nega tudo.
+https://zcode-api-d.bitello.xyz {
+	tls internal
+	respond 403
+}
+
+# 2. HTTP (o caminho do PC via hosts) exige o token do Claude Code
+#    (ANTHROPIC_AUTH_TOKEN, que o SDK manda como Authorization: Bearer).
+http://zcode-api-d.bitello.xyz {
+	@sem_token not header Authorization "Bearer {TOKEN}"
+	handle @sem_token {
+		respond 401
+	}
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+- **Números medidos (19/10)**: direto via hosts, quente = **36-40 ms**
+  (`/v1/models`); a MESMA request forçada pela borda CF = **92-97 ms**
+  (o CF custa ~55 ms/request mesmo quente — por isso LAN-only). Wake frio
+  com hold = 0,8-2,2 s (POST real de modelo: 2,19 s fim a fim).
+- Scanner sem token custa **6-7 ms de 401/403 na borda** e NUNCA acorda
+  container (o gate responde antes do fluxd).
+- A lição de roteamento: bloco específico vence coringa — o gate no `:80`
+  NÃO cobria o túnel, que entra no `:443` do coringa. Sempre provar o
+  caminho público FORÇANDO o IP da borda (`curl --resolve host:443:IP-DA-CF
+  https://host/...`) — `nslookup` não serve (ignora o hosts) e o caminho
+  interno mente sobre o externo.
+- O hostname no painel da CF (Zero Trust → tunnel) continua configurado;
+  com o 403 do HTTPS e o 401 do HTTP, ficou inofensivo. Removê-lo lá é
+  limpeza opcional.
+
 ### fluxd router (o "porteiro" do Flux)
 
 - Dispatch por `Host` exato: `flux.bitello.xyz` → painel; `{name}-d.bitello.xyz`

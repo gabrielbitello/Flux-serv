@@ -327,9 +327,21 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                 let env = host_env(&host);
                 let nome = name.clone();
                 tokio::spawn(async move {
-                    let src = DockerSource::new(d, &st.state);
+                    let src = DockerSource::new(d.clone(), &st.state);
                     match src.wake(&nome, env).await {
-                        Ok(acordou) => cooldown_se_acordou(&st, &nome, env, acordou),
+                        Ok(acordou) => {
+                            cooldown_se_acordou(&st, &nome, env, acordou);
+                            // Feature 19/10: acordou = religa o live de dev
+                            // (o stop do sono matou o vite junto; antes só o
+                            // `flux up` religava e o site voltava sem HMR).
+                            // Idempotente (decidir_live) e NUNCA afeta o
+                            // request: erro é evento warn lá dentro. Só dev:
+                            // live é contrato de `[dev] live`.
+                            if env == flux_common::protocol::Env::Dev {
+                                crate::compose::religar_live_pos_acordar(&st.state, &st, &d, &nome)
+                                    .await;
+                            }
+                        }
                         Err(e) => tracing::warn!("wake de {nome} falhou: {e}"),
                     }
                 });

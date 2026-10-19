@@ -566,7 +566,7 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             t.rsplit_once(':')
                 .map(|(parte_ip, _porta): (&str, &str)| parte_ip.to_owned())
         });
-        subir_live_se_configurado(st, &app, &name, &projeto, &principal, ip.as_deref()).await;
+        subir_live_se_configurado(st, &app, &name, &projeto, &principal, ip.as_deref(), "up").await;
     }
 }
 
@@ -688,8 +688,9 @@ async fn matar_vite_zumbis(st: &crate::state::State, projeto: &str, service: &st
 }
 
 /// Dispara o live server de dev quando o flux.toml do projeto (lido do state,
-/// como o temporary lê) declara `[dev] live`. NUNCA falha o up: todo erro é
-/// evento warn com a causa real.
+/// como o temporary lê) declara `[dev] live`. NUNCA falha o chamador: todo
+/// erro é evento warn com a causa real. `origem` marca o rastro do evento
+/// ("up" no fluxo de subida, "wake" no religar pós-sono).
 async fn subir_live_se_configurado(
     st: &crate::state::State,
     app: &crate::AppState,
@@ -697,6 +698,7 @@ async fn subir_live_se_configurado(
     projeto: &str,
     service: &str,
     ip: Option<&str>,
+    origem: &str,
 ) {
     let toml_src = match st.project_toml(name) {
         Ok(Some(t)) => t,
@@ -705,7 +707,7 @@ async fn subir_live_se_configurado(
             events::event(
                 st,
                 "warn",
-                "up",
+                origem,
                 &format!("{projeto}: live não disparado — falha lendo flux.toml do state: {e}"),
             );
             return;
@@ -717,7 +719,7 @@ async fn subir_live_se_configurado(
             events::event(
                 st,
                 "warn",
-                "up",
+                origem,
                 &format!("{projeto}: live não disparado — flux.toml do state não parseia: {e}"),
             );
             return;
@@ -730,7 +732,7 @@ async fn subir_live_se_configurado(
         events::event(
             st,
             "warn",
-            "up",
+            origem,
             &format!("{projeto}: [dev] live declarado VAZIO no flux.toml — nada a executar"),
         );
         return;
@@ -751,7 +753,7 @@ async fn subir_live_se_configurado(
         events::event(
             st,
             "info",
-            "up",
+            origem,
             &format!(
                 "{projeto}: live server já ativo (hot vivo + :{} respondendo) — \
                  pulando re-disparo",
@@ -769,7 +771,7 @@ async fn subir_live_se_configurado(
                 Ok(()) => events::event(
                     st,
                     "warn",
-                    "up",
+                    origem,
                     &format!(
                         "{projeto}: hot ÓRFÃO removido — dev server morto sem a porta {}",
                         crate::decision::VITE_PORT
@@ -779,7 +781,7 @@ async fn subir_live_se_configurado(
                 Err(e) => events::event(
                     st,
                     "warn",
-                    "up",
+                    origem,
                     &format!("{projeto}: falha removendo hot órfão: {e}"),
                 ),
             }
@@ -793,7 +795,7 @@ async fn subir_live_se_configurado(
     events::event(
         st,
         "info",
-        "up",
+        origem,
         &format!("{projeto}: disparando live server de dev ({service}): {live}"),
     );
     match tokio::process::Command::new("docker")
@@ -805,7 +807,7 @@ async fn subir_live_se_configurado(
             events::event(
                 st,
                 "info",
-                "up",
+                origem,
                 &format!("{projeto}: live server iniciado ({live})"),
             );
         }
@@ -822,7 +824,7 @@ async fn subir_live_se_configurado(
             events::event(
                 st,
                 "warn",
-                "up",
+                origem,
                 &format!(
                     "{projeto}: live server falhou ao iniciar (o up segue de pé): exit {} {cauda}",
                     s.status.code().unwrap_or(-1)
@@ -833,11 +835,63 @@ async fn subir_live_se_configurado(
             events::event(
                 st,
                 "warn",
-                "up",
+                origem,
                 &format!("{projeto}: live server não disparado (o up segue de pé): {e}"),
             );
         }
     }
+}
+
+/// Trava do religar pós-acordar: N requests chegando juntos no projeto que
+/// acabou de acordar não disputam o spawn — o `decidir_live` de dentro já é
+/// idempotente, mas duas checagens concorrentes podem se cruzar (ambas veem
+/// a porta morta antes de qualquer spawn) e o segundo `npm run dev` nasce na
+/// 5174 fora do roteamento. Global de propósito: spawn de live é raro e o
+/// trecho crítico é curto (probe + `exec -d`).
+static LIVE_REDISPATCH: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Religa o live server de dev quando o projeto acorda PELO ROUTER (feature
+/// 19/10): o `docker stop` do sono mata o vite junto com o container, e até
+/// aqui só o `flux up` religava — quem abria o site acordava o app sem HMR
+/// até rodar um comando na mão. Encontra o container app pelos labels (MESMA
+/// regra do `find_app_container`: service `app` ou primeiro), deriva
+/// projeto/service/IP do inspect e chama o mesmo caminho do up
+/// (`subir_live_se_configurado`), cuja idempotência decide sozinho se há o
+/// que fazer. Sem engine, sem container ou sem labels de compose = no-op
+/// silencioso (rastro debug/warn, nunca evento nem erro de request).
+pub async fn religar_live_pos_acordar(
+    st: &crate::state::State,
+    app: &crate::AppState,
+    docker: &bollard::Docker,
+    name: &str,
+) {
+    let _guard = LIVE_REDISPATCH.lock().await;
+    let Some(c) = crate::docker::find_app_container(docker, name).await else {
+        tracing::debug!(
+            "religar live {name}: sem container app (sem engine ou sem labels) — no-op"
+        );
+        return;
+    };
+    let labels = c.config.as_ref().and_then(|cfg| cfg.labels.as_ref());
+    let Some(projeto) = labels
+        .and_then(|l| l.get("com.docker.compose.project"))
+        .cloned()
+    else {
+        tracing::warn!("religar live {name}: container app sem label de compose project — no-op");
+        return;
+    };
+    let service = labels
+        .and_then(|l| l.get("com.docker.compose.service"))
+        .cloned()
+        .unwrap_or_else(|| "app".to_owned());
+    // IP na MESMA fonte do up (`proxy_target_from` sobre o inspect: `ip:80`
+    // → ip): a porta do dev server é conferida na VM, não dentro do container.
+    let ip = crate::docker::proxy_target_from(&c).and_then(|t| {
+        t.rsplit_once(':')
+            .map(|(parte_ip, _porta): (&str, &str)| parte_ip.to_owned())
+    });
+    subir_live_se_configurado(st, app, name, &projeto, &service, ip.as_deref(), "wake").await;
 }
 
 /// Túnel/cloudflared por service: `[(service, imagem)]` dos services que
