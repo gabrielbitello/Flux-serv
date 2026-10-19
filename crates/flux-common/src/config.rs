@@ -433,61 +433,16 @@ impl ProjectToml {
     /// começar com `vite-` (prefixo reservado do dev server) nem o rótulo
     /// terminar com o `dev_suffix` (colide com a derivação de dev). Charset
     /// de host legal. Erro SEMPRE cita a chave. Os hosts derivados continuam
-    /// valendo — `[domains]` ADICIONA, nunca remove.
+    /// `[domains]` (09): valida e normaliza os hosts custom do projeto →
+    /// `(prod, dev)`. DELEGAÇÃO de 1 linha — a REGRA vive em `host.rs`
+    /// (L2.3): quem valida na escrita e quem interpreta na leitura (`vite-`,
+    /// `dev_suffix`) precisam ser o mesmo arquivo, senão nasce host que
+    /// valida no registro mas não roteia na borda (ou vice-versa).
     pub fn hosts_custom(
         &self,
         domain: &DomainConfig,
     ) -> Result<(Option<String>, Option<String>), String> {
-        let validar = |valor: Option<&String>, chave: &str| -> Result<Option<String>, String> {
-            let Some(h) = valor else {
-                return Ok(None);
-            };
-            let h = h.trim().to_ascii_lowercase();
-            let zona = format!(".{}", domain.zone);
-            let Some(rotulo) = h.strip_suffix(&zona) else {
-                return Err(format!(
-                    "[domains] {chave} = \"{h}\" está fora da zona .{} — a plataforma só \
-                     roteia hosts dentro da zona (o túnel cobre *.{}); host externo precisa \
-                     de DNS/ingress próprios e NÃO é suportado",
-                    domain.zone, domain.zone
-                ));
-            };
-            if rotulo.is_empty() {
-                return Err(format!(
-                    "[domains] {chave} é a zona pelada — falta o rótulo"
-                ));
-            }
-            if h == domain.panel_host {
-                return Err(format!(
-                    "[domains] {chave} = \"{h}\" colide com o host do painel — escolha outro"
-                ));
-            }
-            if rotulo.starts_with("vite-") {
-                return Err(format!(
-                    "[domains] {chave}: prefixo \"vite-\" é reservado do dev server (06)"
-                ));
-            }
-            if rotulo.ends_with(domain.dev_suffix.as_str()) {
-                return Err(format!(
-                    "[domains] {chave}: rótulo termina com \"{}\" — colide com a derivação \
-                     de dev; escolha um rótulo sem o sufixo",
-                    domain.dev_suffix
-                ));
-            }
-            if !h
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
-            {
-                return Err(format!(
-                    "[domains] {chave} = \"{h}\" tem caractere fora de [a-z0-9-.]"
-                ));
-            }
-            Ok(Some(h))
-        };
-        let domains = self.domains.as_ref();
-        let prod = validar(domains.and_then(|d| d.prod.as_ref()), "prod")?;
-        let dev = validar(domains.and_then(|d| d.dev.as_ref()), "dev")?;
-        Ok((prod, dev))
+        crate::host::validar_hosts_custom(self.domains.as_ref(), domain)
     }
 }
 
@@ -681,47 +636,6 @@ rate = 500
         let sync = t.sync.as_ref().unwrap();
         assert!(sync.use_dockerignore());
         assert_eq!(sync.dockerignore_path(), "config/.dockerignore");
-    }
-
-    /// `[domains]` (09): validação dos hosts custom na borda do registro.
-    #[test]
-    fn hosts_custom_valida_zona_reservas_e_charset() {
-        let domain = DomainConfig::default();
-        let parse = |src: &str| ProjectToml::parse_str(src).unwrap();
-
-        // Ambos válidos: vêm em minúsculas, host inteiro.
-        let (prod, dev) =
-            parse("[domains]\nprod = \"VIP.bitello.xyz\"\ndev = \"Vip-Dev.bitello.xyz\"")
-                .hosts_custom(&domain)
-                .unwrap();
-        assert_eq!(prod.as_deref(), Some("vip.bitello.xyz"));
-        assert_eq!(dev.as_deref(), Some("vip-dev.bitello.xyz"));
-
-        // Sem seção: nada a validar.
-        let (prod, dev) = parse("").hosts_custom(&domain).unwrap();
-        assert_eq!(prod, None);
-        assert_eq!(dev, None);
-
-        // Fora da zona (inclui a zona pelada — sufixo não casa): erro com a
-        // chave na mensagem.
-        for (src, parte) in [
-            ("[domains]\nprod = \"vippers.com.br\"", "fora da zona"),
-            ("[domains]\nprod = \"bitello.xyz\"", "fora da zona"),
-        ] {
-            let err = parse(src).hosts_custom(&domain).unwrap_err();
-            assert!(err.contains(parte), "caso {src}: {err}");
-        }
-
-        // Painel, prefixo vite-, sufixo de dev, charset.
-        for (src, parte) in [
-            ("[domains]\nprod = \"flux.bitello.xyz\"", "painel"),
-            ("[domains]\ndev = \"vite-x.bitello.xyz\"", "vite-"),
-            ("[domains]\nprod = \"x-d.bitello.xyz\"", "-d\""),
-            ("[domains]\nprod = \"a_b.bitello.xyz\"", "[a-z0-9-.]"),
-        ] {
-            let err = parse(src).hosts_custom(&domain).unwrap_err();
-            assert!(err.contains(parte), "caso {src}: {err}");
-        }
     }
 
     #[test]
