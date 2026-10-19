@@ -198,11 +198,7 @@ struct RegisterBody {
 /// adiante (06: chave desconhecida é erro).
 async fn register(State(app): State<Arc<AppState>>, Json(b): Json<RegisterBody>) -> Response {
     let nome = b.name.trim();
-    if nome.is_empty()
-        || !nome
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    if !flux_common::nomes::projeto_valido(nome) {
         return erro(
             StatusCode::UNPROCESSABLE_ENTITY,
             "nome de projeto inválido: use minúsculas, dígitos e '-' (vira host {name}.bitello.xyz)",

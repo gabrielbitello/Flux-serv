@@ -6,4 +6,5 @@ pub mod config;
 pub mod error;
 pub mod framework;
 pub mod host;
+pub mod nomes;
 pub mod protocol;

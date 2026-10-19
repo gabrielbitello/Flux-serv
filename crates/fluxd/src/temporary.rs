@@ -20,14 +20,12 @@ use flux_common::config::ProjectToml;
 use crate::events;
 use crate::state::State;
 
-/// Nome seguro para virar sufixo de glob de diretório: só minúscula, dígito
-/// e traço. Qualquer outra coisa (herança de pasta ruim) NUNCA entra em
-/// padrão de remoção — o projeto é pulado com erro visível.
+/// Nome seguro para virar sufixo de glob de diretório: o CONTRATO de nome de
+/// projeto (flux_common::nomes). Qualquer outra coisa (herança de pasta
+/// ruim) NUNCA entra em padrão de remoção — o projeto é pulado com erro
+/// visível.
 fn nome_seguro(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    flux_common::nomes::projeto_valido(name)
 }
 
 /// Varredura da expiração: chamada pelo sweep (60 s) DEPOIS do ciclo de sono.
