@@ -11,7 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Mesma versão do rust-toolchain.toml (L0.1) — instalar os componentes
+        # NA toolchain pinada; @stable instala no stable e o rustup baixa a
+        # pinada sem clippy/rustfmt (o cargo fmt morre "not installed").
+      - uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: clippy, rustfmt
 
@@ -48,7 +51,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Mesma versão do rust-toolchain.toml (L0.1) — instalar os componentes
+        # NA toolchain pinada; @stable instala no stable e o rustup baixa a
+        # pinada sem clippy/rustfmt (o cargo fmt morre "not installed").
+      - uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: clippy, rustfmt
 
