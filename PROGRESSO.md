@@ -3,6 +3,64 @@
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
 
+## 19/10/2026 (parte 3) — validação runtime TOTAL autorizada: CLI inteiro, fluxd deployado na VM, regressão verde
+
+**Ordem do Gabriel**: "n to usando o flux meu, pode fazer tudo e VC deve
+testar tudo que já tinha antes e garantir que TUDO ta funcionando na versão
+nova". Sandbox = djm (dormindo, sem uso); zcode-api só leitura (é a API
+desta conversa); vippers só o toggle live (idempotente).
+
+**CLI novo (release merged) — matriz completa, tudo que existia antes**:
+`status` nos 3 projetos ✓ · `ps` fora/dentro ✓ · `sync status` com sessão
+REAL (flux-vippers: alpha 6812/beta 6883, 71 pendências) ✓ · `logs --tail`
+em container morto ✓ · `logs -f` (SSE) preso até o timeout matar
+(rc=124=correto; o "exit 0" da 1ª tentativa era ruído do `head`) ✓ ·
+**`up` no djm: ciclo completo** — wake pollado 174 s, silêncio de árvore
+(rodada 1/3), 46 migrations, awake com lease, "pronto" ✓ · `exec` exit 0 E
+exit 42 repassado ✓ · `exec php -v` ✓ · **`build`: 3 m 08 s, vite na VM,
+[4/4] exit 0** (1ª tentativa bateu no erro honesto do scanner de
+estabilidade: `homepage.blade.php` deletado sem commit no repo do Gabriel —
+comportamento idêntico ao binário velho, movimento verbatim; testei o resto
+restaurando o arquivo de HEAD e re-deletando: estado líquido idêntico) ·
+**`env pull`+`push` roundtrip: md5 da VM idêntico antes/depois**
+(3365 bytes; draft local dele com backup e restaurado) ✓ · `live OFF`→`ON`
+no vippers: toml NET-ZERO (md5 igual), bak ciclando ✓ · `live` em projeto
+sem [dev] (djm): erro honesto ✓ · `token generate`: token gravado, auth dos
+OUTROS projetos intacta (token é por projeto) ✓ · `vm ssh`: interativo por
+design (sem BatchMode; sem TTY não roda daqui) ✓ · `down` devolve djm ao
+estado inicial (containers exited) ✓. Armadilha que voltou a morder:
+`flux build | tail` reportava exit 0 com erro — o pipe engole o exit code
+(já estava na lista NUNCA; medi sem pipe: exit 1 real).
+
+**Deploy do fluxd refatorado na VM**: tar do workspace → `~/flux-src`
+(sem o pin de toolchain — VM tem rustc 1.99 e já buildava) →
+`cargo build --release -p fluxd` em 25 s → **backup
+`fluxd.bak-20261019` → stop → mv (não cp, Text file busy) → start**.
+`systemctl is-active` = active.
+
+**Regressão pós-deploy — tudo verde**: API :7420 via túnel responde pros 3
+projetos ✓ · **painel :7421** (bind 127.0.0.1 por design — o 000 do curl
+direto era expectativa errada minha, o WARN do próprio log é a doc):
+login POST 303 (Argon2), dashboard 200, `/observe` 200 com dados "24 h",
+`<meta noindex>` presente ✓ · **página de espera REAL capturada pela
+internet**: `https://djm-d.bitello.xyz/` com djm dormindo = **200 +
+`x-robots-tag: noindex, nofollow, noarchive` + branding** — o R4 move pra
+SIM na matriz ✓ · 404 brandiado de host desconhecido (404 + "Flux") ✓ ·
+WAF path scan pela internet: **403** ✓ · zcode-api: HTTP 200 dormindo
+(HTTPS 000 = esperado — host LAN-only é HTTP-only, sem TLS) ✓ · SSE de
+logs contra o fluxd NOVO: stream preso 10 s (rc=124) ✓ · sessão do Claude
+Code (que passa pelo zcode-api) viva o tempo todo, inclusive durante o
+restart do fluxd ✓.
+
+**Estado final**: CLI e fluxd na versão refatorada, validados ponta a ponta
+em runtime. Master ainda sem a refatoração (PR #1 aguarda revisão). djm de
+volta dormindo como estava; sessão mutagen `flux-djm` criada pelo up (estado
+normal pós-up). Rollback do fluxd: `cp /usr/local/bin/fluxd.bak-20261019`.
+
+**O que NUNCA fazer** (novas entradas): testar exit code atrás de pipe
+(`| tail`/`| head` engolem — medir sem pipe ou PIPESTATUS); curl no painel
+direto no IP da VM — ele binda loopback, entrar por túnel ssh.
+
 ## 19/10/2026 (parte 2) — merge do master + binário do dia a dia atualizado, branch pushada
 
 **Ordem do Gabriel**: "pode dar merge, pode dar push".
