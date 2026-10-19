@@ -3,6 +3,47 @@
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
 
+## 19/10/2026 (parte 4) — feature: acordar religa o live de dev (vite volta com o site)
+
+**Pedido do Gabriel** (após o diagnóstico "quando um dev dorme o vite
+morre"): "A, e sim, é feature nova, já acabou a refatoração".
+
+**O buraco (diagnóstico com prova)**: sono de dev = `docker stop`
+(sleep.rs) — o vite morre com o container; o re-disparo do live morava
+SÓ dentro de `subir_projeto` (`compose.rs`), e os braços de acordar do
+router (`wake`/`ensure_awake`) nunca o chamavam. Quem abria o site
+acordava o app servindo do build, sem HMR, até rodar comando na mão.
+Nunca foi regressão — comportamento de sempre, preservado verbatim.
+
+**A feature** (PRs #2 + #3, mergeados): o braço `Wait` do router chama
+`compose::religar_live_pos_acordar` depois do wake — container app achado
+pelos labels (regra `find_app_container`), projeto/service/IP do inspect,
+spawn pelo MESMO caminho idempotente do up (`decidir_live`: hot + :5173
+vivos = Pular). Trava global (`LazyLock<Mutex>`) serializa wakes
+concorrentes — 2 checagens cruzadas nasceriam o 2º npm na 5174. Origem
+dos eventos parametrizada (`up`/`wake`). Só `Env::Dev`. Erro NUNCA afeta
+o request.
+
+**O bug do 1º PR (pego na VM, não no trio)**: o religar buscava container
+pelo NOME CRU (`vippers`) — o label é `com.docker.compose.project=
+flux-{name}-{env}`; `find_app_container` voltava vazio e o no-op era
+`tracing::debug`, INVISÍVEL. Foi `RUST_LOG=debug` no unit da VM +
+re-disparo + journal que entregou: "sem container app — no-op". Fix: o
+religar recebe `env` e monta o compose project pela fonte única
+`compose_project` (a mesma conversão de wake/ensure_awake/sleep).
+Lição dupla no diário: (1) no-op silencioso em nível debug = ponto cego
+proposital — quando o no-op é o caminho SUSPEITO, o rastro tem que ser
+info/event; (2) o trio local não executa engine: a primeira prova real de
+feature que fala com Docker é na VM — orçar o ciclo deploy+debug desde o
+começo.
+
+**Smoke na VM (provas)**: `flux down` vippers → request na URL → eventos
+scope `wake` ("disparando live server de dev (php)" → "live server
+iniciado") → `public/hot` vivo apontando pro host → site 200 via vite
+(1º hit 1,4 s, 2º 673 ms) → **exatamente 1 `npm run dev`** no container
+(idempotência) → `RUST_LOG` de debug removido, fluxd reiniciado limpo.
+Rollback: `fluxd.bak-20261019b`.
+
 ## 19/10/2026 (parte 3) — validação runtime TOTAL autorizada: CLI inteiro, fluxd deployado na VM, regressão verde
 
 **Ordem do Gabriel**: "n to usando o flux meu, pode fazer tudo e VC deve
