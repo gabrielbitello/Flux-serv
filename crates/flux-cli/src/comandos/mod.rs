@@ -5,4 +5,5 @@ pub(crate) mod build;
 pub(crate) mod env_cmd;
 pub(crate) mod live;
 pub(crate) mod logs;
+pub(crate) mod sync_cmd;
 pub(crate) mod tokens;
