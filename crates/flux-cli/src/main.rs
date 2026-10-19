@@ -2,9 +2,12 @@
 //! conforme a spec: a superfície de comandos é design de API, então nasce
 //! inteira com stubs que recusam com fase e exit ≠ 0 ("nada silencioso").
 //! Fase F6: os comandos do ciclo de dev falam com a API de controle do fluxd
-//! (:7420, 07) via `api.rs` — o CLI NUNCA toca em Docker direto (regra da 06);
-//! sem fluxd no ar, a mensagem traz a causa e o exit é ≠ 0. Contexto do
-//! projeto = diretório atual (`flux.toml` explícito ou nome da pasta).
+//! (:7420, 07) via `api.rs`; sem fluxd no ar, a mensagem traz a causa e o
+//! exit é ≠ 0. Contexto do projeto = diretório atual (`flux.toml` explícito
+//! ou nome da pasta). EXCEÇÃO declarada da regra "o CLI nunca toca em Docker
+//! direto" (06): 3 rotas ssh→docker de longa data — `build` (flock + exec),
+//! `live OFF` (kill do dev server) e `container_do_servico` (`docker ps` por
+//! label); unificá-las exigiria endpoint novo no fluxd, fora de escopo.
 
 mod api;
 // Sync contínua (spec 02): monta argumentos e executa o mutagen — consumida

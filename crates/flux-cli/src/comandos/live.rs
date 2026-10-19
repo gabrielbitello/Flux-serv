@@ -96,7 +96,10 @@ pub(crate) fn container_do_projeto(name: &str, env: &str) -> Option<String> {
 /// Nome do container de UM serviço do projeto (compose), via label — o MESMO
 /// mecanismo de resolução do exec no fluxd (labels
 /// `com.docker.compose.project`/`...service`, nunca nome de container), aqui
-/// por `docker ps` na VM por SSH. Primeiro match.
+/// por `docker ps` na VM por SSH. Primeiro match. O rótulo segue o contrato
+/// `flux-{name}[-{env}|-@{slug}-{env}]` — a MESMA convenção da sessão de sync
+/// (sync.rs), da listagem do `ps` (ciclo.rs) e do `watch` (watch.rs); mudar
+/// num ponto sem os outros divide o nome em silêncio.
 pub(crate) fn container_do_servico(name: &str, env: &str, service: &str) -> Option<String> {
     let projeto = format!("flux-{name}-{env}");
     let saida = std::process::Command::new("ssh")
