@@ -467,6 +467,18 @@ fn render_monitor(app: &AppState, f: &Filtro) -> String {
         esc(&janela_label(f.minutos)),
     ));
 
+    body.push_str(&filtros_html(app, f));
+    body.push_str(&serie_html(app, f, t0, now));
+    body.push_str(&drill_html(app, f, t0, now));
+    body.push_str(&picos_html(app, f));
+
+    layout("Flux — monitor", &body)
+}
+
+/// Filtros do monitor (L4.5). Erro de leitura aparece na página — nunca
+/// select fingindo vazio.
+fn filtros_html(app: &AppState, f: &Filtro) -> String {
+    let mut body = String::new();
     // ------------------------------------------------------------- filtros
     body.push_str(
         "<section><h2>Filtros</h2><form method=\"get\" action=\"/observe\" class=\"filtros\">",
@@ -540,7 +552,12 @@ fn render_monitor(app: &AppState, f: &Filtro) -> String {
         body.push_str(&erro_projetos);
     }
     body.push_str("</section>");
+    body
+}
 
+/// Curva geral da janela (L4.5): estado vazio dito, nunca silencioso.
+fn serie_html(app: &AppState, f: &Filtro, t0: i64, now: i64) -> String {
+    let mut body = String::new();
     // -------------------------------------------------------- curva geral
     body.push_str(&format!(
         "<section><h2>Série — {} · {}</h2>",
@@ -575,7 +592,13 @@ fn render_monitor(app: &AppState, f: &Filtro) -> String {
         ),
     }
     body.push_str("</section>");
+    body
+}
 
+/// Drill por container (L4.5): só sem filtro de container e com projeto
+/// escolhido — senão o estado é dito.
+fn drill_html(app: &AppState, f: &Filtro, t0: i64, now: i64) -> String {
+    let mut body = String::new();
     // ------------------------------------------------- drill por container
     // Só faz sentido SEM filtro de container (já está no drill) e COM projeto
     // escolhido — a consulta é por projeto. Sem um dos dois, o estado é dito.
@@ -633,7 +656,12 @@ fn render_monitor(app: &AppState, f: &Filtro) -> String {
         }
         body.push_str("</section>");
     }
+    body
+}
 
+/// Tabela de picos (L4.5): snapshot indisponível é dito com a causa.
+fn picos_html(app: &AppState, f: &Filtro) -> String {
+    let mut body = String::new();
     // ------------------------------------------------------------- picos
     body.push_str(&format!(
         "<section><h2>Picos — {} · {}</h2>",
@@ -702,8 +730,7 @@ fn render_monitor(app: &AppState, f: &Filtro) -> String {
         body.push_str("</table>");
     }
     body.push_str("</section><p><a href=\"/\">← dashboard</a></p>");
-
-    layout("Flux — monitor", &body)
+    body
 }
 
 // -------------------------------------------------------------------- testes
