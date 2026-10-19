@@ -109,7 +109,6 @@ pub struct DbSection {
     /// node/rust: comando de schema dentro do container (06); vazio = sem
     /// pipeline automático (fluxd avisa, nunca silêncio).
     pub migrate_cmd: Option<String>,
-    pub image_guard: Option<bool>,
     /// Janela de silêncio da árvore ANTES da coleta de migrations no `flux up`
     /// (02): a coleta lê `database/migrations` do disco local e o hash vai
     /// para o plano de rebuild — coletar no meio de uma escrita diverge do
@@ -320,7 +319,6 @@ pub struct GlobalConfig {
     pub domain: DomainConfig,
     pub api: Option<ApiSection>,
     pub defaults: Option<DefaultsSection>,
-    pub image_guard: Option<ImageGuardSection>,
     pub limits: Option<GlobalLimitsSection>,
     pub queue: Option<QueueSection>,
     pub logs: Option<LogsSection>,
@@ -944,9 +942,8 @@ node = "node:22"
 
     #[test]
     fn guard_bloqueia_redis_por_decisao_da_pergunta_3() {
-        let c = GlobalConfig::parse_str("").unwrap();
         let fallback = ImageGuardSection::default();
-        let block = c.image_guard.as_ref().unwrap_or(&fallback).block_list();
+        let block = fallback.block_list();
         for img in [
             "mysql",
             "mariadb",
