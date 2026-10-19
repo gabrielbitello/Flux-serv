@@ -2,17 +2,6 @@
 //! e mensagem pronta para o CLI/painel (princípios da spec 09 — nada
 //! silencioso, nada de fallback embutido).
 
-/// Causa classificada de indisponibilidade (R33, spec 17): quem está fora.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Causa {
-    /// Só o site caiu — o fluxd sabe (container down/crash/health falhando).
-    Site,
-    /// Plataforma fora — o fluxhost serve o status estático.
-    Plataforma,
-    /// Internet do servidor caiu — só a testemunha externa vê.
-    Internet,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum FluxError {
     #[error("configuração inválida em {file}: {source}")]
