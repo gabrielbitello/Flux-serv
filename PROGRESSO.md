@@ -2,6 +2,76 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 21/10/2026 (noite) — bug: colisão da 5173 deixou o vippers "não subiu" — fix na raiz (override NUNCA publica porta de host, `a68e4ba`)
+
+**O sintoma**: `https://vippers-d.bitello.xyz` servia a página "vippers não
+subiu após o timeout de health". O health nunca rodou: o container
+`flux-vippers-dev-php-1` estava `Running`+`healthy` (healthcheck interno no
+`localhost:2019`) porém **sem rede nenhuma** — `NetworkSettings.Networks={} `
+e `Ports={}`. O router (`decision.rs:259`) via "acordado sem proxy_target"
+e devolvia a página de falho; 297 WARNs no journal.
+
+**A cadeia, toda provada no journal do dockerd**:
+
+1. Os overrides do vippers E do presente-digital publicavam
+   `ports: "5173:5173"` no host (o parâmetro `publicar_vite` do
+   `override_yaml` — desenho antigo do modo cross-origin, superado pelo
+   same-origin, mas o código tinha ficado).
+2. 18:55 — presente-digital subiu com live e segurou o 5173 do host.
+3. 19:01:53 e 19:01:55 — wake do vippers: `docker start` falhou 2× com
+   `Bind for 0.0.0.0:5173 failed: port is already allocated`.
+4. Start que falha na programação de portas deixa o container com os
+   endpoints consumidos — a partida seguinte (19:02 e depois 19:17:15)
+   sobe SEM tentar anexo de rede (zero `sbJoin` no journal; classe de bug
+   conhecida do moby). O fluxd ainda logou "live server iniciado" com o
+   start falhando — mentira do wake (dívida, ver abaixo).
+5. 19:11 — presente-digital dormiu por ociosidade e liberou a porta;
+   tarde demais.
+6. 19:17:15 em diante — container acordado, saudável, invisível pro
+   router (nenhum IP).
+
+**Recuperação imediata** (2 comandos, sem recreate):
+`docker network connect flux-vippers-dev_default flux-vippers-dev-php-1` +
+`docker network connect flux-net ...` → app 200 direto e 200 público em
+~1,1 s. **Fix de raiz** (`a68e4ba`, TRIO verde, 364 testes):
+`override_yaml` passa a emitir `ports: !reset null` SEMPRE — parâmetro
+`publicar_vite` removido. Nada no host consome a publicação: o roteamento
+do vite (`vite_action`) e o check de vivacidade (`porta_tcp_viva`) vão
+pelo IP do container na rede Docker, e o túnel aponta pro fluxd (grep no
+config do cloudflared = zero matches pra vite/5173). O fix CUMPRE a regra
+que o "O que NUNCA fazer" já escrita aqui embaixo ditava ("publicar
+`ports:` de container de projeto") — o override é que a violava desde o
+mesmo-origin.
+
+**Deploy com backup e provas**: `git archive HEAD` → `~/flux-src` (sem o
+pin de toolchain; VM builda com 1.99) → build incremental 47 s → backup
+`/usr/local/bin/fluxd.bak-20261021-pre-5173` → swap atômico (`cp` +
+`mv` rename no mesmo fs, sem Text file busy) → restart. Pós-deploy:
+`/healthz` 200 (:7420), gate do zcode-api 401 sem token (ilesa), journal
+sem erro. Overrides renderizados limpos com sed (backup `.bak-5173`) — e o
+`flux up` seguinte foi compose NO-OP (hash estável), provando que o strip
+bate com o render do novo fluxd. Recreate do vippers limpo: sem
+publicação nenhuma (`Ports` só `80/443/2019` expostos), duas redes
+anexadas de nascença, live religado pela cadeia normal (`live server já
+ativo — pulando re-disparo`), site 200, zero WARNs em 10 min.
+
+**Dívidas declaradas (não mexi — escopo)**:
+
+- O wake loga "live server iniciado" mesmo com o start falhando — viola
+  "nada silencioso" (visto às 19:02:01 com os starts de 19:01 mortos).
+- A página `Failed` acusa "timeout de health" pra toda falha — deveria
+  distinguir "sem rede/sem alvo" de health de verdade.
+- O container do presente-digital dorme com a publicação velha na config;
+  é inofensiva enquanto nada mais publica 5173, e o próximo
+  `flux up presente-digital` re-renderiza limpo (recreate por hash).
+- INFERÊNCIA não provada: o mecanismo interno do moby que pula o reanexo
+  de rede (a classe de bug é conhecida; o rastro de zero `sbJoin` é FATO).
+
+**O que NUNCA fazer** (novo, desta sessão): confiar em "Running+healthy"
+como sinal de rede — healthcheck interno não enxerga container sem
+endpoint; e nunca diagnosticar pelas mensagens da página `Failed` sem ler
+o journal do dockerd.
+
 ## 21/10/2026 — feature: `flux redroom` — modo de contenção GLOBAL, entregue E ATIVADO (botão do pânico das CVEs "php2shell")
 
 **O gatilho**: CVE-2026-109618/109619 (RCE não autenticada no núcleo do
