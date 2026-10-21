@@ -2,6 +2,61 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 21/10/2026 — feature: `flux redroom` — modo de contenção GLOBAL, entregue E ATIVADO (botão do pânico das CVEs "php2shell")
+
+**O gatilho**: CVE-2026-109618/109619 (RCE não autenticada no núcleo do
+PHP, CVSS 9.2, PoC público, patch de emergência no dia) contra a pilha
+Laravel que mora na VM. Pedido do Gabriel: um comando que derrube o acesso
+e sirva uma página bonita em HTML estático direto do Rust. No meio da
+implementação ele fechou o escopo DUAS vezes: "n é só ao php, o redroom
+derruba tudo, é generalista" e "n só ao dev — a rede flux inteira, local,
+cai". Resultado: **ligado, o router do fluxd inteiro fica atrás da página**
+— Cloudflare e LAN, host gerenciado ou não, painel público e rota de deploy
+inclusos, nenhum container acordado ou proxyado.
+
+**A exceção ÚNICA (decisão declarada no lugar dele)**: o Caddyfile prova
+que `zcode-api-d.bitello.xyz` passa PELO router (`reverse_proxy
+127.0.0.1:8080`) — redroom 100% geral mataria a API do Claude Code, contra
+o "NUNCA derrubar" escrito no AGENTS.md. Sem resposta em 30 min (protocolo
+de interação), decidi: `PROJETO_CONTROLE = "zcode-api"` em
+`redroom.rs` é a única exceção — mesmo papel de `:7420`/`:7421` (listeners
+próprios fora do router): na tempestade, as ferramentas que consertam a
+tempestade ficam de pé. Tudo o mais cai igual. `flux redroom off` reverte
+em segundos se ele quiser o corte absoluto.
+
+**Como funciona** (`fc00e24` + `d4624d4`): flag `redroom` na tabela
+`settings` (k/v, sobrevive a restart, sem migration); gate no topo do
+`handle` DEPOIS do `decide()` (leitura pura — nenhum efeito colateral
+antes daqui, precisa do host resolvido para a exceção); página HTML CONST
+— 503 honesto, `no-store`, noindex SEMPRE, zero JS, zero asset externo;
+`POST /redroom {on}` + `GET /redroom` atrás do gate de token (toggle vira
+evento `warn`/`info` na trilha); CLI `flux redroom on|off|status` —
+comando GLOBAL, sem contexto de projeto. `POST /__flux/beat` é rota real
+e fica de fora de propósito (204 sem tocar container). Erro de leitura da
+flag segue SEM contenção com `error` no log — a plataforma não vira refém
+de falha transitória de banco.
+
+**Deploy e provas (todas executadas, com números)**: TRIO verde local
+(fmt + clippy `-D warnings` + 368 testes); scp dos 9 arquivos →
+`~/flux-src` → `cargo build --release -p fluxd` na VM (26,5 s) → backup
+`/usr/local/bin/fluxd.bak-20261021-preredroom` → `mv` (nunca cp — Text
+file busy) → restart systemd → healthz ok. `flux redroom on` pelo CLI
+release local. Provas: loopback na VM — `vippers-d` 503 HTML "MODO
+REDROOM", host desconhecido 503, `zcode-api-d` respondendo CORPO REAL da
+API (erro 400 de campos faltando = proxy vivo, não a página); caminho
+completo do zcode-api pelo Caddy :443 → 401 do gate (autenticação
+intacta); Windows via LAN (192.168.140.2) → 503 "MODO REDROOM"; **edge
+público da Cloudflare de verdade** (172.67.145.90) — `djm-d` e `www` →
+503 "MODO REDROOM". Trilha: evento `warn` do toggle + 10 accesses 503 em
+10 min. Rollback do binário: backup acima; rollback do modo: `flux
+redroom off`.
+
+**O que NUNCA fazer aqui**: ligar o redroom e esquecer que o sleep
+manager continua rodando — containers contidos dormem pelos timers
+normais (sem `touch_interaction`), e é isso que se quer; "consertar" a
+página com `meta refresh` (re-dispararia request contido); adicionar
+segunda exceção sem virar const com racional no `redroom.rs` (hoje:
+exceção = plano de controle, ponto).
 
 ## 19/10/2026 (parte 4) — feature: acordar religa o live de dev (vite volta com o site)
 
