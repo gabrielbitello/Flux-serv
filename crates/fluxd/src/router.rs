@@ -153,16 +153,29 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
     let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
     let method = parts.method.clone();
 
+    let src = match &app.docker {
+        Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
+        None => Source::Sqlite(SqliteSource::new(&app.state)),
+    };
+    let Decision { host, mut action } =
+        decision::decide(&host_raw, &path, wants_json, &app.domain, &src);
+
     // Redroom (21/10): modo de contenção GLOBAL — ligado, TODO request que
     // chega neste router (túnel Cloudflare, rede local, host gerenciado ou
     // não, painel público e rota de deploy inclusos) recebe a página estática
-    // ANTES da decisão de host: nada é acordado, proxyado ou servido — a
-    // pilha inteira fica intocável (pedido do Gabriel: generalista, sem
-    // exceção). O controle não cai junto: :7420/:7421 são listeners próprios
-    // (lib.rs) — é por ali que o modo se desliga. Rastro individual fica no
+    // ANTES de qualquer proxy/wake: nada é acordado, proxyado ou servido — a
+    // pilha inteira fica intocável (pedido do Gabriel: generalista). O
+    // controle não cai junto: :7420/:7421 são listeners próprios (lib.rs) e
+    // o projeto do PLANO DE CONTROLE (redroom::PROJETO_CONTROLE — a API que
+    // alimenta o Claude Code) fica de pé pelo MESMO motivo; é por ali que o
+    // modo se desliga. O decide() acima é leitura pura de estado — o gate
+    // fica DEPOIS dele só para resolver o host e aplicar a exceção; nenhum
+    // efeito colateral acontece antes daqui. Rastro individual fica no
     // events::access (503) e o por-request em debug; o toggle em si é evento
     // da API (`POST /redroom`).
-    if redroom::ativo(&app.state) {
+    if redroom::ativo(&app.state)
+        && projeto_do_host(&host).as_deref() != Some(redroom::PROJETO_CONTROLE)
+    {
         tracing::debug!(target: "redroom", host = %host_raw, path, "redroom: request retido na página de contenção");
         let r = redroom::resposta();
         events::access(
@@ -175,13 +188,6 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         );
         return r;
     }
-
-    let src = match &app.docker {
-        Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
-        None => Source::Sqlite(SqliteSource::new(&app.state)),
-    };
-    let Decision { host, mut action } =
-        decision::decide(&host_raw, &path, wants_json, &app.domain, &src);
 
     // Hold de API (`[sleep] api_hold`, 18/10): projeto dormindo/subindo com a
     // flag ligada NÃO devolve página de espera/503 — a request é SEGURA aqui
@@ -724,6 +730,39 @@ mod tests {
             .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
         let resp = router.oneshot(r).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A ÚNICA exceção: o plano de controle (`PROJETO_CONTROLE` = zcode-api)
+    /// segue servindo com redroom ligado — a API que alimenta o Claude Code
+    /// é o que conserta a tempestade (AGENTS.md: NUNCA derrubar).
+    #[tokio::test]
+    async fn redroom_ligado_plano_de_controle_zcode_api_segue_de_pe() {
+        let app = app();
+        app.state
+            .register_project("zcode-api", "name = \"zcode-api\"", "h")
+            .unwrap();
+        crate::redroom::definir(&app.state, true).unwrap();
+        let router = router_com(&app);
+
+        let resp = router
+            .oneshot(req("zcode-api-d.bitello.xyz", "/v1/messages"))
+            .await
+            .unwrap();
+        // Sem Docker no teste, a decisão normal para o projeto registrado é
+        // a falha de API (503 JSON do contrato) — o que importa é que NÃO é
+        // a página de contenção: o request passou pelo gate e correu o fluxo
+        // normal de decisão.
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "plano de controle corre o fluxo normal (JSON de API), não a página"
+        );
+        let corpo = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let corpo = String::from_utf8_lossy(&corpo);
+        assert!(!corpo.contains("MODO REDROOM"), "corpo: {corpo}");
     }
 
     /// Redroom DESLIGADO (default): o marcador do túnel não faz nada — o

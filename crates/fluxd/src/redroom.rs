@@ -1,11 +1,12 @@
 //! Redroom (21/10): modo de contenção GLOBAL do fluxd — um interruptor, a
 //! plataforma INTEIRA atrás de uma página estática. Ligado, o router devolve
 //! a página para TODO request (vindo do túnel Cloudflare OU da rede local,
-//! host gerenciado ou desconhecido, painel público incluso) ANTES da decisão
-//! de host: nenhum container é acordado ou proxyado — a pilha toda (PHP
-//! incluso) fica intocável enquanto o modo durar. O corte é GENERALISTA de
-//! propósito (pedido do Gabriel): não existe exceção por projeto, ambiente
-//! ou origem.
+//! host gerenciado ou desconhecido, painel público incluso) antes de
+//! qualquer proxy/wake: nenhum container é acordado ou proxyado — a pilha
+//! toda (PHP incluso) fica intocável enquanto o modo durar. O corte é
+//! GENERALISTA de propósito (pedido do Gabriel): sem exceção por ambiente
+//! ou origem, e a ÚNICA exceção de conteúdo é o plano de controle
+//! (`PROJETO_CONTROLE`).
 //!
 //! O controle NÃO cai junto: a API de controle :7420 e o painel :7421 são
 //! listeners próprios no 127.0.0.1 (`serve`, lib.rs), fora do router — é por
@@ -34,6 +35,15 @@ use crate::state::{State, StateError};
 /// Chave da flag na tabela `settings`. Valor `"1"` = ligado; qualquer outra
 /// coisa (ausente incluída) = desligado — o default é a plataforma aberta.
 const CHAVE: &str = "redroom";
+
+/// ÚNICA exceção da contenção: o projeto do plano de controle — a API que
+/// alimenta o Claude Code do Gabriel (`zcode-api-d` passa pelo router do
+/// fluxd, provado no Caddyfile 19/10). Mesmo papel de :7420/:7421 (listeners
+/// fora do router): na tempestade, as ferramentas que consertam a tempestade
+/// ficam de pé. Regra escrita do AGENTS.md: "zcode-api — não derrubar,
+/// NUNCA". Tudo o mais (sites, painel público, hosts desconhecidos, CF e
+/// LAN) cai.
+pub const PROJETO_CONTROLE: &str = "zcode-api";
 
 /// Redroom ligado? `false` sem a chave, com valor estranho ou com o banco
 /// falhando (nesse caso com `error` no log — ver doc do módulo).
