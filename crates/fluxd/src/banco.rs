@@ -386,8 +386,12 @@ pub async fn apagar_database_com_backup(
 /// morre e o ERRO volta (nunca dump truncado passado por bom).
 async fn sql_dump(grupo: &str, db: &str, teto: usize) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
+    // O nome já passou por identificador_seguro (charset [a-z0-9_-]) — SEM
+    // backticks aqui: isto é string de SHELL (sh -c), onde backtick é
+    // command substitution (apanhado ao vivo: `db` virou comando). O mysql
+    // resolve identificador simples sem escaping.
     let cliente = format!(
-        "mysqldump -uroot -p\"${{MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}}\" --databases `{db}` --single-transaction"
+        "mysqldump -uroot -p\"${{MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}}\" --databases {db} --single-transaction"
     );
     let mut filho = tokio::process::Command::new("docker")
         .args(["exec", "-i", &container_name(grupo), "sh", "-c", &cliente])
