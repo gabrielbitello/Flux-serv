@@ -261,23 +261,30 @@ impl State {
     /// Relógio da expiração temporária (14): `(last_interaction_dev,
     /// created_at)`, ambos epoch segundos ou `None`. O sweep usa o que
     /// existir (interação vence registro) — ambos ausentes = não expira.
+    /// O mapper lê `Option<i64>`: linha EXISTENTE com coluna NULL
+    /// (sleep_state criada sem sinal nenhum) é "sem relógio", não erro —
+    /// `get::<i64>` sobre NULL era InvalidColumnType e fazia o chamador
+    /// pular o relógio inteiro com warn (limpeza TTL e expire de
+    /// temporários, bug latente apanhado ao vivo em 21/10).
     pub fn temporary_clock(&self, name: &str) -> Result<(Option<i64>, Option<i64>), StateError> {
         self.with(|c| {
             let created: Option<i64> = c
                 .query_row(
                     "SELECT CAST(strftime('%s', created_at) AS INTEGER) FROM projects WHERE name = ?1",
                     params![name],
-                    |r| r.get(0),
+                    |r| r.get::<_, Option<i64>>(0),
                 )
-                .optional()?;
+                .optional()?
+                .flatten();
             let interacao: Option<i64> = c
                 .query_row(
                     "SELECT CAST(strftime('%s', last_interaction) AS INTEGER)
                      FROM sleep_state WHERE project = ?1 AND env = 'dev'",
                     params![name],
-                    |r| r.get(0),
+                    |r| r.get::<_, Option<i64>>(0),
                 )
-                .optional()?;
+                .optional()?
+                .flatten();
             Ok((interacao, created))
         })
     }
@@ -728,6 +735,36 @@ mod tests {
         assert_eq!(st.host_custom("novo.bitello.xyz").unwrap(), None);
         assert_eq!(st.project_hosts("vipers").unwrap(), (None, None));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Bug latente apanhado ao vivo (21/10, limpeza TTL do banco próprio):
+    /// sleep_state existe com last_interaction NULL (registrada sem sinal
+    /// nenhum) — o relógio devia devolver (None, criado), NUNCA erro
+    /// InvalidColumnType. Com erro, a limpeza TTL e o expire de temporários
+    /// pulavam o projeto para sempre.
+    #[test]
+    fn temporary_clock_com_linha_de_sono_sem_sinal_e_none_nao_erro() {
+        let st = State::in_memory().unwrap();
+        st.register_project("zzz", "name = \"zzz\"", "h").unwrap();
+        // Linha de sono SEM sinal nenhum (o register do fluxd cria assim).
+        st.set_env_state("zzz", Env::Dev, ContainerState::Awake)
+            .unwrap();
+        let (interacao, criado) = st.temporary_clock("zzz").unwrap();
+        assert!(
+            interacao.is_none(),
+            "last_interaction NULL = sem relógio de interação"
+        );
+        assert!(criado.is_some(), "created_at sempre existe");
+
+        // Interação presente volta a valer.
+        st.touch_interaction("zzz", Env::Dev).unwrap();
+        let (interacao, _) = st.temporary_clock("zzz").unwrap();
+        assert!(interacao.is_some(), "touch cria o relógio de interação");
+
+        // Projeto sem linha de sono nenhuma: (None, Some) também sem erro.
+        st.register_project("yyy", "name = \"yyy\"", "h").unwrap();
+        let (interacao, criado) = st.temporary_clock("yyy").unwrap();
+        assert!(interacao.is_none() && criado.is_some());
     }
 
     #[test]
