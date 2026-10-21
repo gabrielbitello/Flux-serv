@@ -418,6 +418,7 @@ async fn main() {
                 }
                 stub("fase F16 (spec 14) — snapshot pré-migrate e restore")
             }
+            DbCmd::Status { env } => comandos::db::status_cmd(&env).await,
             _ => stub("fase F7+ (spec 05) — banco único e migrations via fluxd"),
         },
         Cmd::Sync { cmd } => match cmd {

@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use flux_common::protocol::ProjectSummary;
+use flux_common::protocol::{DbStatusOut, ProjectSummary};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
@@ -505,6 +505,15 @@ impl ApiClient {
     }
     pub async fn status(&self, name: &str) -> Result<ProjectStatusOut, ApiError> {
         let r = self.call("GET", &format!("/projects/{name}"), None).await?;
+        self.json_out(r)
+    }
+
+    /// GET /projects/{name}/db — banco próprio (21/10): container do grupo,
+    /// databases e TTL de cada um.
+    pub async fn db_status(&self, name: &str) -> Result<DbStatusOut, ApiError> {
+        let r = self
+            .call("GET", &format!("/projects/{name}/db"), None)
+            .await?;
         self.json_out(r)
     }
 

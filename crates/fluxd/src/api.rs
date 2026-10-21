@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use flux_common::config::ProjectToml;
 use flux_common::framework::Framework;
-use flux_common::protocol::{ApiErrorBody, Env, HealthBody, ProjectSummary};
+use flux_common::protocol::{ApiErrorBody, DbRow, DbStatusOut, Env, HealthBody, ProjectSummary};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +50,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
     let protegida = Router::new()
         .route("/projects", post(register).get(list_projects))
         .route("/projects/{name}", get(project_status))
+        .route("/projects/{name}/db", get(db_status))
         .route("/projects/{name}/lease", post(grant_lease))
         .route("/projects/{name}/schema", post(run_schema))
         .route("/projects/{name}/up", post(subir))
@@ -433,6 +434,160 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
         migrations: migs,
     })
     .into_response()
+}
+
+// ------------------------------------------------------- banco próprio (own)
+
+/// GET /projects/{name}/db — banco próprio (21/10): container do grupo,
+/// databases visíveis e o TTL de cada database gerenciado de dev. Projeto
+/// sem `[db] own` responde `own: false` com o resto vazio (o CLI distingue).
+async fn db_status(State(app): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    if let Err(r) = garante_projeto(&app, &name) {
+        return *r;
+    }
+    let cfg = match app.state.project_toml(&name) {
+        Ok(Some(src)) => match crate::banco::config_de(&src, &name) {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
+                return erro(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("banco próprio de {name}: {e}"),
+                );
+            }
+            None => {
+                return Json(DbStatusOut {
+                    own: false,
+                    grupo: None,
+                    container: None,
+                    estado: None,
+                    saude: None,
+                    ttl_days: None,
+                    databases: Vec::new(),
+                })
+                .into_response();
+            }
+        },
+        Ok(None) => {
+            return erro(
+                StatusCode::NOT_FOUND,
+                format!("projeto {name:?} sem flux.toml no state"),
+            );
+        }
+        Err(e) => {
+            return erro(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("lendo flux.toml de {name}: {e}"),
+            );
+        }
+    };
+    let container = crate::banco::container_name(&cfg.grupo);
+    let (estado, saude, rodando) = match app.docker.as_ref() {
+        Some(d) => match d.inspect_container(&container, None).await {
+            Ok(insp) => {
+                let st = insp.state.as_ref();
+                let rodando = st.and_then(|s| s.running).unwrap_or(false);
+                let estado = match st {
+                    Some(s) if s.paused.unwrap_or(false) => "paused".to_owned(),
+                    Some(s) if rodando => "running".to_owned(),
+                    Some(_) => "exited".to_owned(),
+                    None => "desconhecido".to_owned(),
+                };
+                let saude = st
+                    .and_then(|s| s.health.as_ref())
+                    .and_then(|h| h.status.as_ref())
+                    .map(|s| s.to_string());
+                (estado, saude, rodando)
+            }
+            Err(_) => ("ausente".to_owned(), None, false),
+        },
+        None => ("desconhecido".to_owned(), None, false),
+    };
+
+    let mut databases: Vec<DbRow> = Vec::new();
+    if rodando {
+        let existentes = match crate::banco::listar_databases(&cfg.grupo).await {
+            Ok(l) => l,
+            Err(e) => {
+                return erro(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("listando databases de {container}: {e}"),
+                );
+            }
+        };
+        let do_grupo: Vec<(String, crate::banco::BancoConfig)> =
+            match crate::banco::membros(&app.state) {
+                Ok(m) => m
+                    .into_iter()
+                    .filter(|(_, c)| c.grupo == cfg.grupo)
+                    .collect(),
+                Err(e) => {
+                    return erro(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("listando membros do grupo {}: {e}", cfg.grupo),
+                    );
+                }
+            };
+        // (database, último contato, ttl_secs) de cada membro dev do grupo —
+        // relógio idêntico ao da limpeza TTL (temporary_clock).
+        let mut gerenciados: Vec<(String, Option<i64>, i64)> = Vec::new();
+        for (projeto, mcfg) in &do_grupo {
+            let Ok(db) = crate::banco::database_name(projeto, Env::Dev) else {
+                continue;
+            };
+            let ultimo = match app.state.temporary_clock(projeto) {
+                Ok((interacao, criado)) => interacao.or(criado),
+                Err(_) => None,
+            };
+            gerenciados.push((db, ultimo, mcfg.ttl_secs));
+        }
+        let agora = crate::sleep::now_epoch();
+        databases = linhas_db(&existentes, &gerenciados, agora);
+    }
+
+    Json(DbStatusOut {
+        own: true,
+        grupo: Some(cfg.grupo),
+        container: Some(container),
+        estado: Some(estado),
+        saude,
+        ttl_days: Some(cfg.ttl_days),
+        databases,
+    })
+    .into_response()
+}
+
+/// Linhas do /db — PURO. Gerenciado = database de um membro dev do grupo:
+/// mostra último contato e quanto falta pro TTL (mesma conta da limpeza;
+/// sem relógio = sem expiração, nunca chutado). Database fora do padrão
+/// `{projeto}_{env}` (importado à mão) aparece como `gerenciado: false` —
+/// nunca some por surpresa.
+fn linhas_db(
+    existentes: &[String],
+    gerenciados: &[(String, Option<i64>, i64)],
+    agora: i64,
+) -> Vec<DbRow> {
+    existentes
+        .iter()
+        .map(
+            |nome| match gerenciados.iter().find(|(db, _, _)| db == nome) {
+                Some((_, ultimo, ttl_secs)) => {
+                    let expira = ultimo.map(|t| ttl_secs - (agora - t));
+                    DbRow {
+                        nome: nome.clone(),
+                        gerenciado: true,
+                        ultimo_contato: *ultimo,
+                        expira_em_secs: expira,
+                    }
+                }
+                None => DbRow {
+                    nome: nome.clone(),
+                    gerenciado: false,
+                    ultimo_contato: None,
+                    expira_em_secs: None,
+                },
+            },
+        )
+        .collect()
 }
 
 // -------------------------------------------------------------------- lease
@@ -933,6 +1088,31 @@ mod tests {
     use http_body_util::BodyExt;
     use http_body_util::Full;
     use hyper::body::Bytes;
+
+    /// Banco próprio (21/10): linhas do /db — gerenciado mostra relógio e
+    /// contagem de TTL; database de fora do padrão aparece como não
+    /// gerenciado e NUNCA ganha expiração.
+    #[test]
+    fn linhas_db_marca_gerenciado_e_conta_ttl() {
+        let existentes = vec!["vippers_dev".to_owned(), "importada".to_owned()];
+        let gerenciados = vec![("vippers_dev".to_owned(), Some(1_000_000), 604_800)];
+        let rows = linhas_db(&existentes, &gerenciados, 1_100_000);
+        assert_eq!(rows.len(), 2, "todo database visível aparece");
+        let g = &rows[0];
+        assert!(g.gerenciado);
+        assert_eq!(g.ultimo_contato, Some(1_000_000));
+        assert_eq!(
+            g.expira_em_secs,
+            Some(604_800 - 100_000),
+            "contagem = ttl - ocioso (a mesma da limpeza)"
+        );
+        let importada = &rows[1];
+        assert!(!importada.gerenciado);
+        assert_eq!(
+            importada.expira_em_secs, None,
+            "fora do padrão nunca expira"
+        );
+    }
 
     type TestClient = hyper_util::client::legacy::Client<
         hyper_util::client::legacy::connect::HttpConnector,

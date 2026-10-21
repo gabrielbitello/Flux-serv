@@ -3,6 +3,7 @@
 
 pub(crate) mod build;
 pub(crate) mod ciclo;
+pub(crate) mod db;
 pub(crate) mod env_cmd;
 pub(crate) mod live;
 pub(crate) mod logs;
