@@ -114,6 +114,22 @@ pub struct DbSection {
     /// para o plano de rebuild — coletar no meio de uma escrita diverge do
     /// que a sync replica. Default 5 s.
     pub silence_window_secs: Option<u64>,
+    /// Banco PRÓPRIO do projeto (21/10, pedido do vippers): o compose do
+    /// projeto declara o service de banco (mysql/mariadb) e o fluxd
+    /// materializa UM container dedicado por grupo — `flux-db-{grupo}` — em
+    /// vez de apontar para o flux-db global. Dorme e acorda junto com o
+    /// projeto (última instância parou → container para; qualquer subida →
+    /// acorda antes do app).
+    pub own: Option<bool>,
+    /// Grupo de compartilhamento do banco próprio: projetos com o mesmo
+    /// `grupo` usam o MESMO container, cada instância com seu database
+    /// (`{name}_{env}`). Default: o próprio `name` (worktree registrado como
+    /// projeto declara o grupo do projeto principal).
+    pub grupo: Option<String>,
+    /// TTL dos databases de DEV inativos, em dias (default 7 = "1 semana").
+    /// Antes de apagar, o fluxd grava dump em `/srv/flux/state/db-backups/`.
+    /// Databases de PROD nunca expiram, sem exceção.
+    pub ttl_days: Option<u64>,
 }
 
 impl DbSection {
@@ -127,6 +143,36 @@ impl DbSection {
     /// declarou a chave mantém o comportamento de sempre.
     pub fn rebuild_policy(&self) -> RebuildPolicy {
         self.rebuild_policy.unwrap_or_default()
+    }
+
+    /// Banco próprio ligado? Default `false` — quem nunca declarou segue no
+    /// flux-db global (mesmo idioma de `[temporary] enabled`).
+    pub fn own(&self) -> bool {
+        self.own.unwrap_or(false)
+    }
+
+    /// Grupo efetivo do banco próprio: declarado vence; default = nome do
+    /// projeto. Erro quando o declarado não é nome de projeto válido — viraria
+    /// container/rede com nome fora do contrato (nada de chute silencioso).
+    pub fn db_grupo(&self, name: &str) -> Result<String, String> {
+        match self.grupo.as_deref() {
+            None => Ok(name.to_owned()),
+            Some(g) if crate::nomes::projeto_valido(g) => Ok(g.to_owned()),
+            Some(g) => Err(format!(
+                "db.grupo '{g}' inválido — use minúsculas, dígitos e '-' (vira container flux-db-{g})"
+            )),
+        }
+    }
+
+    /// TTL dos databases de dev em dias para exibição; mínimo 1 (0 = typo,
+    /// não "apaga já").
+    pub fn ttl_days_efetivo(&self) -> u64 {
+        self.ttl_days.unwrap_or(7).max(1)
+    }
+
+    /// TTL dos databases de dev em segundos (satura em vez de estourar i64).
+    pub fn ttl_secs(&self) -> i64 {
+        i64::try_from(self.ttl_days_efetivo().saturating_mul(86_400)).unwrap_or(i64::MAX)
     }
 }
 
@@ -719,6 +765,63 @@ rate = 500
         assert!(
             err.to_string().contains("comand"),
             "typo em [build] é erro, nunca ignorado: {err}"
+        );
+    }
+
+    /// Banco próprio (21/10): chaves novas parseiam, defaults batem com o
+    /// pedido (TTL = 1 semana) e grupo inválido é ERRO — vira nome de
+    /// container, não pode passar batido.
+    #[test]
+    fn db_own_grupo_e_ttl_parseiam_com_defaults() {
+        let t = ProjectToml::parse_str("[db]\nown = true\nttl_days = 7\n").unwrap();
+        let db = t.db.as_ref().expect("seção [db]");
+        assert!(db.own(), "own declarado liga o banco próprio");
+        assert_eq!(
+            db.db_grupo("vippers").unwrap(),
+            "vippers",
+            "grupo default = nome do projeto"
+        );
+        assert_eq!(db.ttl_days_efetivo(), 7, "TTL default = 1 semana");
+        assert_eq!(db.ttl_secs(), 7 * 86_400);
+
+        // Grupo declarado vence (worktree aponta pro banco do principal).
+        let wt = ProjectToml::parse_str("[db]\nown = true\ngrupo = \"vippers\"\n")
+            .unwrap()
+            .db
+            .unwrap();
+        assert_eq!(wt.db_grupo("vippers-agenda").unwrap(), "vippers");
+        assert!(wt.own(), "own declarado junto com grupo");
+
+        // TTL 0 é typo: vira 1 dia, nunca "apaga já".
+        let zero = ProjectToml::parse_str("[db]\nown = true\nttl_days = 0\n")
+            .unwrap()
+            .db
+            .unwrap();
+        assert_eq!(zero.ttl_days_efetivo(), 1, "ttl_days = 0 vira 1 (piso)");
+
+        // Grupo com caractere fora do contrato é ERRO com a chave citada.
+        let ruim = ProjectToml::parse_str("[db]\nown = true\ngrupo = \"Vippers X\"\n")
+            .unwrap()
+            .db
+            .unwrap();
+        let err = ruim.db_grupo("vippers").unwrap_err();
+        assert!(err.contains("db.grupo"), "erro cita a chave: {err}");
+
+        // Sem own, comportamento de sempre (flux-db global) — grupo/ttl mortos.
+        let antigo = ProjectToml::parse_str("[db]\nrebuild_policy = \"auto\"\n")
+            .unwrap()
+            .db
+            .unwrap();
+        assert!(
+            !antigo.own(),
+            "default false — nada muda pra quem nunca declarou"
+        );
+
+        // Chave desconhecida em [db] continua erro estrito.
+        let err = ProjectToml::parse_str("[db]\nowm = true\n").unwrap_err();
+        assert!(
+            err.to_string().contains("owm"),
+            "typo em [db] é erro: {err}"
         );
     }
 

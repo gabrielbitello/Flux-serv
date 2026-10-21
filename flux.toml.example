@@ -42,6 +42,20 @@
 # collects it (silence window, 02) — collecting mid-write would produce a
 # hash that diverges from what the sync replicates. Default: 5.
 #silence_window_secs = 5
+# Own database (21/10, vippers): the project's compose declares its MySQL/
+# MariaDB service and fluxd materializes ONE dedicated container per group
+# (`flux-db-{grupo}`) instead of pointing at the global flux-db. It sleeps
+# and wakes together with the project. Default: false (global flux-db).
+#own = true
+# Sharing group for the own database: projects with the same `grupo` share
+# the same container, each instance with its own database (`{name}_{env}`).
+# Default: the project's own `name` (a worktree registered as its own
+# project points `grupo` at the main project).
+#grupo = "vippers"
+# TTL for inactive DEV databases, in days. Before dropping, fluxd writes a
+# dump to `/srv/flux/state/db-backups/`. PROD databases never expire.
+# Default: 7 (one week).
+#ttl_days = 7
 
 # ---------------------------------------------------------------------------
 # Asset build (02, `flux build`). Runs INSIDE the dev container on the VM,

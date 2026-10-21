@@ -115,6 +115,33 @@ pub struct ProjectSummary {
     pub dev_host: String,
 }
 
+/// GET /projects/{name}/db — estado do banco próprio do projeto (21/10).
+/// `own = false` vem com `own: false` e o resto vazio (o CLI distingue).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbStatusOut {
+    pub own: bool,
+    /// Grupo efetivo (default = nome do projeto).
+    pub grupo: Option<String>,
+    /// Container dedicado do grupo (`flux-db-{grupo}`).
+    pub container: Option<String>,
+    /// running | exited | paused | ausente | desconhecido.
+    pub estado: Option<String>,
+    /// health.status do engine quando existe.
+    pub saude: Option<String>,
+    pub ttl_days: Option<u64>,
+    pub databases: Vec<DbRow>,
+}
+
+/// Database visível no container do grupo. `expira_em_secs` só existe para
+/// database GERENCIADO de dev com relógio (prod e sem-relógio nunca expiram).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbRow {
+    pub nome: String,
+    pub gerenciado: bool,
+    pub ultimo_contato: Option<i64>,
+    pub expira_em_secs: Option<i64>,
+}
+
 /// Envelope padrão de erro da API de controle.
 #[derive(Debug, Serialize)]
 pub struct ApiErrorBody {
