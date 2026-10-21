@@ -8,7 +8,10 @@
 //!   `flux-db`, 05); isolamento por projeto é o F14;
 //! - `restart: "no"` em dev (o sono controla o ciclo, 04);
 //! - `DB_HOST=flux-db`/`DB_PORT=3306` forçados (override vence .env velho);
-//!   resto de credencial vem do `.env` exclusivo da VM (02/09).
+//!   resto de credencial vem do `.env` exclusivo da VM (02/09). Projeto com
+//!   `[db] own = true` (21/10) recebe em vez disso o pacote DB_* completo
+//!   apontando pro container dedicado do grupo (`flux-db-{grupo}`, banco.rs)
+//!   — e o phpmyadmin do compose ganha `PMA_HOST` para o mesmo alvo.
 //!
 //! Os nomes dos services vêm do PRÓPRIO engine (`docker compose config
 //! --services`) — sem parse de YAML aqui (zero dep nova; o engine é a
@@ -93,6 +96,7 @@ pub fn override_yaml(
     env: &str,
     stripped: &[String],
     asset_host: &str,
+    db: Option<&InjecaoDb>,
 ) -> String {
     let mut y = String::from("services:\n");
     for svc in stripped {
@@ -104,7 +108,28 @@ pub fn override_yaml(
         y.push_str("    depends_on: !reset null\n");
         y.push_str("    restart: \"no\"\n");
         y.push_str("    labels:\n      flux.managed: \"true\"\n");
-        y.push_str("    environment:\n      DB_HOST: flux-db\n      DB_PORT: \"3306\"\n");
+        y.push_str("    environment:\n");
+        // Banco próprio (21/10): DB_* completos apontando pro container
+        // dedicado do grupo (vence .env velho, igual ao flux-db de sempre).
+        // phpmyadmin do compose ganha PMA_HOST para o mesmo alvo — sem isso
+        // ele continuaria procurando o hostname `mysql` do compose original
+        // (que o strip removeu).
+        match db {
+            Some(d) if eh_service_pma(svc) => {
+                y.push_str(&format!("      PMA_HOST: {}\n", d.host));
+            }
+            Some(d) => {
+                y.push_str("      DB_CONNECTION: \"mysql\"\n");
+                y.push_str(&format!("      DB_HOST: {}\n", d.host));
+                y.push_str("      DB_PORT: \"3306\"\n");
+                y.push_str(&format!("      DB_DATABASE: {}\n", yaml_str(&d.database)));
+                y.push_str(&format!("      DB_USERNAME: {}\n", yaml_str(&d.username)));
+                y.push_str(&format!("      DB_PASSWORD: {}\n", yaml_str(&d.password)));
+            }
+            None => {
+                y.push_str("      DB_HOST: flux-db\n      DB_PORT: \"3306\"\n");
+            }
+        }
         // ASSET_URL público (06/live): o proxy do fluxd reescreve o Host para
         // o IP do container — sem esta env o Laravel monta asset do BUILD com
         // o IP interno (http://172.18.0.4/…), que o browser do dev não
@@ -118,11 +143,65 @@ pub fn override_yaml(
     y
 }
 
+/// Services de phpmyadmin do compose do projeto (alvo do PMA_HOST quando o
+/// grupo tem banco próprio). Match por nome — phpmyadmin ou pma em qualquer
+/// posição, caixa baixa.
+fn eh_service_pma(svc: &str) -> bool {
+    let baixo = svc.to_ascii_lowercase();
+    baixo.contains("phpmyadmin") || baixo.contains("pma")
+}
+
+/// Escalar YAML/JSON para valores injetados (escape do serde — sem parser
+/// de YAML no repo).
+fn yaml_str(v: &str) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
+/// Monta a injeção de env do banco próprio. `None` = database_name recusou o
+/// nome (charset) — o evento já saiu e o chamador aborta o up.
+fn injecao_banco_proprio(
+    projeto: &str,
+    name: &str,
+    env: &str,
+    cfg: &crate::banco::BancoConfig,
+    cap: &CapturaBanco,
+) -> Option<InjecaoDb> {
+    let env_enum = if env == "prod" {
+        flux_common::protocol::Env::Prod
+    } else {
+        flux_common::protocol::Env::Dev
+    };
+    match crate::banco::database_name(name, env_enum) {
+        Ok(database) => Some(InjecaoDb {
+            host: crate::banco::container_name(&cfg.grupo),
+            database,
+            username: cap
+                .environment
+                .get("MYSQL_USER")
+                .cloned()
+                .unwrap_or_default(),
+            password: cap
+                .environment
+                .get("MYSQL_PASSWORD")
+                .cloned()
+                .unwrap_or_default(),
+        }),
+        Err(e) => {
+            tracing::error!("{projeto}: banco próprio: {e}");
+            None
+        }
+    }
+}
+
 /// Service renderizado do compose efetivo — a fatia que interessa ao flux.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceRender {
     pub name: String,
     pub image: Option<String>,
+    /// `environment` como o engine renderizou (mapa chave→valor; valores
+    /// null/herdados ficam de fora). O banco próprio (21/10) captura as
+    /// credenciais MYSQL_* daqui — o compose do projeto é a fonte.
+    pub environment: std::collections::BTreeMap<String, String>,
 }
 
 /// Parse do `docker compose config --format json` (06/F6): o YAML vira
@@ -135,16 +214,105 @@ pub fn parse_render(json: &str) -> Result<Vec<ServiceRender>, String> {
         .ok_or_else(|| "render sem a chave services".to_owned())?;
     let mut out: Vec<ServiceRender> = Vec::new();
     for (name, corpo) in svcs {
+        let mut environment = std::collections::BTreeMap::new();
+        if let Some(env) = corpo.get("environment").and_then(|e| e.as_object()) {
+            for (k, val) in env {
+                if let Some(valor) = val.as_str() {
+                    environment.insert(k.clone(), valor.to_owned());
+                }
+            }
+        }
         out.push(ServiceRender {
             name: name.clone(),
             image: corpo
                 .get("image")
                 .and_then(|i| i.as_str())
                 .map(ToOwned::to_owned),
+            environment,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// Captura do service de banco do render — o insumo do container dedicado
+/// do grupo (`banco::garantir`). Imagem + environment verbatim + command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturaBanco {
+    pub imagem: String,
+    pub environment: std::collections::BTreeMap<String, String>,
+    pub command: Option<Vec<String>>,
+}
+
+/// Imagens de SQL que o banco próprio materializa como container dedicado.
+/// MariaDB entra pelo mesmo caminho (o healthcheck e o cliente já cobrem os
+/// dois dialetos); cache (redis/valkey/memcached) NÃO é banco próprio.
+const BASES_BANCO_PROPRIO: [&str; 2] = ["mysql", "mariadb"];
+
+fn eh_banco_proprio(image: &str) -> bool {
+    let repo = crate::guard::image_repo(image).to_ascii_lowercase();
+    let Some(basename) = repo.rsplit('/').next() else {
+        return false;
+    };
+    BASES_BANCO_PROPRIO.contains(&basename)
+}
+
+/// Services do render cuja imagem é banco SQL do own-db (mysql/mariadb).
+/// PURO — o `capturar_banco` decide em cima; cache (redis/valkey/memcached)
+/// NÃO é banco próprio.
+fn candidatos_banco(renderizado: &[ServiceRender]) -> Vec<&ServiceRender> {
+    renderizado
+        .iter()
+        .filter(|s| s.image.as_deref().map(eh_banco_proprio).unwrap_or(false))
+        .collect()
+}
+
+/// Captura o ÚNICO service de banco do render (21/10). Sem service de banco,
+/// mais de um, imagem só de build ou credenciais ausentes = ERRO com a
+/// causa — `own = true` sem o que materializar nunca vira silêncio.
+pub fn capturar_banco(renderizado: &[ServiceRender]) -> Result<CapturaBanco, String> {
+    let candidatos = candidatos_banco(renderizado);
+    match candidatos.len() {
+        0 => Err(
+            "[db] own = true mas o compose não declara service de banco (mysql/mariadb com \
+             image) — nada para materializar como container do grupo"
+                .to_owned(),
+        ),
+        1 => {
+            let svc = candidatos[0];
+            let imagem = svc
+                .image
+                .clone()
+                .ok_or_else(|| "service de banco sem image (só build) — recusado".to_owned())?;
+            for chave in ["MYSQL_ROOT_PASSWORD", "MYSQL_USER", "MYSQL_PASSWORD"] {
+                if !svc.environment.contains_key(chave) {
+                    return Err(format!(
+                        "service de banco sem {chave} no environment — o container dedicado \
+                         precisa das credenciais declaradas no compose"
+                    ));
+                }
+            }
+            Ok(CapturaBanco {
+                imagem,
+                environment: svc.environment.clone(),
+                command: None,
+            })
+        }
+        n => Err(format!(
+            "compose declara {n} services de banco — ambíguo para own = true (deixe um só; os \
+             demais viram strip comum)"
+        )),
+    }
+}
+
+/// Injeção de env do banco próprio no override — vence o `.env` da VM (mesmo
+/// mecanismo do `DB_HOST: flux-db` de sempre).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjecaoDb {
+    pub host: String,
+    pub database: String,
+    pub username: String,
+    pub password: String,
 }
 
 /// Renderiza o compose efetivo do projeto via o engine (só leitura).
@@ -273,6 +441,32 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         return;
     }
 
+    // Banco próprio ([db] own, 21/10): config lida do TOML gravado no state.
+    // Declaração quebrada (grupo inválido) ABORTA o up com a causa — nunca
+    // cai no flux-db global por engano.
+    let banco_cfg = match st.project_toml(&name) {
+        Ok(Some(src)) => match crate::banco::config_de(&src, &name) {
+            Some(Ok(c)) => Some(c),
+            Some(Err(e)) => {
+                events::event(st, "error", "up", &format!("{projeto}: banco próprio: {e}"));
+                return;
+            }
+            None => None,
+        },
+        Ok(None) => None,
+        Err(e) => {
+            events::event(
+                st,
+                "warn",
+                "up",
+                &format!(
+                    "{projeto}: flux.toml do state não lido ({e}) — banco próprio não avaliado"
+                ),
+            );
+            None
+        }
+    };
+
     // Guard de imagens (05) no estado ATUAL do repo — o compose pode ter
     // chegado na sync depois do registro. Varre compose*/Dockerfile* até
     // profundidade 3 da pasta do projeto. DESDE o strip automático: Dockerfile
@@ -380,6 +574,36 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             ),
         );
     }
+    // Captura do service de banco para o container dedicado do grupo
+    // (21/10): own = true sem banco declarado é ERRO com a causa, nunca
+    // fallback silencioso.
+    let captura = match &banco_cfg {
+        Some(cfg) => match capturar_banco(&renderizado) {
+            Ok(c) => {
+                events::event(
+                    st,
+                    "info",
+                    "up",
+                    &format!(
+                        "{projeto}: banco próprio — flux-db-{} (imagem {}, database {}_{env}) \
+                         dorme e acorda com o projeto",
+                        cfg.grupo, c.imagem, name
+                    ),
+                );
+                Some(c)
+            }
+            Err(e) => {
+                events::event(
+                    st,
+                    "error",
+                    "up",
+                    &format!("{projeto}: banco próprio (grupo {}): {e}", cfg.grupo),
+                );
+                return;
+            }
+        },
+        None => None,
+    };
     let Some(state_dir) = app.state_dir.clone() else {
         events::event(
             st,
@@ -396,6 +620,17 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             return;
         }
     };
+    // Injeção do banco próprio: DB_* completos apontando pro container do
+    // grupo (fonte: captura do render; .env da VM fica por baixo).
+    let injecao = match (&banco_cfg, &captura) {
+        (Some(cfg), Some(cap)) => {
+            match injecao_banco_proprio(&projeto, &name, &env, cfg, cap) {
+                Some(i) => Some(i),
+                None => return, // database inválido: evento já emitido
+            }
+        }
+        _ => None,
+    };
     // ASSET_URL público por ambiente (06/live): dev = host -d, prod = host
     // raiz — a env injetada vence o .env, igual DB_HOST.
     let asset_host = if env == "dev" {
@@ -408,7 +643,7 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
     };
     if let Err(e) = std::fs::write(
         &override_path,
-        override_yaml(&services, &env, &strip, &asset_host),
+        override_yaml(&services, &env, &strip, &asset_host, injecao.as_ref()),
     ) {
         events::event(
             st,
@@ -417,6 +652,35 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             &format!("{projeto}: escrevendo override: {e}"),
         );
         return;
+    }
+
+    // Container do grupo saudável + database da instância ANTES do app subir
+    // (21/10 — "dorme e acorda junto"): sem o banco de pé, o app nasce pra
+    // falhar na 1ª conexão.
+    if let (Some(cfg), Some(cap)) = (&banco_cfg, &captura) {
+        let Some(d) = app.docker.as_ref() else {
+            events::event(
+                st,
+                "error",
+                "up",
+                &format!("{projeto}: banco próprio exige engine Docker — indisponível"),
+            );
+            return;
+        };
+        let inj = injecao
+            .as_ref()
+            .expect("injeção existe quando captura existe");
+        if let Err(e) =
+            crate::banco::garantir(st, &state_dir, d, &cfg.grupo, cap, &inj.database).await
+        {
+            events::event(
+                st,
+                "error",
+                "up",
+                &format!("{projeto}: banco próprio flux-db-{}: {e}", cfg.grupo),
+            );
+            return;
+        }
     }
 
     // Guard de TÚNEL por camada (05, regra do Gabriel 14/10): cloudflared no
@@ -981,6 +1245,7 @@ mod tests {
             "dev",
             &["mysql".into()],
             "https://vippers-d.bitello.xyz",
+            None,
         );
         assert!(y.contains("  app:\n"));
         assert!(y.contains("  worker:\n"));
@@ -1015,7 +1280,7 @@ mod tests {
 
     #[test]
     fn override_nunca_publica_porta_no_host_mesmo_com_live_declarado() {
-        let y = override_yaml(&["app".into()], "dev", &[], "https://v-d.x");
+        let y = override_yaml(&["app".into()], "dev", &[], "https://v-d.x", None);
         assert!(
             !y.contains("5173:5173"),
             "porta fixa publicada no host = colisão entre projetos live (incidente 21/10)"
@@ -1024,6 +1289,177 @@ mod tests {
             y.matches("ports: !reset null").count(),
             1,
             "ports fora do service mesmo com live declarado"
+        );
+    }
+
+    /// Banco próprio (21/10): DB_* completos apontando pro container do
+    /// grupo; o connection vira mysql (o .env do projeto pode dizer
+    /// mariadb — a injeção vence).
+    #[test]
+    fn override_injeta_db_proprio_completo() {
+        let d = InjecaoDb {
+            host: "flux-db-vippers".into(),
+            database: "vippers_dev".into(),
+            username: "vippers".into(),
+            password: "senha com espaço".into(),
+        };
+        let y = override_yaml(
+            &["app".into()],
+            "dev",
+            &["mysql".into()],
+            "https://v-d.x",
+            Some(&d),
+        );
+        assert!(y.contains("DB_CONNECTION: \"mysql\""));
+        assert!(y.contains("DB_HOST: flux-db-vippers\n"));
+        assert!(y.contains("DB_DATABASE: \"vippers_dev\""));
+        assert!(y.contains("DB_USERNAME: \"vippers\""));
+        assert!(
+            y.contains("DB_PASSWORD: \"senha com espaço\""),
+            "valor com espaço sai escapado, YAML válido: {y}"
+        );
+        assert!(
+            !y.contains("DB_HOST: flux-db\n"),
+            "flux-db global não aparece no own"
+        );
+    }
+
+    /// phpmyadmin do compose do projeto recebe PMA_HOST do container do
+    /// grupo — sem isso ele caçaria o hostname `mysql` que o strip removeu.
+    #[test]
+    fn override_manda_pma_host_para_phpmyadmin() {
+        let d = InjecaoDb {
+            host: "flux-db-vippers".into(),
+            database: "vippers_dev".into(),
+            username: "vippers".into(),
+            password: "password".into(),
+        };
+        let y = override_yaml(
+            &["app".into(), "phpmyadmin".into()],
+            "dev",
+            &["mysql".into()],
+            "https://v-d.x",
+            Some(&d),
+        );
+        // Blocos disjuntos: app termina onde phpmyadmin começa (split_once,
+        // não split — o tail do app incluiria o bloco do pma).
+        let (app, resto) = y.split_once("  phpmyadmin:\n").expect("bloco pma");
+        let pma = resto;
+        assert!(
+            pma.contains("PMA_HOST: flux-db-vippers"),
+            "pma aponta pro container do grupo: {pma}"
+        );
+        assert!(
+            !pma.contains("DB_HOST"),
+            "pma não recebe DB_* de aplicação: {pma}"
+        );
+        let app_bloco = app.split("  app:\n").nth(1).expect("bloco app");
+        assert!(
+            app_bloco.contains("DB_HOST: flux-db-vippers") && !app_bloco.contains("PMA_HOST"),
+            "app normal não ganha PMA_HOST: {app_bloco}"
+        );
+    }
+
+    #[test]
+    fn capturar_banco_pega_o_unico_service_sql_com_credenciais() {
+        let render = vec![
+            ServiceRender {
+                name: "php".into(),
+                image: None,
+                environment: Default::default(),
+            },
+            ServiceRender {
+                name: "mysql".into(),
+                image: Some("mysql:9.3".into()),
+                environment: Default::default(),
+            },
+            ServiceRender {
+                name: "redis".into(),
+                image: Some("redis:7".into()),
+                environment: Default::default(),
+            },
+        ];
+        // mysql é banco próprio; redis é cache (strip comum) — fora.
+        assert_eq!(candidatos_banco(&render).len(), 1);
+        let com_cred = vec![ServiceRender {
+            name: "mysql".into(),
+            image: Some("mysql:9.3".into()),
+            environment: std::collections::BTreeMap::from([
+                ("MYSQL_ROOT_PASSWORD".into(), "r".into()),
+                ("MYSQL_USER".into(), "vippers".into()),
+                ("MYSQL_PASSWORD".into(), "p".into()),
+            ]),
+        }];
+        let c = capturar_banco(&com_cred).expect("captura");
+        assert_eq!(c.imagem, "mysql:9.3");
+        assert_eq!(
+            c.environment.get("MYSQL_USER").map(String::as_str),
+            Some("vippers")
+        );
+    }
+
+    #[test]
+    fn capturar_banco_sem_service_sem_credenciais_ou_ambiguo_e_erro() {
+        let sem_banco = vec![ServiceRender {
+            name: "app".into(),
+            image: Some("app:dev".into()),
+            environment: Default::default(),
+        }];
+        let e = capturar_banco(&sem_banco).unwrap_err();
+        assert!(e.contains("não declara service de banco"), "{e}");
+
+        let sem_cred = vec![ServiceRender {
+            name: "mysql".into(),
+            image: Some("mysql:9.3".into()),
+            environment: Default::default(),
+        }];
+        let e = capturar_banco(&sem_cred).unwrap_err();
+        assert!(
+            e.contains("MYSQL_ROOT_PASSWORD"),
+            "erro aponta a chave: {e}"
+        );
+
+        let dois = vec![
+            ServiceRender {
+                name: "mysql".into(),
+                image: Some("mysql:9.3".into()),
+                environment: Default::default(),
+            },
+            ServiceRender {
+                name: "maria".into(),
+                image: Some("mariadb:11".into()),
+                environment: Default::default(),
+            },
+        ];
+        let e = capturar_banco(&dois).unwrap_err();
+        assert!(e.contains("ambíguo"), "{e}");
+    }
+
+    #[test]
+    fn parse_render_extrai_environment_do_json_do_engine() {
+        let json = r#"{
+            "name": "flux-vippers-dev",
+            "services": {
+                "mysql": {
+                    "image": "mysql:9.3",
+                    "environment": {
+                        "MYSQL_ROOT_PASSWORD": "root_password",
+                        "MYSQL_USER": "vippers",
+                        "MYSQL_PASSWORD": "password",
+                        "HERDADA": null
+                    }
+                }
+            }
+        }"#;
+        let r = parse_render(json).expect("parseia");
+        let mysql = &r[0];
+        assert_eq!(
+            mysql.environment.get("MYSQL_USER").map(String::as_str),
+            Some("vippers")
+        );
+        assert!(
+            !mysql.environment.contains_key("HERDADA"),
+            "valor null do engine não vira env"
         );
     }
 
@@ -1051,14 +1487,17 @@ mod tests {
             ServiceRender {
                 name: "php".into(),
                 image: None,
+                environment: Default::default(),
             },
             ServiceRender {
                 name: "mysql".into(),
                 image: Some("mysql:9.3".into()),
+                environment: Default::default(),
             },
             ServiceRender {
                 name: "app".into(),
                 image: Some("ghcr.io/projeto/app:dev".into()),
+                environment: Default::default(),
             },
         ];
         assert_eq!(strip_list(&renderizado, &block), vec!["mysql".to_owned()]);

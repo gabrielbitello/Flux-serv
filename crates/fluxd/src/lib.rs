@@ -2,6 +2,7 @@
 //! (`main.rs`) só parseia argumentos; tudo testável vive aqui.
 
 pub mod api;
+pub mod banco;
 pub mod beat;
 pub mod bluegreen;
 pub mod ciclo;

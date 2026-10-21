@@ -328,6 +328,18 @@ impl<'a> DockerSource<'a> {
         Self { docker, sqlite }
     }
 
+    /// Banco próprio do projeto (21/10): lê o TOML gravado e acorda o
+    /// container do grupo quando existe e está parado. Falha de TOML/engine
+    /// é warn/debug — o wake do app NUNCA trava por causa do banco.
+    async fn acordar_banco(&self, name: &str) {
+        let Ok(Some(src)) = self.sqlite.project_toml(name) else {
+            return;
+        };
+        if let Some(Ok(cfg)) = crate::banco::config_de(&src, name) {
+            crate::banco::acordar(self.sqlite, &self.docker, &cfg.grupo).await;
+        }
+    }
+
     /// Conecta no Docker: `FLUX_DOCKER_URL` (http, para dev/testes fora da VM)
     /// ou o socket default (`/var/run/docker.sock`). Falha → `None` (degrada
     /// para estado via SQLite com warn — a validação real acontece no 1º
@@ -369,8 +381,10 @@ impl<'a> DockerSource<'a> {
     /// Garante acordado antes do proxy: pausado → `unpause` (< 1 s, invisível,
     /// matriz 03); parado → `start`. Best-effort — erro é logado, o forward
     /// segue e reavalia (upstream falho vira página de estado, nunca 502).
-    /// Devolve `true` quando EXECUTOU uma transição para acordar.
+    /// Devolve `true` quando EXECUTOU uma transição para acordar. Banco
+    /// próprio (21/10) acorda ANTES dos containers do app.
     pub async fn ensure_awake(&self, name: &str, env: Env) -> bool {
+        self.acordar_banco(name).await;
         let project = self.compose_project_cor(name, env);
         let Some(c) = find_app_container(&self.docker, &project).await else {
             return false;
@@ -399,8 +413,10 @@ impl<'a> DockerSource<'a> {
     }
 
     /// `docker start` — o wake da página de espera (03) e do sleep manager (F4).
-    /// Devolve `true` quando o container estava parado e foi acordado.
+    /// Devolve `true` quando o container estava parado e foi acordado. Banco
+    /// próprio (21/10) acorda ANTES — o app não nasce pra falhar na 1ª conexão.
     pub async fn wake(&self, name: &str, env: Env) -> Result<bool, String> {
+        self.acordar_banco(name).await;
         let project = self.compose_project_cor(name, env);
         let mut acordou_algum = false;
         for c in containers_do_projeto(&self.docker, &project).await? {

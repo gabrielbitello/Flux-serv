@@ -185,6 +185,14 @@ pub async fn down(
         "down",
         &format!("{projeto}: containers parados (compose stop)"),
     );
+    // Banco próprio (21/10): se nenhuma outra instância do grupo ficou
+    // rodando, o container do banco para junto (dorme com o projeto). Falha
+    // de leitura de TOML é warn — o down em si já aconteceu.
+    if let Ok(Some(src)) = app.state.project_toml(&name)
+        && let Some(Ok(cfg)) = crate::banco::config_de(&src, &name)
+    {
+        crate::banco::dormir_se_ninguem(&app.state, app.docker.as_ref(), &cfg.grupo).await;
+    }
     Json(DownReply {
         stopped: true,
         project: name,

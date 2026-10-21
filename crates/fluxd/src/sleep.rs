@@ -241,6 +241,20 @@ impl<'a> SleepManager<'a> {
                             ContainerState::Sleeping
                         };
                         let _ = self.st.record_mode(name, env, novo);
+                        // Banco próprio (21/10): parada do tipo `stop` pode
+                        // levar o container do grupo junto — se nenhuma outra
+                        // instância do grupo ficou rodando. Pause (prod) não
+                        // chama: o app volta num unpause e o banco segue de pé.
+                        if acao == "stop"
+                            && let Some(Ok(cfg)) = crate::banco::config_de(&toml_src, name)
+                        {
+                            crate::banco::dormir_se_ninguem(
+                                self.st,
+                                Some(&self.docker),
+                                &cfg.grupo,
+                            )
+                            .await;
+                        }
                         let msg = format!("{name}/{env} dormiu ({acao}) após ociosidade");
                         events::event(self.st, "info", "sleep", &msg);
                         Some(msg)
