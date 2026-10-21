@@ -22,7 +22,63 @@ and passed via `-f` (`crates/fluxd/src/compose.rs`).
 **Adminer** (per-project DB manager) runs LAN-only at
 `http://192.168.140.2:8081`, pinned to `flux-db` via
 `ADMINER_DEFAULT_SERVER`, linked from the panel nav — unreachable from the
-internet.
+internet. For an **own-db** project, type the dedicated container name
+(`flux-db-vippers`) as the server in the Adminer form.
+
+## Own project database (`[db] own = true`, 21/10/2026)
+
+A project can own its SQL engine instead of using the global MariaDB. The
+project's compose declares the `mysql`/`mariadb` service and fluxd
+materializes **one dedicated container per group** — the MariaDB model,
+per project:
+
+```
+[db]
+own = true        # materialize the compose db service as flux-db-{grupo}
+# grupo = "vippers"  # default: the project name; worktrees point at the main project
+# ttl_days = 7    # idle DEV databases are dropped (dump first); prod never expires
+```
+
+Mechanism (`crates/fluxd/src/banco.rs`):
+
+1. **Capture from the engine render** — `capturar_banco` takes the single
+   mysql/mariadb service of the rendered compose (image + `environment`
+   verbatim, so credentials are exactly what the compose declares). `own`
+   without a db service, two db services, or missing `MYSQL_*` credentials
+   is an ERROR with the cause — never a silent fallback to flux-db.
+2. **One container per group** — fluxd writes
+   `/srv/flux/state/db/{grupo}/compose.yml` (healthcheck `mysqladmin ping`,
+   named volume `flux-db-{grupo}-data`, `restart: "no"`, **no published
+   ports**) and runs it as compose project `flux-db-{grupo}` with
+   `container_name flux-db-{grupo}`.
+3. **Injection beats `.env`** — every live service gets the full package:
+   `DB_CONNECTION: "mysql"`, `DB_HOST: flux-db-{grupo}`, `DB_PORT: "3306"`,
+   `DB_DATABASE: {name}_{env}`, `DB_USERNAME/DB_PASSWORD` from the capture.
+   A phpmyadmin service gets `PMA_HOST` instead (the original `mysql`
+   hostname disappears with the strip). Databases are `{name}_{env}`
+   (`vippers_dev`, `vippers-agenda_dev`, …) created idempotently with
+   `GRANT ALL` for the compose user; SQL runs via `docker exec` with the
+   SQL on **stdin** and the root password inherited from the container env
+   — never argv.
+4. **Sleeps and wakes with the project** — `up` guarantees container
+   healthy + database BEFORE the app's `compose up` (health cap 300 s;
+   cold init ≈ 40 s with image pull, warm wake `start → healthy` ≈ 5 s);
+   wake (`docker.rs`) starts the DB before the app containers; sleep
+   (`stop` actions) and `down` stop the DB only when the LAST instance of
+   the group stops (`dormir_se_ninguem`; a listing failure never puts the
+   DB to sleep). Prod `pause` never touches the DB.
+5. **TTL (dev only)** — the 60 s sweep drops dev databases idle past
+   `ttl_days` (default 7): `mysqldump --single-transaction` (64 MiB cap —
+   exceeded aborts without dropping) to `/srv/flux/state/db-backups/
+   {db}-{epoch}.sql`, then `DROP`, with a warn event trail. No clock
+   (never interacted) = never expires; prod never expires; databases
+   outside the `{name}_{env}` pattern are listed as "não gerenciado" and
+   never touched. Temporary-dev teardown drops the instance database at
+   teardown time (with dump).
+
+Inspect it with `flux db status` (container, health, group, TTL countdown
+per database) or Adminer. The MariaDB `flux-db` stays the default for
+every project without `[db] own`.
 
 ## Migration pipeline
 

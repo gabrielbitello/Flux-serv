@@ -23,6 +23,9 @@ rebuild_policy      = "auto"   # auto | always | never (dev only; prod NEVER reb
 seed_on_rebuild     = true     # seed after a dev rebuild
 migrate_cmd         = ""       # node/rust: schema command inside the container
 silence_window_secs = 5        # quiet window before migrations run (see below)
+own                 = false    # own DB: compose mysql/mariadb becomes flux-db-{grupo}
+grupo               = ""       # sharing group (default: project name) — worktrees point at the main project
+ttl_days            = 7        # idle DEV databases are dropped with a dump; prod never expires
 
 [build]                        # frontend/assets build run on the VM
 command             = "npm run build"
@@ -83,6 +86,9 @@ rate = 500                      # per-host rate limit override (edge)
 | `db.seed_on_rebuild` | `true` | CLI flags `--seed`/`--no-seed` win over this; prod never seeds regardless. |
 | `db.migrate_cmd` | empty | node/rust schema command executed via `docker exec`; empty means no automatic pipeline (fluxd warns). |
 | `db.silence_window_secs` | **5** | Quiet window before the migration pipeline fires: the CLI re-reads the migration-set hash on the Windows side and only proceeds after the window with no change (double-hash read — see [database.md](database.md)). |
+| `db.own` | `false` | Own database (21/10/2026): the project compose declares the `mysql`/`mariadb` service and fluxd materializes ONE dedicated container per group (`flux-db-{grupo}`) instead of pointing at the global flux-db — full `DB_*` injection per instance, database `{name}_{env}`, sleeps/wakes with the project, no published ports. `own = true` without a db service in the compose is an ERROR at up. See [database.md](database.md). |
+| `db.grupo` | project `name` | Sharing group: projects with the same `grupo` share the same container, each with its own database. A worktree registered as its own project points `grupo` at the main project. Must be a valid project name ([a-z0-9-]). |
+| `db.ttl_days` | **7** | Idle DEV databases are dumped to `/srv/flux/state/db-backups/` and dropped by the 60 s sweep (min 1 — `0` is a typo, not "drop now"). PROD databases never expire; no clock = never expires. |
 | `build.command` / `build.service` / `build.silence_window_secs` | — / `app` / **180** | What `flux build` runs, where, and how long a quiet window it waits for first — see [build.md](build.md). |
 | `sleep.*` | dev on, 15 min; prod `pause`, 30 min | Enforced by the sleep manager's 60 s sweep; signals: proxied request, CLI/panel lease, CPU above `cpu_percent_teto`, browser beat. |
 | `resources.*` | platform defaults | Prod container limits (dev is unlimited today). |

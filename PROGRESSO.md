@@ -2,7 +2,81 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
-## 21/10/2026 (noite) — bug: colisão da 5173 deixou o vippers "não subiu" — fix na raiz (override NUNCA publica porta de host, `a68e4ba`)
+## 21/10/2026 (noite) — feature: banco PRÓPRIO do projeto (`[db] own`) — o vippers sai do MariaDB global para o MySQL do próprio compose; 6 SIM provados em runtime
+
+**O pedido do Gabriel** (depois do episódio das seeders locais): "cansei,
+crie compat total — vippers tem mysql que dorme junto com o vippers e acorda
+junto com ele; todos dev ou worktree usam o mesmo mysql com databases
+diferentes, que se ficarem inativos 1 semana apagam; tire as gambiarras do
+`.flux`; pode apagar do MariaDB as dbs do vippers". Modelo do flux-db, versão
+vippers: **1 MySQL centralizado por grupo**, todas as instâncias se
+alimentam dele.
+
+**O mecanismo** (novo `crates/fluxd/src/banco.rs`, 6 commits `1fce1c3`…
+`85e927a`):
+
+- `[db] own = true` (+ `grupo`, default = nome do projeto; `ttl_days`, default
+  7). O compose do projeto declara o mysql; o fluxd captura o service do
+  RENDER DO ENGINE (imagem + env verbatim — credenciais são as do compose,
+  `.env` da VM não muda) e materializa **UM container único**
+  `flux-db-{grupo}` na `flux-net`, volume nomeado por grupo, compose gerado
+  em `/srv/flux/state/db/{grupo}/compose.yml`, healthcheck como gate do up,
+  NENHUMA porta publicada (regra `a68e4ba`).
+- Instâncias (dev + worktrees registrados como projetos com `grupo =
+  "vippers"`) recebem o pacote `DB_*` COMPLETO injetado no override
+  (`DB_CONNECTION=mysql`, `DB_HOST=flux-db-{grupo}`, `DB_DATABASE=
+  {nome}_{env}`, user/senha do compose) — vence `.env`, mesmo mecanismo de
+  sempre; phpmyadmin do compose ganha `PMA_HOST` pro mesmo alvo.
+- Dorme/acorda junto: `up` garante container saudável + database ANTES do
+  `compose up` do app; wake acorda o banco ANTES dos containers; sleep
+  (stop)/down → `dormir_se_ninguem` — o banco para só quando a ÚLTIMA
+  instância do grupo para (falha de listagem NUNCA põe o banco pra dormir).
+- TTL: database de dev sem interação além de `ttl_days` → mysqldump
+  (`--single-transaction`, teto 64 MiB) em `/srv/flux/state/db-backups/` e
+  DROP no sweep de 60 s. Prod nunca expira; database fora do padrão
+  `{nome}_{env}` nunca é tocado. Teardown de dev temporário derruba o
+  database dele na hora (com dump).
+- `flux db status` deixou de ser stub (`GET /projects/{name}/db`): container,
+  health, grupo, TTL e contagem regressiva por database.
+
+**Provas em runtime** (todas no dia):
+
+- Cutover do vippers: `migrate:fresh` **482 migrations no MySQL 9.3** — as 3
+  view migrations gateadas (LEFT JOIN LATERAL) finalmente RODARAM (MariaDB
+  não parseava); seed base 36 seeders; `CmsLocalSeeder` completo (12 rides,
+  9 motoristas, 3 Voyagers, 5 ocorrências, 28 timelines, 8
+  `professional_lives`); `/cms/login` 200.
+- Dorme/acorda: `flux down` → banco `Exited` junto; request do browser →
+  banco `Up (healthy)` + app de pé; **wake quente medido: start → healthy em
+  5 s**; primeiro request pós-wake já entregou HTTP 200 (TTFB 1,3 s) via
+  `api_hold`.
+- TTL com prova real: projeto fake `vippers-zzz` (own, grupo vippers) com
+  created_at 8 dias atrás → sweep fez dump (2 KB) + DROP + eventos warn;
+  `vippers_dev` intocada (6d23h na contagem).
+- MariaDB global: db `vippers` dumptada (2,9 MB) e DROPADA — `vipa` e demais
+  intocados; dumps em `/srv/flux/state/db-backups/`.
+
+**Gambiarras removidas do vippers**: `.flux/overlays/` de SpatialDialect e
+das 3 migrations (fora o `live.bak`); `extra_ignore` voltou a guardar só o
+`vite.config.js` do HMR; as 3 migrations voltaram ao upstream (`git
+checkout`). O `config/vite.php` segue (mecanismo de live, não gambiarra).
+
+**Dois bugs latentes apanhados ao vivo pelo recurso novo**: `temporary_clock`
+errava `Invalid column type Null` com linha de sono sem sinal nenhum
+(fazia TTL e expire de temporários pularem o projeto PARA SEMPRE — fix
+`1ff9b3d`) e o dump do TTL usava backticks em string de SHELL (command
+substitution — fix `85e927a`). Lição de deploy: `tar` preserva mtime do host
+e o cargo da VM considerou tudo fresco — build no-op disfarçado de "Finished
+in 27 s"; o `mv` para `/usr/local/bin` também ficou de fora de uma rodada.
+Backups do binário: `fluxd.bak-20261021-pre-owndb{,2}`.
+
+**Pendências conhecidas**: `flux db dump/restore/console` seguem stub;
+painel ainda não mostra o bloco de banco próprio (eventos aparecem no log);
+worktree como projeto registrado continua convenção manual (`grupo` aponta
+pro principal). VehicleSeeder do vippers segue não-idempotente (1062 em
+re-seed; contorno = zerar `vehicles`/`vehicle_statuses` antes).
+
+## 21/10/2026 (noite, antes) — bug: colisão da 5173 deixou o vippers "não subiu" — fix na raiz (override NUNCA publica porta de host, `a68e4ba`)
 
 **O sintoma**: `https://vippers-d.bitello.xyz` servia a página "vippers não
 subiu após o timeout de health". O health nunca rodou: o container
