@@ -10,7 +10,7 @@ Baseline: the matrix in
 [`doc-old/STATUS.md`](../doc-old/STATUS.md) (snapshot 14/10/2026 morning:
 11 SIM · 24 PARCIAL · 11 NÃO), updated with the real repository state and
 this session's deliveries. Scoreboard for **this** matrix:
-**19 SIM · 17 PARCIAL · 11 NÃO** (47 items) → **21 SIM · 15 PARCIAL · 11 NÃO** after 2026-10-18/19 (R21 and R4 moved).
+**19 SIM · 17 PARCIAL · 11 NÃO** (47 items) → **21 SIM · 15 PARCIAL · 11 NÃO** after 2026-10-18/19 (R21 and R4 moved) → **22 SIM · 15 PARCIAL · 11 NÃO** after 2026-10-21 (redroom).
 
 ## Platform base
 
@@ -19,6 +19,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | Rust workspace, 3 crates + CI (fmt, clippy `-D warnings`, test) | **SIM** |
 | SQLite state (versioned schema, WAL, corruption refused) | **SIM** |
 | Catch-all router: `Host → action` decision machine | **SIM** |
+| Redroom global containment (`flux redroom on\|off\|status`; static 503 page behind the WHOLE router — CF and LAN, managed or unknown hosts, public panel and deploy route; sole exception = control-plane project `zcode-api` per AGENTS.md "never kill"; toggle = `POST /redroom` behind token, event trail; flag survives fluxd restart via `settings`) | **SIM** — delivered and ACTIVATED 21/10/2026 (CVE-2026-109618/109619 "php2shell" panic switch); proven: CF edge 503 page (djm-d, www), LAN 503 page, `zcode-api-d` still answering (401 gate at Caddy, real proxy body past the router), `/__flux/beat` 204 |
 | L7 streaming proxy (no buffering; sleep-overlay injection for eligible HTML) | **SIM** |
 | Flux pages family (waiting page 200, branded 404/503, JSON for API clients) | **SIM** |
 | robots/sitemap intercept (dev hidden, prod autogen) | **SIM** |
