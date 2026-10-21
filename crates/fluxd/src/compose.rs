@@ -80,14 +80,18 @@ use crate::events;
 /// junto (pedido do Gabriel: "algo automático que sempre desliga o
 /// depends_on"). A base SEMPRE é a do projeto; o flux só muta isso.
 ///
-/// `publicar_vite`: com live server declarado (`[dev] live`), publica a
-/// porta do dev server no host — o hostname `vite-{dev}` do túnel aponta pra
-/// cá (06/live; o fluxd roteia o host pro mesmo container, porta 5173).
+/// `ports: !reset null` em TODO service vivo — o flux NUNCA publica porta de
+/// host. Motivo (incidente 21/10): porta fixa publicada por dois projetos
+/// live ao mesmo tempo faz o `docker start` do segundo falhar ("port is
+/// already allocated") e o container acorda SEM rede — o engine não reanexa
+/// os endpoints depois de um start que falhou na programação de portas. A
+/// publicação não tem consumidor: o roteamento do vite (mesmo container,
+/// :5173) e o check de vivacidade (`porta_tcp_viva`) vão pelo IP na rede
+/// Docker, e o túnel aponta pro fluxd, não pro host.
 pub fn override_yaml(
     services: &[String],
     env: &str,
     stripped: &[String],
-    publicar_vite: bool,
     asset_host: &str,
 ) -> String {
     let mut y = String::from("services:\n");
@@ -96,11 +100,7 @@ pub fn override_yaml(
     }
     for svc in services {
         y.push_str(&format!("  {svc}:\n"));
-        if publicar_vite {
-            y.push_str("    ports:\n      - \"5173:5173\"\n");
-        } else {
-            y.push_str("    ports: !reset null\n");
-        }
+        y.push_str("    ports: !reset null\n");
         y.push_str("    depends_on: !reset null\n");
         y.push_str("    restart: \"no\"\n");
         y.push_str("    labels:\n      flux.managed: \"true\"\n");
@@ -396,17 +396,6 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             return;
         }
     };
-    // Porta do dev server publicada só quando há live server (`[dev] live`,
-    // 06/live): o hostname `vite-{dev}` do túnel aponta pra cá.
-    let publicar_vite = st
-        .project_toml(&name)
-        .ok()
-        .flatten()
-        .and_then(|t| flux_common::config::ProjectToml::parse_str(&t).ok())
-        .and_then(|t| t.dev)
-        .and_then(|d| d.live)
-        .map(|l| !l.trim().is_empty())
-        .unwrap_or(false);
     // ASSET_URL público por ambiente (06/live): dev = host -d, prod = host
     // raiz — a env injetada vence o .env, igual DB_HOST.
     let asset_host = if env == "dev" {
@@ -419,7 +408,7 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
     };
     if let Err(e) = std::fs::write(
         &override_path,
-        override_yaml(&services, &env, &strip, publicar_vite, &asset_host),
+        override_yaml(&services, &env, &strip, &asset_host),
     ) {
         events::event(
             st,
@@ -991,7 +980,6 @@ mod tests {
             &["app".into(), "worker".into()],
             "dev",
             &["mysql".into()],
-            false,
             "https://vippers-d.bitello.xyz",
         );
         assert!(y.contains("  app:\n"));
@@ -1026,16 +1014,16 @@ mod tests {
     }
 
     #[test]
-    fn override_com_live_publica_a_porta_do_dev_server() {
-        let sem = override_yaml(&["app".into()], "dev", &[], false, "https://v-d.x");
-        let com = override_yaml(&["app".into()], "dev", &[], true, "https://v-d.x");
+    fn override_nunca_publica_porta_no_host_mesmo_com_live_declarado() {
+        let y = override_yaml(&["app".into()], "dev", &[], "https://v-d.x");
         assert!(
-            !sem.contains("5173:5173"),
-            "sem live declarado, nada publicado"
+            !y.contains("5173:5173"),
+            "porta fixa publicada no host = colisão entre projetos live (incidente 21/10)"
         );
-        assert!(
-            com.contains("      - \"5173:5173\"\n"),
-            "com live, a porta do dev server sobe pro host (hostname vite-dev)"
+        assert_eq!(
+            y.matches("ports: !reset null").count(),
+            1,
+            "ports fora do service mesmo com live declarado"
         );
     }
 
