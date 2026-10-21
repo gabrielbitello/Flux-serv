@@ -67,6 +67,10 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/sync/report", post(sync_report))
         .route("/sync/rescan", post(sync_rescan))
         .route("/sync/status", get(sync_status))
+        // Redroom (21/10): modo de contenção GLOBAL — o router inteiro atrás
+        // da página estática. Toggle e status, atrás do gate como as demais
+        // rotas: quem tem o token da API tem o interruptor da plataforma.
+        .route("/redroom", post(redroom_set).get(redroom_status))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
         // credencial fica invisível, então o gate grava a recusa no `events`
@@ -862,6 +866,54 @@ async fn sync_status(State(app): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+// ------------------------------------------------------- redroom (21/10)
+
+/// Corpo do `POST /redroom` — o interruptor inteiro da plataforma.
+#[derive(Debug, Deserialize)]
+struct RedroomBody {
+    on: bool,
+}
+
+#[derive(Serialize)]
+struct RedroomOut {
+    redroom: bool,
+}
+
+/// POST /redroom — liga/desliga a contenção GLOBAL (redroom.rs): ligado, o
+/// router retorna a página estática para TODO request e nenhum container é
+/// acordado/proxado. A API :7420 é listener PRÓPRIO fora do router — o modo
+/// fica religável/desligável mesmo no ar. O toggle é evento na trilha: warn
+/// ao ligar (a plataforma inteira acaba de sair do ar para o público), info
+/// ao desligar.
+async fn redroom_set(State(app): State<Arc<AppState>>, Json(b): Json<RedroomBody>) -> Response {
+    if let Err(e) = crate::redroom::definir(&app.state, b.on) {
+        return erro(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("gravando a flag do redroom: {e}"),
+        );
+    }
+    events::event(
+        &app.state,
+        if b.on { "warn" } else { "info" },
+        "redroom",
+        if b.on {
+            "redroom LIGADO — todo o router (Cloudflare e LAN) está atrás da página de contenção"
+        } else {
+            "redroom desligado — acesso público restaurado"
+        },
+    );
+    tracing::warn!(target: "redroom", ligado = b.on, "toggle do redroom");
+    Json(RedroomOut { redroom: b.on }).into_response()
+}
+
+/// GET /redroom — estado atual do modo.
+async fn redroom_status(State(app): State<Arc<AppState>>) -> Response {
+    Json(RedroomOut {
+        redroom: crate::redroom::ativo(&app.state),
+    })
+    .into_response()
+}
+
 async fn not_implemented() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
@@ -1561,5 +1613,92 @@ mod tests {
         )
         .await;
         assert_eq!(s3, 401, "{c3}");
+    }
+
+    /// Redroom (21/10): rota nasce ATRÁS do gate (sem token = 401), o POST
+    /// liga a flag que o router lê, o GET reflete e o desligar restaura —
+    /// roundtrip completo no MESMO State que o `handle` consulta.
+    #[tokio::test]
+    async fn redroom_set_e_status_roundtrip_atras_do_gate() {
+        let (base, app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+
+        // Sem token: 401 como qualquer rota de controle — o interruptor não
+        // tem janela aberta.
+        let (s0, c0) = req(&cli, &base, "GET", "/redroom", None, None).await;
+        assert_eq!(s0, 401, "{c0}");
+        let (s0b, c0b) = req(
+            &cli,
+            &base,
+            "POST",
+            "/redroom",
+            None,
+            Some(r#"{"on":true}"#),
+        )
+        .await;
+        assert_eq!(s0b, 401, "{c0b}");
+
+        // OFF por default, visível no GET.
+        let (s1, c1) = req(&cli, &base, "GET", "/redroom", Some("segredo"), None).await;
+        assert_eq!(s1, 200, "{c1}");
+        assert!(c1.contains(r#""redroom":false"#), "{c1}");
+
+        // LIGA: resposta ecoa e o State (o MESMO que o router consulta)
+        // mostra a flag de pé.
+        let (s2, c2) = req(
+            &cli,
+            &base,
+            "POST",
+            "/redroom",
+            Some("segredo"),
+            Some(r#"{"on":true}"#),
+        )
+        .await;
+        assert_eq!(s2, 200, "{c2}");
+        assert!(c2.contains(r#""redroom":true"#), "{c2}");
+        assert!(crate::redroom::ativo(&app.state), "flag lida pelo router");
+        let (s3, c3) = req(&cli, &base, "GET", "/redroom", Some("segredo"), None).await;
+        assert_eq!(s3, 200, "{c3}");
+        assert!(c3.contains(r#""redroom":true"#), "{c3}");
+
+        // O toggle virou evento na trilha (warn ao ligar) — visível no painel.
+        let n: i64 = app
+            .state
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM events WHERE scope = 'redroom' AND level = 'warn'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(n, 1, "ligar grava evento warn");
+
+        // DESLIGA: volta ao aberto.
+        let (s4, c4) = req(
+            &cli,
+            &base,
+            "POST",
+            "/redroom",
+            Some("segredo"),
+            Some(r#"{"on":false}"#),
+        )
+        .await;
+        assert_eq!(s4, 200, "{c4}");
+        assert!(c4.contains(r#""redroom":false"#), "{c4}");
+        assert!(!crate::redroom::ativo(&app.state));
+
+        // Corpo inválido: 422 do extrator Json do axum (recusa com causa).
+        let (s5, _) = req(
+            &cli,
+            &base,
+            "POST",
+            "/redroom",
+            Some("segredo"),
+            Some(r#"{"on":"sim"}"#),
+        )
+        .await;
+        assert_eq!(s5, 422, "corpo malformado não liga nada");
+        assert!(!crate::redroom::ativo(&app.state));
     }
 }

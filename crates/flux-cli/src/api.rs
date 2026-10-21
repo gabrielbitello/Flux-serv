@@ -283,6 +283,20 @@ pub struct SyncProjectRowOut {
     pub rescan_requested: bool,
 }
 
+// --------------------------------------------------------- redroom (21/10)
+
+/// Espelho do corpo da API de controle (`GET`/`POST /redroom`).
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct RedroomOut {
+    pub redroom: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RedroomIn {
+    on: bool,
+}
+
 /// Payload de uma linha SSE `data: …` (contrato do /logs com follow: cada
 /// evento é `data: <linha crua>` seguido de linha vazia). Aceita `data: X` e
 /// `data:X`; separador vazio, comentário `: ping` e outros campos (`event:`,
@@ -668,6 +682,24 @@ impl ApiClient {
     /// inclusive).
     pub async fn sync_status(&self) -> Result<SyncStatusOut, ApiError> {
         let r = self.call("GET", "/sync/status", None).await?;
+        self.json_out(r)
+    }
+
+    /// POST /redroom — liga (`on: true`) ou desliga a contenção GLOBAL: o
+    /// router inteiro do fluxd atrás da página estática, nenhum container
+    /// acordado/proxado. A API fica de pé FORA do router (listener próprio),
+    /// então o desligar funciona mesmo com a contenção no ar.
+    pub async fn redroom_definir(&self, on: bool) -> Result<RedroomOut, ApiError> {
+        let corpo = serde_json::to_string(&RedroomIn { on }).map_err(|e| ApiError::Protocolo {
+            msg: format!("serializando redroom: {e}"),
+        })?;
+        let r = self.call("POST", "/redroom", Some(corpo)).await?;
+        self.json_out(r)
+    }
+
+    /// GET /redroom — estado atual do modo.
+    pub async fn redroom_status(&self) -> Result<RedroomOut, ApiError> {
+        let r = self.call("GET", "/redroom", None).await?;
         self.json_out(r)
     }
 

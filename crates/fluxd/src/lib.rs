@@ -20,6 +20,7 @@ pub mod panel;
 pub mod panel_auth;
 pub mod paths;
 pub mod proxy;
+pub mod redroom;
 pub mod router;
 pub mod sleep;
 pub mod sqlite_source;

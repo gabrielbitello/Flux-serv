@@ -6,6 +6,7 @@ pub(crate) mod ciclo;
 pub(crate) mod env_cmd;
 pub(crate) mod live;
 pub(crate) mod logs;
+pub(crate) mod redroom;
 pub(crate) mod sync_cmd;
 pub(crate) mod tokens;
 pub(crate) mod up;

@@ -144,6 +144,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ShieldCmd,
     },
+    /// Modo de contenção GLOBAL (21/10): ligado, o router do fluxd devolve a
+    /// página estática de contenção para TODO request — Cloudflare e rede
+    /// local, host gerenciado ou não; nenhum container é acordado ou
+    /// proxyado. A API :7420 e o painel :7421 (túnel SSH) seguem de pé — é
+    /// por ali que o modo se desliga. Comando GLOBAL: não usa contexto de
+    /// projeto.
+    Redroom {
+        #[arg(value_parser = ["on", "off", "status"])]
+        acao: String,
+    },
     /// Escreve o workflow de deploy no projeto a partir do template (10).
     Init {
         /// Só `ci` na spec.
@@ -373,6 +383,7 @@ async fn main() {
         Cmd::Prod { .. } => stub("fase F9 (spec 10) — prod é git push + rollback"),
         Cmd::Maintenance { .. } => stub("fase F18 (spec 15) — modo manutenção com bypass"),
         Cmd::Shield { .. } => stub("fase F19 (spec 16) — WAF próprio, shadow antes de enforce"),
+        Cmd::Redroom { acao } => comandos::redroom::redroom(&acao).await,
         Cmd::Db { cmd } => match cmd {
             DbCmd::Fresh {
                 yes,

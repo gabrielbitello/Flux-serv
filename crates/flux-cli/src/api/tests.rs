@@ -220,6 +220,23 @@ async fn mock_fluxd() -> String {
         )
     }
 
+    async fn redroom_set(
+        State(token): State<String>,
+        headers: HeaderMap,
+        Json(b): Json<serde_json::Value>,
+    ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+        gate_com(token, headers).await?;
+        Ok(Json(serde_json::json!({ "redroom": b["on"] })))
+    }
+
+    async fn redroom_status(
+        State(token): State<String>,
+        headers: HeaderMap,
+    ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+        gate_com(token, headers).await?;
+        Ok(Json(serde_json::json!({ "redroom": true })))
+    }
+
     let app: Router = Router::new()
         .route("/healthz", get(healthz))
         .route(
@@ -231,6 +248,7 @@ async fn mock_fluxd() -> String {
         .route("/projects/{name}/down", post(parar_projeto))
         .route("/projects/{name}/logs", get(logs_stream))
         .route("/projects/{name}/exec", post(exec_projeto))
+        .route("/redroom", post(redroom_set).get(redroom_status))
         .route("/fechada", get(indisponivel))
         .fallback(futura)
         .with_state(TOKEN.to_owned());
@@ -285,6 +303,34 @@ async fn token_ausente_vira_erro_de_token() {
     let err = cli.status("vipers").await.unwrap_err();
     assert!(matches!(err, ApiError::Token), "erro: {err}");
     assert!(err.to_string().contains("FLUX_API_TOKEN"), "causa: {err}");
+}
+
+/// Redroom (21/10): status, ligar e desligar no mock — e sem token a rota
+/// fecha 401 (o interruptor da plataforma não tem janela aberta).
+#[tokio::test]
+async fn redroom_liga_desliga_e_consulta_no_mock() {
+    let base = mock_fluxd().await;
+    let cli = cliente(&base, Some(TOKEN));
+
+    let st = cli.redroom_status().await.unwrap();
+    assert!(st.redroom, "mock nasce ligado");
+
+    let off = cli.redroom_definir(false).await.unwrap();
+    assert!(!off.redroom, "off ecoa desligado");
+    let on = cli.redroom_definir(true).await.unwrap();
+    assert!(on.redroom, "on ecoa ligado");
+
+    let anon = cliente(&base, None);
+    let err = anon.redroom_status().await.unwrap_err();
+    assert!(
+        matches!(err, ApiError::Token),
+        "sem token = ApiError::Token: {err}"
+    );
+    let err = anon.redroom_definir(true).await.unwrap_err();
+    assert!(
+        matches!(err, ApiError::Token),
+        "sem token no POST também: {err}"
+    );
 }
 
 #[tokio::test]

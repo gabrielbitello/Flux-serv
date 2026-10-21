@@ -21,6 +21,7 @@ use crate::edge::{EdgeLayer, EdgeLimits};
 use crate::events;
 use crate::pages;
 use crate::proxy;
+use crate::redroom;
 use crate::sqlite_source::SqliteSource;
 use crate::ui::{NOINDEX, x_robots_tag};
 use crate::waf::WafLayer;
@@ -151,6 +152,29 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
     let path = parts.uri.path().to_owned();
     let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
     let method = parts.method.clone();
+
+    // Redroom (21/10): modo de contenção GLOBAL — ligado, TODO request que
+    // chega neste router (túnel Cloudflare, rede local, host gerenciado ou
+    // não, painel público e rota de deploy inclusos) recebe a página estática
+    // ANTES da decisão de host: nada é acordado, proxyado ou servido — a
+    // pilha inteira fica intocável (pedido do Gabriel: generalista, sem
+    // exceção). O controle não cai junto: :7420/:7421 são listeners próprios
+    // (lib.rs) — é por ali que o modo se desliga. Rastro individual fica no
+    // events::access (503) e o por-request em debug; o toggle em si é evento
+    // da API (`POST /redroom`).
+    if redroom::ativo(&app.state) {
+        tracing::debug!(target: "redroom", host = %host_raw, path, "redroom: request retido na página de contenção");
+        let r = redroom::resposta();
+        events::access(
+            &app.state,
+            &host_raw,
+            method.as_str(),
+            &path,
+            r.status().as_u16(),
+            started.elapsed().as_millis(),
+        );
+        return r;
+    }
 
     let src = match &app.docker {
         Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
@@ -655,6 +679,88 @@ mod tests {
         assert!(
             status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
             "API de controle segue fechada SEM token: {status}"
+        );
+    }
+
+    /// Redroom (21/10) LIGADO: o router INTEIRO atrás da página estática —
+    /// host desconhecido, host gerenciado, com ou sem o marcador do túnel
+    /// (generalista, sem exceção por origem). O request MORRE antes da
+    /// decisão: o 404 brandiado jamais aparece; a resposta é HTML mesmo com
+    /// `Accept: json` (contenção não negocia).
+    #[tokio::test]
+    async fn redroom_ligado_segura_todo_request_na_pagina() {
+        let app = app();
+        crate::redroom::definir(&app.state, true).unwrap();
+        let router = router_com(&app);
+
+        for host in ["zzz.bitello.xyz", "vipers-d.bitello.xyz"] {
+            let resp = router
+                .clone()
+                .oneshot(req(host, "/qualquer/path"))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "host {host}: contenção antes da decisão"
+            );
+            assert_eq!(
+                resp.headers().get(header::CONTENT_TYPE).unwrap(),
+                "text/html; charset=utf-8",
+                "contenção é HTML mesmo com Accept json"
+            );
+            let corpo = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            let corpo = String::from_utf8_lossy(&corpo);
+            assert!(corpo.contains("MODO REDROOM"), "corpo: {corpo}");
+        }
+
+        // Com o marcador do túnel Cloudflare: idêntico — a origem não muda
+        // nada (o corte não distingue CF de LAN).
+        let mut r = req("zzz.bitello.xyz", "/");
+        r.headers_mut()
+            .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let resp = router.oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Redroom DESLIGADO (default): o marcador do túnel não faz nada — o
+    /// fluxo normal vale (404 brandiado de host desconhecido), prova de que
+    /// o gate é inerte com a flag fora do ar.
+    #[tokio::test]
+    async fn redroom_desligado_mantem_o_fluxo_normal_ate_com_marcador_do_tunel() {
+        let app = app(); // sem chave na settings = OFF
+        let router = router_com(&app);
+
+        let mut r = req("zzz.bitello.xyz", "/");
+        r.headers_mut()
+            .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let resp = router.oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "fluxo normal");
+    }
+
+    /// `POST /__flux/beat` é rota REAL (vence o fallback) e NÃO passa pelo
+    /// gate de propósito: 204 sem tocar container — inofensivo sob contenção
+    /// (o overlay só existe em página servida, então os beats morrem sozinhos).
+    #[tokio::test]
+    async fn beat_sob_redroom_segue_204_sem_tocar_nada() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        crate::redroom::definir(&app.state, true).unwrap();
+        let router = router_com(&app);
+
+        let resp = router
+            .oneshot(req("vipers-d.bitello.xyz", "/__flux/beat"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "beat é rota real: contenção do fallback não o alcança"
         );
     }
 }
