@@ -127,7 +127,29 @@ async fn teardown(
         }
     }
 
-    // 2. Diretórios de sync na VM (fonte da verdade é o repo Windows).
+    // 2. Banco próprio ([db] own, 21/10): o database de DEV do projeto
+    //    temporário expira JUNTO — sai com dump de backup (mesma regra do
+    //    TTL de 1 semana, só que na hora do teardown, porque a instância
+    //    deixou de existir). O CONTAINER do grupo NÃO é do compose do
+    //    projeto (`flux-db-{grupo}` ≠ `flux-{nome}-*`) — sobrevive ao
+    //    `down -v` e para via dormir_se_ninguem se ficou órfão.
+    if let Ok(Some(src)) = st.project_toml(nome)
+        && let Some(Ok(cfg)) = crate::banco::config_de(&src, nome)
+        && let (Some(d), Some(backup_dir)) =
+            (docker, raiz.parent().map(|p| p.join("state/db-backups")))
+        && let Ok(db) = crate::banco::database_name(nome, flux_common::protocol::Env::Dev)
+    {
+        match crate::banco::apagar_database_com_backup(st, &backup_dir, &cfg.grupo, &db).await {
+            Ok(caminho) => feito.push(format!(
+                "banco próprio: {db} apagado (dump em {})",
+                caminho.display()
+            )),
+            Err(e) => falhas.push(format!("banco próprio {db}: {e}")),
+        }
+        crate::banco::dormir_se_ninguem(st, Some(d), &cfg.grupo).await;
+    }
+
+    // 3. Diretórios de sync na VM (fonte da verdade é o repo Windows).
     for dir in dirs_do_projeto(raiz, nome) {
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => feito.push(format!("rm {}", dir.display())),
@@ -136,7 +158,7 @@ async fn teardown(
         }
     }
 
-    // 3. SQLite POR ÚLTIMO — enquanto não some, o painel continua mostrando
+    // 4. SQLite POR ÚLTIMO — enquanto não some, o painel continua mostrando
     //    o projeto (meio-apagado = visível, nunca fantasma).
     match st.purge_project(nome) {
         Ok(()) => feito.push("estado SQLite".to_owned()),

@@ -26,6 +26,20 @@ pub(crate) async fn tick(shared: &AppState, d: Option<&Docker>, global: &GlobalC
     }
     let agora = crate::sleep::now_epoch();
     crate::temporary::expire_check(&shared.state, d.cloned(), agora).await;
+    // Banco próprio (21/10): databases de DEV inativos além do
+    // `[db] ttl_days` (default 7) saem com dump de backup. Container parado
+    // = nada a fazer na rodada (a limpeza pega a próxima com o grupo acordado).
+    crate::banco::limpeza_ttl(
+        &shared.state,
+        shared.docker.as_ref(),
+        shared
+            .state_dir
+            .as_deref()
+            .map(|p| p.join("db-backups"))
+            .as_deref(),
+        agora,
+    )
+    .await;
 }
 
 /// Loop do sweep: 60 s por tick, primeiro pulado.
