@@ -1,0 +1,17 @@
+{
+  "description": "Barra comando docker no terminal do host: nesta máquina o padrão é a plataforma Flux — Docker roda dentro da VM Debian (192.168.140.2), operado pelo CLI flux e pelas tools MCP flux_*. O guard recusa com a explicação e o agente troca sozinho.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/docker-guard.js\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

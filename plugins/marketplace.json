@@ -1,0 +1,16 @@
+{
+  "name": "dev-flux-local",
+  "owner": {
+    "name": "Gabriel Bitello"
+  },
+  "plugins": [
+    {
+      "name": "flux",
+      "source": "./flux",
+      "version": "0.1.0",
+      "description": "Plataforma Flux no zcode: skill de operação, /flux:init, docker guard e MCP do CLI flux (diagnóstico, acordar dev, toolchain, SQL read-only).",
+      "displayName": "Flux",
+      "category": "developer-tools"
+    }
+  ]
+}

@@ -2,6 +2,48 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 22/10 (noite) — MCP do flux (`flux mcp`) + endpoint db/query read-only + plugin zcode (`e9adb56`…`482cbba`)
+
+**Pedido do Gabriel**: IA não pode ficar rodando comando no terminal — o flux
+vira MCP. E: apagar a skill avulsa do flux, criar plugin zcode com comando de
+init, aviso no AGENTS.md, skill nova e hook que barra `docker` no host.
+
+**`flux mcp`** (`crates/flux-cli/src/comandos/mcp/`, 5 arquivos): MCP sobre
+stdio (JSON-RPC 2.0, uma mensagem por linha) SEM SDK — envelope, handshake
+(echo da protocolVersion do cliente), `tools/list`, `tools/call`. 9 tools:
+projetos, status, ps, sync_status (sessão mutagen local + visão do fluxd com
+veredito honesto ok/atenção), db_status, logs, acordar (lease+up+poll),
+db_query (SQL read-only), tool (WHITELIST npm/npx/composer/php artisan —
+testada). Falha de tool = resultado `isError` com a causa classificada da
+API; stdout é SÓ protocolo (diagnóstico no stderr); contexto com regra única
+em `contexto_de_dir` (variante sem `exit` — processo long-lived não morre).
+
+**db/query no fluxd** (`POST /projects/{name}/db/query`): guarda de escrita
+com UM dono (`banco::sql_e_leitura` — statement único, SELECT/SHOW/DESCRIBE/
+EXPLAIN, sem `FOR UPDATE`/`LOCK IN SHARE MODE`), senha de root do STATE pelo
+`sql_exec` existente (virou `pub(crate)`), teto 1 MiB, USE de contexto com
+`identificador_seguro`. Projeto sem `[db] own` = 422.
+
+**Deploy**: base da VM conferida por md5 ANTES do overlay (4 arquivos), build
+na VM (38,9 s), backup `/tmp/fluxd.bak-20261022-mcp`, swap, restart, smoke
+vivo: `SHOW TABLES` no `vippers_dev` pela TOOL MCP no release exe (12+
+tabelas na saída), `DROP DATABASE` recusado 422 com a causa.
+
+**Plugin `plugins/flux/`** (0.1.0 + `plugins/marketplace.json`): skill
+(regras de ouro + mapa das tools MCP + changelog), `/flux:init` (reconhece
+terreno → escreve flux.toml com chaves conhecidas → valida parse com
+`flux status` → garante bloco Flux no `.zcode/AGENTS.md` do projeto → nunca
+sobe `up` sozinho), hook PreToolUse `docker-guard.js` (recusa comando que
+começa com docker, case-insensitive, com a explicação — host nem tem
+Docker; ssh→docker passa porque o guard é de prefixo), `.mcp.json` apontando
+`target\release\flux.exe mcp` (caminho absoluto — o plugin é desta máquina).
+Skill avulsa `~/.zcode/skills/flux` aposentada em `skills-disabled/`.
+
+TRIO verde (fmt + clippy -D warnings + 401 testes, +23 novos). Armadilha de
+hoje: crases na mensagem de commit = command substitution no Git Bash
+(mensagem do commit `flux mcp` nasceu com buracos — amend imediato, commit
+local meu, sem push).
+
 ## 22/10 (madrugada) — own-db v2: o compose do projeto fica SEM banco; o flux baixa sozinho (`4cece4a`…`b291f62`)
 
 **Pedido do Gabriel depois de ler a v1**: "que merda é essa, ele já tem

@@ -93,10 +93,36 @@ See [database.md](database.md).
 
 | Command | Status | Notes |
 |---|---|---|
+| `flux mcp` | **Live** | MCP server (stdio JSON-RPC) so AI agents use the platform through structured tools instead of shell commands. Runs until stdin closes. |
 | `flux tool <runtime> -- <cmd…>` | Not implemented yet | On-demand toolchain in an ephemeral VM container (`node\|php\|composer\|rust`). |
 | `flux panel` | Not implemented yet | Opens the panel in the browser. |
 | `flux export` / `flux import <file>` | Not implemented yet | DR zip (config+state+secrets, passphrase-encrypted) and re-erection on a new VM. |
 | `flux self-update` | Not implemented yet | CLI self-update with verified checksum. |
+
+## MCP (AI integration)
+
+`flux mcp` speaks MCP over stdio (one JSON-RPC message per line). The zcode
+plugin `flux` (in this repo under `plugins/flux/`) registers it plus a skill,
+an init command and a `docker` guard hook. Every project-scoped tool accepts
+`projeto` explicitly — the server is long-lived, so the process cwd is not a
+reliable context.
+
+| Tool | Kind | Notes |
+|---|---|---|
+| `flux_projetos` | read | Registered projects (name, framework, hosts). |
+| `flux_status` | read | Project state: containers, sleep (dev/prod), migrations, hosts. |
+| `flux_ps` | read | All managed containers grouped with ACORDADO/PARCIAL/DORMINDO. |
+| `flux_sync_status` | read | mutagen session health (Windows↔VM) + fluxd view, with an honest `veredito` (`dir` picks the project root). |
+| `flux_db_status` | read | Own-db container, databases, per-database TTL countdown. |
+| `flux_logs` | read | Log tail without follow (1–1000 lines). |
+| `flux_acordar` | action | lease + `POST /up`, polls until `running` or `esperar_secs` (default 60, cap 180). |
+| `flux_db_query` | action | **Read-only SQL** on the project's own-db: single statement, SELECT/SHOW/DESCRIBE/EXPLAIN only, no locking clauses — enforced by fluxd (`banco::sql_e_leitura`, `POST /projects/{name}/db/query`); output is raw `mysql -N` TSV, 1 MiB cap. |
+| `flux_tool` | action | Whitelisted toolchain inside the dev container: `npm`, `npx`, `composer`, `php artisan` only; 120 s exec cap. |
+
+Guard rules have a single owner: the write-guard for SQL lives in fluxd (the
+server refuses with 422 and the cause verbatim); the client never re-implements
+it. Errors surface as MCP `isError` results with the classified cause — never
+a silent failure.
 
 ## Historical rationale
 
@@ -108,3 +134,4 @@ The full CLI design (and which phase owns each command):
 | Date | Change |
 |---|---|
 | 2026-10-14 | Initial English documentation |
+| 2026-10-22 | `flux mcp` → Live (stdio MCP server, 9 tools) + own-db read-only SQL endpoint `POST /projects/{name}/db/query`; zcode plugin under `plugins/flux/` |

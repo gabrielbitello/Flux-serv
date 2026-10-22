@@ -1,0 +1,12 @@
+{
+  "name": "flux",
+  "version": "0.1.0",
+  "description": "Plataforma Flux no zcode: skill de operação (regras de ouro), comando /flux:init (cria flux.toml no projeto + aviso no AGENTS.md), hook que barra comando docker no host (o padrão é flux) e MCP do CLI flux — diagnóstico, acordar dev, toolchain npm/composer/artisan e SQL read-only no banco próprio, sem rodar comando no terminal.",
+  "author": {
+    "name": "Gabriel Bitello"
+  },
+  "skills": "./skills",
+  "commands": "./commands",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}
