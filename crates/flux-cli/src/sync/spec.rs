@@ -31,6 +31,14 @@ pub const VM_PROJECTS_ROOT: &str = "/srv/flux/projects";
 /// QUALQUER nível e engolia `resources/views/vendor/` (override de blade
 /// LARAVEL OFICIAL, 4 arquivos trackeados no vippers: o tema custom inteiro
 /// nunca chegava à VM). Dir gerado é o da RAIZ; aninhado é código.
+/// 22/10 (vippers, 84 transition problems após full rescan): `/bootstrap/cache/`
+/// e `public/storage` entraram — estado de RUNTIME do app na VM, mesma família
+/// de `/storage/`. Upload do disco público nasce SÓ na VM (Windows nem tem o
+/// symlink `public/storage`) e o cache de painel/framework é gerado lá com o
+/// DONO do container (root/www-data) — o mutagen (usuário flux) não consegue
+/// apagar e o problem fica eterno. ATENÇÃO: `public/storage` contém MÍDIA REAL
+/// enviada pro site — o ignore PROTEGE (sem ele o mutagen tentaria apagar do
+/// beta o que o alpha não tem); nunca "consertar" com chown+delete.
 pub const GLOBAL_IGNORES: &[&str] = &[
     ".env",
     ".env.*",
@@ -39,6 +47,8 @@ pub const GLOBAL_IGNORES: &[&str] = &[
     "/node_modules/",
     "public/build/",
     "/storage/",
+    "/bootstrap/cache/",
+    "public/storage",
 ];
 
 /// Endpoint beta (réplica). Na vida real é a VM via SSH; em dev/testes, um

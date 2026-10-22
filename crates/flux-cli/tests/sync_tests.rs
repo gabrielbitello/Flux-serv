@@ -147,6 +147,9 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
     // 18/10 parte 2: vendor/, node_modules/ e storage/ ancorados na raiz —
     // padrão solto casava qualquer nível e engolia
     // resources/views/vendor/ (override de blade Laravel oficial).
+    // 22/10: /bootstrap/cache/ e public/storage — runtime do app na VM
+    // (cache gerado com DONO do container + uploads do disco público que
+    // só existem na VM; o ignore PROTEGE a mídia de delete do one-way).
     assert_eq!(
         sync::GLOBAL_IGNORES,
         &[
@@ -157,6 +160,8 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
             "/node_modules/",
             "public/build/",
             "/storage/",
+            "/bootstrap/cache/",
+            "public/storage",
         ]
     );
 }
