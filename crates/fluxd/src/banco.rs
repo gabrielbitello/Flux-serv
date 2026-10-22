@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use bollard::Docker;
 use flux_common::protocol::Env;
+use rusqlite::OptionalExtension;
 
 use crate::events;
 use crate::state::State;
@@ -35,6 +36,11 @@ use crate::state::State;
 const ESPERA_SAUDE_SECS: u64 = 300;
 /// Teto do dump antes do drop (64 MiB — dev real do vippers tem ~3 MB).
 const TETO_DUMP_BYTES: usize = 64 * 1024 * 1024;
+
+/// Imagem do banco próprio quando o flux.toml não declara `[db] image` e o
+/// compose não tem service de banco (design 21/10 v2, pedido do Gabriel:
+/// "não é para ter mysql no compose — ele baixa sozinho"). MySQL 8.4 LTS.
+pub const IMAGEM_PADRAO: &str = "mysql:8.4";
 
 /// Configuração efetiva do banco próprio de um projeto, já resolvida do
 /// `flux.toml` gravado no state.
@@ -65,6 +71,84 @@ pub fn config_de(toml_src: &str, name: &str) -> Option<Result<BancoConfig, Strin
 /// `DB_HOST` com este nome; o YAML gerado fixa `container_name` igual).
 pub fn container_name(grupo: &str) -> String {
     format!("flux-db-{grupo}")
+}
+
+// ------------------------------------------------- definição sem compose
+
+/// Lê/gera as credenciais do grupo no settings do state (k/v). Geradas UMA
+/// vez por grupo com `randomblob` do próprio SQLite (zero dependência
+/// nova): 48 chars hex, seguros por construção — sem aspas, sem escape,
+/// viram user/senha MySQL válidos e entram limpos no YAML e no SQL.
+/// Sempre devolve o MESMO conjunto para o grupo: container e apps convergem
+/// (a sincronização no container cobre container que já existia com
+/// credenciais antigas).
+fn credenciais_de(st: &State, grupo: &str) -> Result<(String, String, String), String> {
+    let gerar = |st: &State, chave: &str| -> Result<String, String> {
+        let existente = st
+            .with(|c| {
+                c.query_row(
+                    "SELECT v FROM settings WHERE k = ?1",
+                    rusqlite::params![chave],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+            })
+            .map_err(|e| e.to_string())?;
+        if let Some(v) = existente {
+            return Ok(v);
+        }
+        let novo: String = st
+            .with(|c| c.query_row("SELECT lower(hex(randomblob(24)))", [], |r| r.get(0)))
+            .map_err(|e| e.to_string())?;
+        st.with(|c| {
+            c.execute(
+                "INSERT INTO settings(k, v) VALUES (?1, ?2)
+                 ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                rusqlite::params![chave, novo],
+            )
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(novo)
+    };
+    let root = gerar(st, &format!("db-root/{grupo}"))?;
+    let user = gerar(st, &format!("db-user/{grupo}"))?;
+    let senha = gerar(st, &format!("db-pass/{grupo}"))?;
+    Ok((root, user, senha))
+}
+
+/// Define o banco pelo flux.toml QUANDO o render do compose não tem service
+/// de banco — o compose do projeto fica SEM banco e o flux baixa sozinho
+/// (21/10 v2). Imagem = `[db] image` ou IMAGEM_PADRAO; credenciais geradas
+/// uma vez no settings e sincronizadas no container em `pos_saude`.
+pub fn definir_do_toml(
+    st: &State,
+    grupo: &str,
+    imagem: Option<&str>,
+) -> Result<crate::compose::CapturaBanco, String> {
+    let (root, user, senha) = credenciais_de(st, grupo)?;
+    identificador_seguro(&user, "usuário do banco gerado")?;
+    Ok(crate::compose::CapturaBanco {
+        imagem: imagem.unwrap_or(IMAGEM_PADRAO).to_owned(),
+        environment: std::collections::BTreeMap::from([
+            ("MYSQL_ROOT_PASSWORD".to_owned(), root),
+            ("MYSQL_USER".to_owned(), user),
+            ("MYSQL_PASSWORD".to_owned(), senha),
+        ]),
+        command: None,
+    })
+}
+
+/// Cria/sincroniza o usuário do grupo: `CREATE USER IF NOT EXISTS` + `ALTER
+/// USER ... IDENTIFIED BY` — cobre container que já existia com credenciais
+/// diferentes do mecanismo novo e rotação futura. Senha sai do gerador
+/// (hex), então entra no SQL sem escape especial.
+async fn sincronizar_usuario(grupo: &str, user: &str, senha: &str) -> Result<(), String> {
+    identificador_seguro(user, "usuário do banco")?;
+    let sql = format!(
+        "CREATE USER IF NOT EXISTS '{user}'@'%' IDENTIFIED BY '{senha}'; \
+         ALTER USER '{user}'@'%' IDENTIFIED BY '{senha}'; FLUSH PRIVILEGES;"
+    );
+    sql_exec(grupo, &sql, 64 * 1024).await.map(|_| ())
 }
 
 /// Volume nomeado do dado do grupo — UM por grupo, fora do compose de
@@ -157,7 +241,7 @@ pub async fn garantir(
 
     // Fast path: já está de pé e saudável — nada a fazer além do database.
     if estado_saude(docker, &container).await.as_deref() == Some("healthy") {
-        return garantir_database(st, grupo, db_novo, user_de(captura)?).await;
+        return pos_saude(st, grupo, captura, db_novo).await;
     }
 
     // Compose gerado do render do engine — determinístico (BTreeMap), então
@@ -203,16 +287,37 @@ pub async fn garantir(
             inicio.elapsed().as_secs_f32()
         ),
     );
-    garantir_database(st, grupo, db_novo, user_de(captura)?).await
+    pos_saude(st, grupo, captura, db_novo).await
+}
+
+/// Depois do container saudável (fast path ou subida): sincroniza o usuário
+/// do grupo e garante o database da instância.
+async fn pos_saude(
+    st: &State,
+    grupo: &str,
+    captura: &crate::compose::CapturaBanco,
+    db_novo: &str,
+) -> Result<(), String> {
+    let user = user_de(captura)?;
+    sincronizar_usuario(grupo, user, senha_de(captura)?).await?;
+    garantir_database(st, grupo, db_novo, user).await
 }
 
 fn user_de(captura: &crate::compose::CapturaBanco) -> Result<&str, String> {
     let user = captura
         .environment
         .get("MYSQL_USER")
-        .ok_or_else(|| "captura do banco sem MYSQL_USER — recusado (compat exige credenciais declaradas no compose)".to_owned())?;
+        .ok_or_else(|| "banco próprio sem MYSQL_USER — recusado (credenciais são obrigatórias, venham do compose ou do gerador)".to_owned())?;
     identificador_seguro(user, "usuário do banco")?;
     Ok(user.as_str())
+}
+
+fn senha_de(captura: &crate::compose::CapturaBanco) -> Result<&str, String> {
+    captura
+        .environment
+        .get("MYSQL_PASSWORD")
+        .map(String::as_str)
+        .ok_or_else(|| "banco próprio sem MYSQL_PASSWORD — recusado".to_owned())
 }
 
 /// Espera o healthcheck do container virar `healthy` (teto em segundos).
@@ -778,6 +883,54 @@ mod tests {
         c.environment.remove("MYSQL_USER");
         let err = user_de(&c).unwrap_err();
         assert!(err.contains("MYSQL_USER"), "erro aponta a chave: {err}");
+    }
+
+    /// Design v2 (21/10, pedido do Gabriel): compose SEM service de banco —
+    /// o flux baixa sozinho. Credenciais geradas UMA vez no settings e
+    /// estáveis entre chamadas (container e apps convergem); imagem do
+    /// toml vence o default.
+    #[test]
+    fn definir_do_toml_gera_creds_estaveis_e_imagem_certa() {
+        let st = State::in_memory().unwrap();
+
+        let primeira = definir_do_toml(&st, "vippers", Some("mysql:9.3")).unwrap();
+        assert_eq!(primeira.imagem, "mysql:9.3");
+        for chave in ["MYSQL_ROOT_PASSWORD", "MYSQL_USER", "MYSQL_PASSWORD"] {
+            let v = primeira.environment.get(chave).expect(chave);
+            assert_eq!(v.len(), 48, "randomblob(24) hex = 48 chars");
+            assert!(
+                v.chars().all(|c| c.is_ascii_hexdigit()),
+                "hex puro = seguro em YAML e SQL sem escape: {v}"
+            );
+        }
+
+        // Segunda chamada (outro up): MESMAS credenciais — nunca regenera.
+        let segunda = definir_do_toml(&st, "vippers", None).unwrap();
+        assert_eq!(
+            primeira.environment, segunda.environment,
+            "credenciais do grupo são estáveis no settings"
+        );
+        assert_eq!(
+            segunda.imagem, IMAGEM_PADRAO,
+            "sem [db] image = default da plataforma"
+        );
+
+        // Outro grupo tem credenciais próprias (não compartilha).
+        let outro = definir_do_toml(&st, "outro", None).unwrap();
+        assert_ne!(
+            primeira.environment.get("MYSQL_ROOT_PASSWORD"),
+            outro.environment.get("MYSQL_ROOT_PASSWORD"),
+            "grupos distintos não dividem segredo"
+        );
+
+        // user gerado passa no identificador (entra no SQL sem escape).
+        assert!(
+            identificador_seguro(
+                primeira.environment.get("MYSQL_USER").expect("user"),
+                "usuário do banco gerado"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

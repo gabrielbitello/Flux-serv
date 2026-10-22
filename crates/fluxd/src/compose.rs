@@ -574,9 +574,12 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
             ),
         );
     }
-    // Captura do service de banco para o container dedicado do grupo
-    // (21/10): own = true sem banco declarado é ERRO com a causa, nunca
-    // fallback silencioso.
+    // Definição do banco do grupo (21/10): PRIMEIRO o render do compose
+    // (service declarado vence — imagem + credenciais do próprio projeto);
+    // sem service no render, o flux BAIXA SOZINHO pela `[db] image` (ou
+    // default mysql:8.4) com credenciais geradas no state — o compose do
+    // projeto fica SEM banco (pedido do Gabriel 21/10 v2). A causa do
+    // fallback vai no evento, nunca silêncio.
     let captura = match &banco_cfg {
         Some(cfg) => match capturar_banco(&renderizado) {
             Ok(c) => {
@@ -585,21 +588,49 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
                     "info",
                     "up",
                     &format!(
-                        "{projeto}: banco próprio — flux-db-{} (imagem {}, database {}_{env}) \
-                         dorme e acorda com o projeto",
-                        cfg.grupo, c.imagem, name
+                        "{projeto}: banco próprio — flux-db-{} (imagem {} do compose, database \
+                         {name}_{env}) dorme e acorda com o projeto",
+                        cfg.grupo, c.imagem
                     ),
                 );
                 Some(c)
             }
-            Err(e) => {
-                events::event(
-                    st,
-                    "error",
-                    "up",
-                    &format!("{projeto}: banco próprio (grupo {}): {e}", cfg.grupo),
-                );
-                return;
+            Err(cause) => {
+                let imagem = st
+                    .project_toml(&name)
+                    .ok()
+                    .flatten()
+                    .and_then(|src| flux_common::config::ProjectToml::parse_str(&src).ok())
+                    .and_then(|t| {
+                        t.db.as_ref()
+                            .and_then(|db| db.own_image())
+                            .map(str::to_owned)
+                    });
+                match crate::banco::definir_do_toml(st, &cfg.grupo, imagem.as_deref()) {
+                    Ok(c) => {
+                        events::event(
+                            st,
+                            "info",
+                            "up",
+                            &format!(
+                                "{projeto}: banco próprio — flux-db-{} gerado pelo flux (imagem \
+                                 {}, sem service no compose: {cause}) — credenciais do state, \
+                                 database {name}_{env}",
+                                cfg.grupo, c.imagem
+                            ),
+                        );
+                        Some(c)
+                    }
+                    Err(e) => {
+                        events::event(
+                            st,
+                            "error",
+                            "up",
+                            &format!("{projeto}: banco próprio (grupo {}): {e}", cfg.grupo),
+                        );
+                        return;
+                    }
+                }
             }
         },
         None => None,
