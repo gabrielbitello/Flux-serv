@@ -505,7 +505,7 @@ async fn db_status(State(app): State<Arc<AppState>>, Path(name): Path<String>) -
 
     let mut databases: Vec<DbRow> = Vec::new();
     if rodando {
-        let existentes = match crate::banco::listar_databases(&cfg.grupo).await {
+        let existentes = match crate::banco::listar_databases(&app.state, &cfg.grupo).await {
             Ok(l) => l,
             Err(e) => {
                 return erro(

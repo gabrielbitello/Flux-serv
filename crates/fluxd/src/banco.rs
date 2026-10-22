@@ -142,13 +142,20 @@ pub fn definir_do_toml(
 /// USER ... IDENTIFIED BY` — cobre container que já existia com credenciais
 /// diferentes do mecanismo novo e rotação futura. Senha sai do gerador
 /// (hex), então entra no SQL sem escape especial.
-async fn sincronizar_usuario(grupo: &str, user: &str, senha: &str) -> Result<(), String> {
+async fn sincronizar_usuario(
+    grupo: &str,
+    root_senha: &str,
+    user: &str,
+    senha: &str,
+) -> Result<(), String> {
     identificador_seguro(user, "usuário do banco")?;
     let sql = format!(
         "CREATE USER IF NOT EXISTS '{user}'@'%' IDENTIFIED BY '{senha}'; \
          ALTER USER '{user}'@'%' IDENTIFIED BY '{senha}'; FLUSH PRIVILEGES;"
     );
-    sql_exec(grupo, &sql, 64 * 1024).await.map(|_| ())
+    sql_exec(grupo, root_senha, &sql, 64 * 1024)
+        .await
+        .map(|_| ())
 }
 
 /// Volume nomeado do dado do grupo — UM por grupo, fora do compose de
@@ -299,8 +306,17 @@ async fn pos_saude(
     db_novo: &str,
 ) -> Result<(), String> {
     let user = user_de(captura)?;
-    sincronizar_usuario(grupo, user, senha_de(captura)?).await?;
-    garantir_database(st, grupo, db_novo, user).await
+    let root = root_de(captura)?;
+    sincronizar_usuario(grupo, &root, user, senha_de(captura)?).await?;
+    garantir_database(st, grupo, &root, db_novo, user).await
+}
+
+fn root_de(captura: &crate::compose::CapturaBanco) -> Result<String, String> {
+    captura
+        .environment
+        .get("MYSQL_ROOT_PASSWORD")
+        .cloned()
+        .ok_or_else(|| "banco próprio sem MYSQL_ROOT_PASSWORD — recusado".to_owned())
 }
 
 fn user_de(captura: &crate::compose::CapturaBanco) -> Result<&str, String> {
@@ -343,11 +359,17 @@ async fn estado_saude(docker: &Docker, container: &str) -> Option<String> {
     insp.state?.health?.status.map(|s| s.to_string())
 }
 
-async fn garantir_database(st: &State, grupo: &str, db: &str, user: &str) -> Result<(), String> {
+async fn garantir_database(
+    st: &State,
+    grupo: &str,
+    root_senha: &str,
+    db: &str,
+    user: &str,
+) -> Result<(), String> {
     let sql = format!(
         "CREATE DATABASE IF NOT EXISTS `{db}`; GRANT ALL PRIVILEGES ON `{db}`.* TO '{user}'@'%'; FLUSH PRIVILEGES;"
     );
-    sql_exec(grupo, &sql, 1024 * 1024).await?;
+    sql_exec(grupo, root_senha, &sql, 1024 * 1024).await?;
     events::event(
         st,
         "info",
@@ -403,12 +425,25 @@ fn yaml_container(grupo: &str, c: &crate::compose::CapturaBanco) -> String {
 
 // ----------------------------------------------------------------- SQL exec
 
-/// Roda SQL no container do grupo com a senha vinda DO ENV DO CONTAINER
-/// (nunca argv) e o SQL por stdin. Teto de saída defensivo.
-async fn sql_exec(grupo: &str, sql: &str, teto: usize) -> Result<String, String> {
+/// Roda SQL no container do grupo. A senha de root vem DO STATE (fonte da
+/// verdade, `credenciais_de`) e entra via `-e MYSQL_ROOT_PASSWORD` do exec —
+/// NUNCA da env do container: datadir que existe de antes pode ter senha
+/// diferente da env atual (container recriado pula o init — apanhado ao
+/// vivo no cutover v2). O `-e` aparece no argv do CLI do docker na VM por
+/// instantes; VM single-user, aceito e documentado. SQL vai por stdin.
+async fn sql_exec(grupo: &str, root_senha: &str, sql: &str, teto: usize) -> Result<String, String> {
     let cliente = "mysql -uroot -p\"${MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}\"";
     let mut filho = tokio::process::Command::new("docker")
-        .args(["exec", "-i", &container_name(grupo), "sh", "-c", cliente])
+        .args([
+            "exec",
+            "-i",
+            "-e",
+            &format!("MYSQL_ROOT_PASSWORD={root_senha}"),
+            &container_name(grupo),
+            "sh",
+            "-c",
+            cliente,
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -438,10 +473,13 @@ async fn sql_exec(grupo: &str, sql: &str, teto: usize) -> Result<String, String>
     Ok(String::from_utf8_lossy(&saida.stdout).into_owned())
 }
 
-/// Databases existentes no container (fora os schemas de sistema).
-pub async fn listar_databases(grupo: &str) -> Result<Vec<String>, String> {
+/// Databases existentes no container (fora os schemas de sistema). Senha
+/// vem do settings do grupo.
+pub async fn listar_databases(st: &State, grupo: &str) -> Result<Vec<String>, String> {
+    let (root, _, _) = credenciais_de(st, grupo)?;
     let bruto = sql_exec(
         grupo,
+        &root,
         "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA;",
         1024 * 1024,
     )
@@ -465,14 +503,21 @@ pub async fn apagar_database_com_backup(
     db: &str,
 ) -> Result<PathBuf, String> {
     identificador_seguro(db, "database")?;
+    let (root, _, _) = credenciais_de(st, grupo)?;
     std::fs::create_dir_all(backup_dir)
         .map_err(|e| format!("criando {}: {e}", backup_dir.display()))?;
-    let dump = sql_dump(grupo, db, TETO_DUMP_BYTES).await?;
+    let dump = sql_dump(grupo, &root, db, TETO_DUMP_BYTES).await?;
     let agora = crate::sleep::now_epoch();
     let caminho = backup_dir.join(format!("{db}-{agora}.sql"));
     std::fs::write(&caminho, &dump)
         .map_err(|e| format!("escrevendo dump {}: {e}", caminho.display()))?;
-    sql_exec(grupo, &format!("DROP DATABASE IF EXISTS `{db}`;"), 1024).await?;
+    sql_exec(
+        grupo,
+        &root,
+        &format!("DROP DATABASE IF EXISTS `{db}`;"),
+        1024,
+    )
+    .await?;
     events::event(
         st,
         "warn",
@@ -489,17 +534,27 @@ pub async fn apagar_database_com_backup(
 
 /// `mysqldump --databases {db}` com teto de leitura — estourou, o processo
 /// morre e o ERRO volta (nunca dump truncado passado por bom).
-async fn sql_dump(grupo: &str, db: &str, teto: usize) -> Result<Vec<u8>, String> {
+async fn sql_dump(grupo: &str, root_senha: &str, db: &str, teto: usize) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
     // O nome já passou por identificador_seguro (charset [a-z0-9_-]) — SEM
     // backticks aqui: isto é string de SHELL (sh -c), onde backtick é
     // command substitution (apanhado ao vivo: `db` virou comando). O mysql
-    // resolve identificador simples sem escaping.
+    // resolve identificador simples sem escaping. Senha do STATE via -e
+    // (ver sql_exec).
     let cliente = format!(
         "mysqldump -uroot -p\"${{MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}}\" --databases {db} --single-transaction"
     );
     let mut filho = tokio::process::Command::new("docker")
-        .args(["exec", "-i", &container_name(grupo), "sh", "-c", &cliente])
+        .args([
+            "exec",
+            "-i",
+            "-e",
+            &format!("MYSQL_ROOT_PASSWORD={root_senha}"),
+            &container_name(grupo),
+            "sh",
+            "-c",
+            &cliente,
+        ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -690,7 +745,7 @@ pub async fn limpeza_ttl(
             .find(|(_, c)| c.grupo == grupo)
             .map(|(_, c)| c.clone())
             .expect("grupo veio de um membro");
-        let existentes = match listar_databases(&grupo).await {
+        let existentes = match listar_databases(st, &grupo).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!("banco: listagem de databases de {grupo} falhou: {e}");
