@@ -130,6 +130,12 @@ pub struct DbSection {
     /// Antes de apagar, o fluxd grava dump em `/srv/flux/state/db-backups/`.
     /// Databases de PROD nunca expiram, sem exceção.
     pub ttl_days: Option<u64>,
+    /// Imagem do banco quando o COMPOSE NÃO declara service de banco
+    /// (21/10, pedido do Gabriel: "não é para ter no compose, ele baixa
+    /// sozinho") — ex.: `image = "mysql:9.3"`. Ausente/vazia = default da
+    /// plataforma (`banco::IMAGEM_PADRAO`). Se o compose TEM o service, a
+    /// captura dele vence (imagem + credenciais do compose).
+    pub image: Option<String>,
 }
 
 impl DbSection {
@@ -173,6 +179,17 @@ impl DbSection {
     /// TTL dos databases de dev em segundos (satura em vez de estourar i64).
     pub fn ttl_secs(&self) -> i64 {
         i64::try_from(self.ttl_days_efetivo().saturating_mul(86_400)).unwrap_or(i64::MAX)
+    }
+
+    /// Imagem declarada para o banco próprio quando o compose não tem o
+    /// service. `None` = default da plataforma (banco::IMAGEM_PADRAO).
+    /// Declarada vazia é typo e vira None — o evento do up mostra o que
+    /// valer, nunca silêncio.
+    pub fn own_image(&self) -> Option<&str> {
+        self.image
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -823,6 +840,29 @@ rate = 500
             err.to_string().contains("owm"),
             "typo em [db] é erro: {err}"
         );
+    }
+
+    /// `[db] image` (21/10 v2): compose SEM service de banco — o flux baixa
+    /// sozinho. Declarada vence; vazia é typo (None → default da
+    /// plataforma); ausente = None.
+    #[test]
+    fn db_own_image_cobre_declarada_vazia_e_ausente() {
+        let t = ProjectToml::parse_str("[db]\nown = true\nimage = \"mysql:9.3\"\n").unwrap();
+        assert_eq!(
+            t.db.as_ref().unwrap().own_image(),
+            Some("mysql:9.3"),
+            "imagem declarada para o flux baixar sozinho"
+        );
+        let vazia = ProjectToml::parse_str("[db]\nown = true\nimage = \"  \"\n")
+            .unwrap()
+            .db
+            .unwrap();
+        assert_eq!(vazia.own_image(), None, "vazia = typo, cai no default");
+        let ausente = ProjectToml::parse_str("[db]\nown = true\n")
+            .unwrap()
+            .db
+            .unwrap();
+        assert_eq!(ausente.own_image(), None, "ausente = default da plataforma");
     }
 
     /// O `flux.toml.example` da RAIZ do repo é o contrato user-facing do
