@@ -17,9 +17,9 @@ use crate::AppState;
 use crate::events;
 use crate::state::State as DbState;
 
-pub(super) const TOKEN_KEY: &str = "api_token_hash";
+pub(crate) const TOKEN_KEY: &str = "api_token_hash";
 
-pub(super) async fn auth(
+pub(crate) async fn auth(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
     req: Request,

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::api::{ApiClient, ApiError};
 use crate::contexto::{contexto_atual_ou_erro, contexto_de_dir};
 
-use super::ferramentas::arg_str;
+use flux_common::mcp::arg_str;
 
 pub(crate) fn cliente() -> ApiClient {
     ApiClient::from_env()
@@ -70,58 +70,14 @@ fn sono_json(mode: &Option<String>, lease_until: &Option<i64>) -> Value {
     })
 }
 
-/// GET /containers — todos os gerenciados, agrupados por compose project com
-/// o estado agregado do `flux ps` (DORMINDO/PARCIAL/ACORDADO).
+/// GET /containers — todos os gerenciados; o AGRUPAMENTO (estado agregado
+/// DORMINDO/PARCIAL/ACORDADO e filtro por projeto) é o compartilhado
+/// `flux_common::mcp::ps_agrupar` — mesma forma de saída do HTTP do fluxd.
 pub(crate) async fn ps(args: &Value) -> Result<Value, String> {
     let filtro = arg_str(args, "projeto");
     let rows = cliente().containers().await.map_err(|e| e.to_string())?;
-    let mut grupos: Vec<Value> = Vec::new();
-    for r in rows {
-        let nome_curto = r
-            .compose_project
-            .strip_prefix("flux-")
-            .unwrap_or(&r.compose_project);
-        if let Some(f) = &filtro
-            && !nome_curto.starts_with(f.as_str())
-        {
-            continue;
-        }
-        let rodando = r.state == "running";
-        match grupos
-            .last_mut()
-            .filter(|g| g["compose_project"] == json!(r.compose_project))
-        {
-            Some(g) => {
-                g["containers"].as_array_mut().unwrap().push(linha(&r));
-                let total = g["containers"].as_array().unwrap().len();
-                let ativos = g["containers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|c| c["state"] == json!("running"))
-                    .count();
-                g["estado"] = json!(estado_agregado(ativos, total));
-            }
-            None => {
-                grupos.push(json!({
-                    "compose_project": r.compose_project,
-                    "estado": estado_agregado(usize::from(rodando), 1),
-                    "containers": [linha(&r)],
-                }));
-            }
-        }
-    }
-    Ok(json!({ "projetos": grupos }))
-}
-
-fn estado_agregado(rodando: usize, total: usize) -> &'static str {
-    if rodando == 0 {
-        "DORMINDO"
-    } else if rodando == total {
-        "ACORDADO"
-    } else {
-        "PARCIAL"
-    }
+    let linhas: Vec<Value> = rows.iter().map(linha).collect();
+    Ok(flux_common::mcp::ps_agrupar(&linhas, filtro.as_deref()))
 }
 
 fn linha(r: &crate::api::ContainerRowOut) -> Value {
@@ -231,7 +187,7 @@ pub(crate) async fn db_status(args: &Value) -> Result<Value, String> {
 pub(crate) async fn logs(args: &Value) -> Result<Value, String> {
     let projeto = projeto_de(args)?;
     let env = env_de(args)?;
-    let tail = super::ferramentas::arg_int(args, "tail", 200, 1, 1000);
+    let tail = flux_common::mcp::arg_int(args, "tail", 200, 1, 1000);
     let caminho = crate::comandos::logs::caminho_logs(&projeto, &env.to_string(), tail, false);
     let corpo = cliente()
         .call_raw("GET", &caminho, None)

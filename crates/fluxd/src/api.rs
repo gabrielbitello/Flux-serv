@@ -37,7 +37,7 @@ use crate::migrations::{self, SchemaOutcome};
 #[cfg(test)]
 use crate::state::State as DbState;
 use crate::sync;
-mod auth;
+pub(crate) mod auth;
 use auth::auth;
 pub(crate) use auth::{bearer_token, hash_confere, sha256_hex};
 
@@ -218,7 +218,7 @@ async fn register(State(app): State<Arc<AppState>>, Json(b): Json<RegisterBody>)
 }
 
 /// GET /projects — lista registrada com resumo derivado do toml gravado.
-async fn list_projects(State(app): State<Arc<AppState>>) -> Response {
+pub(crate) async fn list_projects(State(app): State<Arc<AppState>>) -> Response {
     let nomes = match app.state.list_projects() {
         Ok(n) => n,
         Err(e) => {
@@ -319,7 +319,10 @@ struct MigrationAplicada {
 }
 
 /// GET /projects/{name} — status consolidado para `flux status` e painel.
-async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+pub(crate) async fn project_status(
+    State(app): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
     let (toml_src, hash, criado) = match app.state.with(|c| {
         c.query_row(
             "SELECT toml, toml_hash, created_at FROM projects WHERE name = ?1",
@@ -449,7 +452,10 @@ async fn project_status(State(app): State<Arc<AppState>>, Path(name): Path<Strin
 /// GET /projects/{name}/db — banco próprio (21/10): container do grupo,
 /// databases visíveis e o TTL de cada database gerenciado de dev. Projeto
 /// sem `[db] own` responde `own: false` com o resto vazio (o CLI distingue).
-async fn db_status(State(app): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+pub(crate) async fn db_status(
+    State(app): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
     if let Err(r) = garante_projeto(&app, &name) {
         return *r;
     }
@@ -569,7 +575,7 @@ async fn db_status(State(app): State<Arc<AppState>>, Path(name): Path<String>) -
 /// DESCRIBE/EXPLAIN, sem trava); credenciais de root vêm do STATE (mesma
 /// fonte do sql_exec interno). Projeto sem `[db] own` = 422 (o banco único
 /// compartilhado não é alvo desta rota). Teto de saída do sql_exec (1 MiB).
-async fn db_query(
+pub(crate) async fn db_query(
     State(app): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(corpo): Json<DbQueryIn>,
@@ -673,11 +679,11 @@ fn linhas_db(
 // -------------------------------------------------------------------- lease
 
 #[derive(Debug, Deserialize)]
-struct LeaseBody {
+pub(crate) struct LeaseBody {
     /// "dev" | "prod" (string no fio; parse com causa — `Env` não tem serde).
-    env: String,
+    pub(crate) env: String,
     /// TTL em segundos (04): o sleep manager respeita `lease_until`.
-    ttl_secs: i64,
+    pub(crate) ttl_secs: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -691,7 +697,7 @@ struct LeaseGranted {
 
 /// POST /projects/{name}/lease — mantém o projeto acordado enquanto a sessão
 /// do CLI renova (04; `flux up` abre e renova a própria).
-async fn grant_lease(
+pub(crate) async fn grant_lease(
     State(app): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(b): Json<LeaseBody>,
@@ -915,7 +921,7 @@ struct ContainerRow {
     status: String,
 }
 
-async fn listar_containers(State(app): State<Arc<AppState>>) -> Response {
+pub(crate) async fn listar_containers(State(app): State<Arc<AppState>>) -> Response {
     use bollard::query_parameters::ListContainersOptionsBuilder;
     use std::collections::HashMap;
 
@@ -976,8 +982,8 @@ async fn listar_containers(State(app): State<Arc<AppState>>) -> Response {
 /// GET /projects/{name} (estado vem do engine). Build de primeira subida é
 /// de MINUTOS: request HTTP síncrono estouraria timeout de cliente e do edge.
 #[derive(Deserialize, Default)]
-struct UpBody {
-    env: Option<String>,
+pub(crate) struct UpBody {
+    pub(crate) env: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -987,7 +993,7 @@ struct UpAceito {
     compose_project: String,
 }
 
-async fn subir(
+pub(crate) async fn subir(
     State(app): State<Arc<AppState>>,
     Path(name): Path<String>,
     body: Option<Json<UpBody>>,
@@ -1094,7 +1100,7 @@ async fn sync_rescan(State(app): State<Arc<AppState>>, Json(b): Json<RescanBody>
 
 /// GET /sync/status — estado de sync de todos os projetos que já reportaram
 /// (ou têm rescan pendente), no formato do contrato.
-async fn sync_status(State(app): State<Arc<AppState>>) -> Response {
+pub(crate) async fn sync_status(State(app): State<Arc<AppState>>) -> Response {
     Json(SyncStatusBody {
         projects: sync::sync_states(&app),
     })

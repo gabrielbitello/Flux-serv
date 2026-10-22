@@ -8,35 +8,11 @@ use serde_json::{Value, json};
 
 use super::consultas;
 
-/// Whitelist do `flux_tool` (pedido do Gabriel, 22/10): build/install/update
-/// com npm e composer, ciclo Laravel com artisan. Primeiro token decide;
-/// `php` só passa com `artisan` em segundo.
-fn comandos_permitidos(cmd: &[String]) -> Result<(), String> {
-    let Some(primeira) = cmd.first().map(String::as_str) else {
-        return Err(
-            "comando vazio — mande um array de tokens, ex.: [\"npm\", \"run\", \"build\"]".into(),
-        );
-    };
-    match primeira {
-        "npm" | "npx" | "composer" => Ok(()),
-        "php" => {
-            if cmd.get(1).map(String::as_str) == Some("artisan") {
-                Ok(())
-            } else {
-                Err("php só pelo `php artisan …` — nada mais roda aqui".into())
-            }
-        }
-        outra => Err(format!(
-            "`{outra}` não é toolchain permitida — só npm, npx, composer e php artisan (whitelist)"
-        )),
-    }
-}
-
 /// Acorda o projeto (lease + POST /up) e espera o engine dizer `running`.
 pub(crate) async fn acordar(args: &Value) -> Result<Value, String> {
     let projeto = consultas::projeto_de(args)?;
     let env = consultas::env_de(args)?;
-    let esperar = super::ferramentas::arg_int(args, "esperar_secs", 60, 1, 180);
+    let esperar = flux_common::mcp::arg_int(args, "esperar_secs", 60, 1, 180);
     let cliente = consultas::cliente();
     cliente
         .lease(&projeto, &env.to_string(), crate::contexto::LEASE_UP_SECS)
@@ -81,9 +57,9 @@ pub(crate) async fn acordar(args: &Value) -> Result<Value, String> {
 /// com a causa verbatim); aqui só transporte e formato.
 pub(crate) async fn db_query(args: &Value) -> Result<Value, String> {
     let projeto = consultas::projeto_de(args)?;
-    let sql = super::ferramentas::arg_str(args, "sql")
+    let sql = flux_common::mcp::arg_str(args, "sql")
         .ok_or_else(|| "argumento obrigatório ausente: `sql`".to_owned())?;
-    let database = super::ferramentas::arg_str(args, "database");
+    let database = flux_common::mcp::arg_str(args, "database");
     let saida = consultas::cliente()
         .db_query(&projeto, &sql, database.as_deref())
         .await
@@ -109,7 +85,7 @@ pub(crate) async fn ferramenta_exec(args: &Value) -> Result<Value, String> {
                 .collect()
         })
         .unwrap_or_default();
-    comandos_permitidos(&cmd)?;
+    flux_common::mcp::comandos_permitidos(&cmd)?;
     let cliente = consultas::cliente();
     cliente
         .lease(&projeto, &env.to_string(), crate::contexto::LEASE_UP_SECS)
@@ -126,51 +102,4 @@ pub(crate) async fn ferramenta_exec(args: &Value) -> Result<Value, String> {
         "exit": exit,
         "saida": saida,
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cmd(tokens: &[&str]) -> Vec<String> {
-        tokens.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn whitelist_so_deixa_toolchain_de_build() {
-        for aceito in [
-            vec!["npm", "run", "build"],
-            vec!["npm", "install"],
-            vec!["npm", "update"],
-            vec!["npx", "vite", "build"],
-            vec!["composer", "install"],
-            vec!["composer", "update"],
-            vec!["php", "artisan", "migrate", "--force"],
-            vec!["php", "artisan", "cache:clear"],
-        ] {
-            assert!(
-                comandos_permitidos(&cmd(&aceito)).is_ok(),
-                "deveria passar: {aceito:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn whitelist_barra_o_resto_e_php_sem_artisan() {
-        for recusado in [
-            vec!["bash"],
-            vec!["sh", "-c", "rm -rf /"],
-            vec!["rm", "-rf", "/"],
-            vec!["docker", "exec", "x"],
-            vec!["php", "-r", "evil();"],
-            vec!["php", "script.php"],
-            vec!["mysql"],
-            vec![],
-        ] {
-            assert!(
-                comandos_permitidos(&cmd(&recusado)).is_err(),
-                "deveria recusar: {recusado:?}"
-            );
-        }
-    }
 }

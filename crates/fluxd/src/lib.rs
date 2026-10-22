@@ -13,6 +13,7 @@ pub mod docker;
 pub mod edge;
 pub mod events;
 pub mod guard;
+pub mod mcp;
 pub mod migrations;
 pub mod observe;
 pub mod observe_page;
@@ -127,6 +128,7 @@ pub async fn serve(
     let painel = panel::build_panel(std::sync::Arc::clone(&shared), std::sync::Arc::clone(&auth));
     let app = router::build_router(std::sync::Arc::clone(&shared), &global, painel.clone());
     let api_app = api::build_api(std::sync::Arc::clone(&shared));
+    let mcp_app = mcp::build_mcp(std::sync::Arc::clone(&shared));
 
     // Sweep do sleep manager (04): a cada 60 s, re-sincroniza com o Docker e
     // dorme quem estourou ociosidade (com lease/cooldown/CPU como guardas).
@@ -153,11 +155,22 @@ pub async fn serve(
     let router_listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let api_listener = tokio::net::TcpListener::bind(("127.0.0.1", api_port)).await?;
     let panel_listener = tokio::net::TcpListener::bind(("127.0.0.1", PANEL_PORT)).await?;
-    tracing::info!(port, api_port, panel_port = PANEL_PORT, "fluxd no ar");
+    // MCP HTTP (22/10 noite): LAN-only no host-only da VirtualBox — a IA do
+    // Windows fala com o fluxd por URL, sem processo do flux no host. MESMO
+    // gate de token da API de controle; NUNCA 0.0.0.0 nem Cloudflare.
+    let mcp_listener = tokio::net::TcpListener::bind((mcp::MCP_BIND_IP, mcp::MCP_PORT)).await?;
+    tracing::info!(
+        port,
+        api_port,
+        panel_port = PANEL_PORT,
+        mcp = format!("{}:{}", mcp::MCP_BIND_IP, mcp::MCP_PORT),
+        "fluxd no ar"
+    );
 
     let router_svc = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     let api_svc = api_app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     let painel_svc = painel.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let mcp_svc = mcp_app.into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     // WAF (16) — dependência NUNCA silenciosa: os binds são 127.0.0.1, então
     // o ConnectInfo é sempre loopback (allowlist) e a identificação do IP
@@ -172,7 +185,8 @@ pub async fn serve(
     tokio::try_join!(
         async { axum::serve(router_listener, router_svc).await },
         async { axum::serve(api_listener, api_svc).await },
-        async { axum::serve(panel_listener, painel_svc).await }
+        async { axum::serve(panel_listener, painel_svc).await },
+        async { axum::serve(mcp_listener, mcp_svc).await }
     )?;
     Ok(())
 }
