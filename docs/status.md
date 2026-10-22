@@ -26,7 +26,7 @@ this session's deliveries. Scoreboard for **this** matrix:
 | Control API `:7420` (register/status/lease/schema/up/switch/fresh/down/logs/exec/containers; sha256 fail-closed; logs SSE real) | **SIM** |
 | Docker module (bollard; wake/pause/stop by `flux-{name}-{env}` labels) | **PARCIAL** — tested on a real engine and running real projects; broader engine-failure paths still to exercise |
 | Dev overrides NEVER publish host ports (`ports: !reset null` always in `override_yaml`) | **SIM** — closed the fixed-port collision class on 21/10/2026: vippers woke while presente-digital (both with `[dev] live`) held host 5173; `docker start` failed 2× (`port is already allocated`) and the engine restarted the container with NO networks (`Networks={}`, Running+healthy) → router `Failed` page blamed a "health timeout" that never ran. The publication had no consumer since same-origin live: vite routing (`vite_action`) and the liveness check (`porta_tcp_viva`) go through the container IP on the Docker network and the tunnel points at fluxd. Commit `a68e4ba`; deployed on the VM (backup `fluxd.bak-20261021-pre-5173`), rendered overrides stripped, vippers recreated clean (no publication, both networks attached, site 200, live re-attached idempotently). Known debts: wake logs "live server iniciado" even when the start failed; the `Failed` page blames health for every failure mode |
-| CLI `flux` (full spec tree) | **PARCIAL** — complete dev cycle (up/down/restart*/status/ps/logs/exec/shell/build/live), `env pull/push/edit`, `sync status/pause/resume/reset`, `watch`, tokens, `vm ssh`; `vm/tunnel/panel/shield/maintenance/tool/export/import/self-update` remain stubs that refuse with the target phase (*restart answers 501 until the backend phase) |
+| CLI `flux` (full spec tree) | **PARCIAL** — complete dev cycle (up/down/restart*/status/ps/logs/exec/shell/build/live), `env pull/push/edit`, `sync status/pause/resume/reset`, `watch`, tokens, `vm ssh`, MCP server (`flux mcp`, 22/10 — 9 structured tools for AI agents, [cli.md](cli.md#mcp-ai-integration)); `vm/tunnel/panel/shield/maintenance/tool/export/import/self-update` remain stubs that refuse with the target phase (*restart answers 501 until the backend phase) |
 | VM operational (Debian 12, Docker, Caddy TLS catch-all, fluxd systemd; host-only 192.168.140.1/2) | **SIM** |
 | Adminer LAN-only + panel with password (Argon2id, login proven; `viewer` SELECT-only user) | **SIM** |
 | Single `flux-db` (mariadb:11) + `/up` health + compose overrides (`ports !reset`, `DB_HOST=flux-db`, image guard rescan) | **SIM** |
@@ -71,6 +71,22 @@ this session's deliveries. Scoreboard for **this** matrix:
 | R32 | Headers + own WAF | **PARCIAL** — SQLi + path scan in **enforce** 403 with LAN allowlist (proven: internet 403, LAN 200); headers and bad bots pending |
 | R33 | Public status page with classified cause | **NÃO** — `Cause` enum exists; F20 |
 | R34 | Prod DB backup (48 h / 7 d) | **NÃO** — F16 |
+
+## Delivered 2026-10-22 (MCP + zcode plugin)
+
+| Delivery | Where |
+|---|---|
+| `flux mcp` — MCP server (stdio JSON-RPC, no SDK): 9 structured tools so AI agents operate the platform without shell commands — `flux_projetos`, `flux_status`, `flux_ps`, `flux_sync_status` (mutagen session + fluxd view with honest verdict), `flux_db_status`, `flux_logs`, `flux_acordar` (lease + up + poll), `flux_db_query` (read-only SQL), `flux_tool` (whitelist npm/npx/composer/php-artisan). Tool failure = MCP `isError` with the classified cause, never a panic | commits `482cbba` + `e9adb56`; `crates/flux-cli/src/comandos/mcp/`; [cli.md](cli.md#mcp-ai-integration) |
+| Own-db read-only SQL endpoint `POST /projects/{name}/db/query` — single source write-guard in fluxd (`banco::sql_e_leitura`: one statement, SELECT/SHOW/DESCRIBE/EXPLAIN, no locking clauses), root password from the STATE via the existing `sql_exec`, 1 MiB output cap, 422 verbatim refusal; project without `[db] own` refuses the route | commit `e9adb56`; `crates/fluxd/src/{api,banco}.rs`, `flux-common/src/protocol.rs`; deployed on the VM (backup `/tmp/fluxd.bak-20261022-mcp`), proven live: `SHOW TABLES` on `vippers_dev` through the MCP tool, `DROP DATABASE` refused 422 |
+| zcode plugin `flux` (`plugins/flux/` + local marketplace `plugins/marketplace.json`): skill (operation golden rules + MCP tool map), `/flux:init` (creates `flux.toml` in the project repo, validates parse with `flux status`, adds the Flux warning block to the project's `.zcode/AGENTS.md`), `PreToolUse` hook that DENIES `docker` commands on the host with the "this PC's standard is Flux" reason (host has no Docker — Docker lives in the VM), and the MCP registration pointing at `target/release/flux.exe` | `plugins/`; former `~/.zcode/skills/flux` retired to `skills-disabled/` the same day |
+
+## Delivered 2026-10-22 night (MCP HTTP on the VM)
+
+| Delivery | Where |
+|---|---|
+| MCP served BY THE VM: fluxd listener `192.168.140.2:7430/mcp` (LAN-only host-only IP, never 0.0.0.0/CF), SAME token gate as the control API; POST JSON-RPC (json reply, 202 for notifications, 405 for GET). Decision: the AI connects BY URL — no flux process on Windows. Dispatch calls the control-API handlers directly (one source of truth); `flux_sync_status` on the VM reports the fluxd view with an explicit note that the local mutagen session is Windows-only | commit `8cd096d`; `crates/fluxd/src/mcp.rs`; deployed (backup `/tmp/fluxd.bak-20261022-mcp-http`), proven live from the host: initialize echo, `flux_status vippers` real data, 401 without token |
+| Protocol + catalog single-sourced: `flux-common::mcp` (envelope, 9-tool catalog, `flux_tool` whitelist, `flux_ps` grouping, `Despachante` trait) shared by the CLI stdio transport (refactored) and the fluxd HTTP transport — schemas cannot drift | commit `8cd096d`; `crates/flux-common/src/mcp.rs` |
+| zcode plugin `flux` 0.1.1: no embedded MCP — the `flux` http MCP is registered in the user zcode config (URL + Bearer token, backup `config.json.bak-flux-mcp`); skill updated for URL mode | `plugins/` |
 
 ## Delivered 2026-10-18/19
 
@@ -131,3 +147,5 @@ matrix and its full history live in
 | 2026-10-14 | Post-session pass: new entries anchored to their commits (`89886e0`, `66a22e5`); verification level recorded |
 | 2026-10-18/19 | R21 → SIM (`api_hold`, `cbfe02f`); R4 → SIM (real waiting page captured); zcode-api on the platform (LAN-only, secrets out of the sync tree); refactoring 41/41 executed, master merged in, pushed as PR #1, CI green (test + test-engine), CLI + fluxd runtime-validated end to end |
 | 2026-10-21 | Redroom global containment → SIM, ACTIVATED (panic switch for the php2shell CVEs); dev overrides never publish host ports — 5173 collision class closed after the live vippers outage (`a68e4ba`) |
+| 2026-10-22 | MCP → `flux mcp` (9 tools, stdio JSON-RPC) + own-db read-only SQL endpoint (guard single-sourced in fluxd) + zcode plugin `flux` (skill, `/flux:init`, docker guard hook, MCP registration); deployed on the VM, proven live (`SHOW TABLES` ok, `DROP` 422) |
+| 2026-10-22 (night) | MCP moved INTO the VM (HTTP :7430 LAN-only, same token gate; dispatch via handlers); protocol single-sourced in flux-common; sync ignores +`/bootstrap/cache/` +`public/storage` (84 transition problems on vippers fixed, uploaded media PROTECTED from one-way delete) |

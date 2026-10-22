@@ -9,14 +9,14 @@ O `flux` gerencia dev e prod server de todo projeto. Roda Docker dentro da VM De
 
 ## Preferir MCP a comando (22/10)
 
-Quando o servidor MCP `flux` estiver ligado (plugin instalado), use as tools `flux_*` em vez de montar comando no terminal — resposta estruturada, sem pipe, sem parse de texto:
+O servidor MCP `flux` roda DENTRO da VM (HTTP LAN-only, `http://192.168.140.2:7430/mcp` — registrado na config do zcode com o token da API; nada do flux roda no Windows). Com ele ligado, use as tools `flux_*` em vez de montar comando no terminal — resposta estruturada, sem pipe, sem parse de texto:
 
 | Tool | O que faz |
 |---|---|
 | `flux_projetos` | Projetos registrados (name, framework, hosts). Comece por aqui. |
 | `flux_status` | Estado do projeto: containers, sono, migrations, hosts. |
 | `flux_ps` | Todos os containers, agrupados (ACORDADO/PARCIAL/DORMINDO). |
-| `flux_sync_status` | Sync Windows↔VM está correta? (`dir` = raiz do projeto) |
+| `flux_sync_status` | Sync Windows↔VM pela visão do fluxd (a sessão mutagen local só é visível pelo `flux sync status` no Windows) |
 | `flux_db_status` | Banco próprio: container, databases, TTL. |
 | `flux_logs` | Cauda de logs (1–1000 linhas). |
 | `flux_acordar` | Acorda o dev e espera `running`. |
@@ -96,5 +96,6 @@ Fábrica WSL antiga (`*.dev`, porteiro, devfactory) foi DESINSTALADA em 14/10/20
 
 | Data | Mudança |
 |---|---|
-| 2026-10-22 | Migrou pro plugin `flux` (skill + /flux:init + docker guard + MCP). Seção MCP nova; comando `docker` agora é barrado por hook. |
+| 2026-10-22 | Migrou pro plugin `flux` (skill + /flux:init + docker guard). Seção MCP nova; comando `docker` agora é barrado por hook. |
+| 2026-10-22 (noite) | MCP virou HTTP servido DENTRO da VM (:7430, LAN-only, token da API) — registrado na config do zcode; plugin ficou sem MCP embutido (0.1.1). |
 | 2026-10-14 | Criada substituindo a skill `dev-servers` (fábrica WSL morta) |

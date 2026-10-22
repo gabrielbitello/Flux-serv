@@ -101,18 +101,31 @@ See [database.md](database.md).
 
 ## MCP (AI integration)
 
-`flux mcp` speaks MCP over stdio (one JSON-RPC message per line). The zcode
-plugin `flux` (in this repo under `plugins/flux/`) registers it plus a skill,
-an init command and a `docker` guard hook. Every project-scoped tool accepts
-`projeto` explicitly — the server is long-lived, so the process cwd is not a
-reliable context.
+Two transports share ONE protocol and tool catalog (`flux-common::mcp` — the
+tools table below is identical on both):
+
+- **HTTP from inside the VM (the way it ships, 22/10 night)**: fluxd serves
+  `http://192.168.140.2:7430/mcp` — LAN-only on the VirtualBox host-only IP
+  (never 0.0.0.0, never Cloudflare), SAME token gate as the control API
+  (fail-closed 503 / 401). The AI talks to the platform BY URL; nothing of
+  the flux runs on Windows. `flux_sync_status` there is the fluxd view only
+  (the local mutagen session is invisible from the VM — `flux sync status`
+  on Windows for the full verdict).
+- **stdio local (`flux mcp`, the CLI path)**: a local process speaking MCP
+  on stdin/stdout; tools call the control API through the automatic SSH
+  tunnel (the API itself stays 127.0.0.1-only on the VM). Useful without
+  the LAN listener; `flux_sync_status` here includes the local mutagen
+  session with the honest verdict.
+
+Every project-scoped tool accepts `projeto` explicitly — no server infers
+the project from a directory.
 
 | Tool | Kind | Notes |
 |---|---|---|
 | `flux_projetos` | read | Registered projects (name, framework, hosts). |
 | `flux_status` | read | Project state: containers, sleep (dev/prod), migrations, hosts. |
 | `flux_ps` | read | All managed containers grouped with ACORDADO/PARCIAL/DORMINDO. |
-| `flux_sync_status` | read | mutagen session health (Windows↔VM) + fluxd view, with an honest `veredito` (`dir` picks the project root). |
+| `flux_sync_status` | read | stdio: mutagen session health (Windows↔VM) + fluxd view with an honest `veredito`; HTTP (VM): fluxd view only. |
 | `flux_db_status` | read | Own-db container, databases, per-database TTL countdown. |
 | `flux_logs` | read | Log tail without follow (1–1000 lines). |
 | `flux_acordar` | action | lease + `POST /up`, polls until `running` or `esperar_secs` (default 60, cap 180). |
@@ -135,3 +148,4 @@ The full CLI design (and which phase owns each command):
 |---|---|
 | 2026-10-14 | Initial English documentation |
 | 2026-10-22 | `flux mcp` → Live (stdio MCP server, 9 tools) + own-db read-only SQL endpoint `POST /projects/{name}/db/query`; zcode plugin under `plugins/flux/` |
+| 2026-10-22 (night) | MCP also served BY THE VM over HTTP (`:7430/mcp`, LAN-only, same token gate) — the AI connects by URL, no flux process on Windows; protocol/catalog single-sourced in `flux-common::mcp` |

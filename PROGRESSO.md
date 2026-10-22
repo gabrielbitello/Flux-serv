@@ -2,6 +2,33 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 22/10 (noite, parte 2) — MCP vai pra DENTRO da VM (`:7430/mcp`) + sync do vippers consertada (`1d02df8`, `8cd096d`)
+
+**Correção de rota do Gabriel**: "o MCP era pra usar URL vindo de dentro do
+servidor, sem processo do flux no Windows". O stdio do CLI ficou (é o
+caminho do túnel SSH, útil sem LAN), mas o transporte CANÔNICO agora é o
+fluxd servindo `http://192.168.140.2:7430/mcp` — LAN-only no host-only da
+VirtualBox (nunca 0.0.0.0 nem Cloudflare), MESMO gate de token da API de
+controle (fail-closed; recusa vira evento). Dispatch chama os HANDLERS da
+API direto (a mesma fonte do que o CLI vê via HTTP). Envelope + catálogo +
+whitelist do flux_tool + agrupamento do flux_ps movidos pra
+`flux-common::mcp` (trait `Despachante`) — os dois transportes não podem
+divergir. Prova viva do host: initialize (eco da versão), `flux_status
+vippers` com dado real, 401 sem token. Backup `/tmp/fluxd.bak-20261022-mcp-http`.
+
+**Sync do vippers (84 transition problems persistentes)**: full rescan não
+convergia. Causa raiz: `bootstrap/cache/filament/panels` (dono root do
+container, herança do incidente 20/10) e `public/storage/site/**` (uploads
+do disco público que só existem na VM — o one-way tentava APAGAR do beta o
+que o alpha não tem; a permission denied estava, por acidente, PROTEGENDO
+mídia real). Fix: os dois caminhos entraram no GLOBAL_IGNORES (estado de
+runtime da VM, mesma família de `/storage/`) + reset. Resultado: `ok · sem
+pendências`. NUNCA "consertar" com chown+delete — é perda de dado.
+
+Plugin 0.1.1: sem MCP embutido; o MCP `flux` (http) registrado na config do
+USUÁRIO (backup `config.json.bak-flux-mcp`) — segredo não vai em arquivo
+versionado.
+
 ## 22/10 (noite) — MCP do flux (`flux mcp`) + endpoint db/query read-only + plugin zcode (`e9adb56`…`482cbba`)
 
 **Pedido do Gabriel**: IA não pode ficar rodando comando no terminal — o flux
