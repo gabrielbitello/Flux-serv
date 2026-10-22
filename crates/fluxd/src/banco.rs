@@ -432,7 +432,7 @@ fn yaml_container(grupo: &str, c: &crate::compose::CapturaBanco) -> String {
 /// vivo no cutover v2). O `-e` aparece no argv do CLI do docker na VM por
 /// instantes; VM single-user, aceito e documentado. SQL vai por stdin.
 async fn sql_exec(grupo: &str, root_senha: &str, sql: &str, teto: usize) -> Result<String, String> {
-    let cliente = "mysql -N -uroot -p\\\"${MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}\\\"";
+    let cliente = "mysql -N -uroot -p\"${MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}\"";
     let mut filho = tokio::process::Command::new("docker")
         .args([
             "exec",
