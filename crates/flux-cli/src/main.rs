@@ -225,6 +225,11 @@ enum Cmd {
     Import { arquivo: PathBuf },
     /// Atualiza o CLI no Windows com checksum verificado (14).
     SelfUpdate,
+    /// Servidor MCP (stdio JSON-RPC, 22/10): tools estruturadas da plataforma
+    /// pra IA — diagnóstico (status/ps/sync/db/logs), acordar dev, toolchain
+    /// whitelist (npm/composer/artisan) e SQL read-only no banco próprio.
+    /// Roda até o stdin fechar; diagnóstico só no stderr (stdout é protocolo).
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -453,6 +458,7 @@ async fn main() {
         Cmd::Export => stub("fase F16 (spec 14) — DR export"),
         Cmd::Import { .. } => stub("fase F16 (spec 14) — DR import"),
         Cmd::SelfUpdate => stub("fase F16 (spec 14) — self-update com checksum"),
+        Cmd::Mcp => comandos::mcp::servir().await,
     }
 }
 

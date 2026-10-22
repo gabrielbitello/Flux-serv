@@ -20,58 +20,63 @@ pub(crate) struct Contexto {
     pub(crate) toml_hash: String,
     /// Raiz do repo (alpha da sync, 02).
     pub(crate) dir: std::path::PathBuf,
+    /// Dedução não-fatal (sem flux.toml = nome da pasta): o CLI imprime e
+    /// segue; processos long-lived (MCP) decidem o que fazem com ela.
+    pub(crate) aviso: Option<String>,
 }
 
 pub(crate) fn contexto_atual() -> Contexto {
-    let cwd = match std::env::current_dir() {
-        Ok(d) => d,
+    match contexto_atual_ou_erro() {
+        Ok(c) => {
+            if let Some(a) = &c.aviso {
+                eprintln!("aviso: {a}");
+            }
+            c
+        }
         Err(e) => {
-            eprintln!("erro: não consegui ler o diretório atual: {e}");
+            eprintln!("erro: {e}");
             std::process::exit(1);
         }
-    };
-    let pasta = cwd
+    }
+}
+
+/// Variante sem `exit` para processos long-lived (servidor MCP, 22/10): erro
+/// de contexto NÃO pode matar o processo — sobe como `Err` com a causa.
+pub(crate) fn contexto_atual_ou_erro() -> Result<Contexto, String> {
+    contexto_de_dir(
+        std::env::current_dir().map_err(|e| format!("não consegui ler o diretório atual: {e}"))?,
+    )
+}
+
+/// A MESMA regra de contexto para um diretório explícito (MCP resolve a
+/// sessão de sync por `dir` passado pela tool). Fonte única da dedução.
+pub(crate) fn contexto_de_dir(dir: std::path::PathBuf) -> Result<Contexto, String> {
+    let pasta = dir
         .file_name()
         .and_then(|n| n.to_str())
         .map(str::to_owned)
-        .unwrap_or_else(|| {
-            eprintln!(
-                "erro: diretório atual sem nome de pasta utilizável: {}",
-                cwd.display()
-            );
-            std::process::exit(1);
-        });
-    let caminho = cwd.join("flux.toml");
-    let dir = cwd.clone();
-    let (toml, name) = if caminho.exists() {
-        let src = match std::fs::read_to_string(&caminho) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("erro: lendo {}: {e}", caminho.display());
-                std::process::exit(1);
-            }
-        };
-        let parsed = match ProjectToml::parse_str(&src) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("erro: {} inválido: {e}", caminho.display());
-                std::process::exit(2);
-            }
-        };
-        (src, parsed.effective_name(&pasta).to_owned())
+        .ok_or_else(|| format!("diretório sem nome de pasta utilizável: {}", dir.display()))?;
+    let caminho = dir.join("flux.toml");
+    let (toml, name, aviso) = if caminho.exists() {
+        let src = std::fs::read_to_string(&caminho)
+            .map_err(|e| format!("lendo {}: {e}", caminho.display()))?;
+        let parsed = ProjectToml::parse_str(&src)
+            .map_err(|e| format!("{} inválido: {e}", caminho.display()))?;
+        (src, parsed.effective_name(&pasta).to_owned(), None)
     } else {
-        eprintln!(
-            "aviso: sem flux.toml em {} — projeto herdando o nome da pasta ({pasta}) e defaults da plataforma",
-            cwd.display()
+        let aviso = format!(
+            "sem flux.toml em {} — projeto herdando o nome da pasta ({pasta}) e defaults da plataforma",
+            dir.display()
         );
-        (String::new(), pasta)
+        (String::new(), pasta.clone(), Some(aviso))
     };
-    Contexto {
+    Ok(Contexto {
         toml_hash: sha256_hex(toml.as_bytes()),
         name,
         toml,
         dir,
-    }
+        aviso,
+    })
 }
 
 pub(crate) fn sha256_hex(data: &[u8]) -> String {

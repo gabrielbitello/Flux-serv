@@ -517,6 +517,31 @@ impl ApiClient {
         self.json_out(r)
     }
 
+    /// POST /projects/{name}/db/query — leitura SQL (MCP, 22/10). A guarda
+    /// read-only é DO fluxd (banco::sql_e_leitura — um dono só); 422 volta
+    /// com a causa verbatim. `database` = USE de contexto, gerado no servidor.
+    pub async fn db_query(
+        &self,
+        name: &str,
+        sql: &str,
+        database: Option<&str>,
+    ) -> Result<flux_common::protocol::DbQueryOut, ApiError> {
+        #[derive(Serialize)]
+        struct QueryIn<'a> {
+            sql: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            database: Option<&'a str>,
+        }
+        let corpo =
+            serde_json::to_string(&QueryIn { sql, database }).map_err(|e| ApiError::Protocolo {
+                msg: format!("serializando db/query: {e}"),
+            })?;
+        let r = self
+            .call("POST", &format!("/projects/{name}/db/query"), Some(corpo))
+            .await?;
+        self.json_out(r)
+    }
+
     /// Lease do sleep manager (04): mantém o ambiente acordado por ttl_secs.
     pub async fn lease(&self, name: &str, env: &str, ttl_secs: i64) -> Result<LeaseOut, ApiError> {
         let corpo =

@@ -7,6 +7,7 @@ pub(crate) mod db;
 pub(crate) mod env_cmd;
 pub(crate) mod live;
 pub(crate) mod logs;
+pub(crate) mod mcp;
 pub(crate) mod redroom;
 pub(crate) mod sync_cmd;
 pub(crate) mod tokens;

@@ -15,7 +15,7 @@ toml = "0.8"
 thiserror = "2"
 sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "signal", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "signal", "process", "io-std", "io-util"] }
 axum = "0.8"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
