@@ -27,47 +27,51 @@ internet. For an **own-db** project, type the dedicated container name
 
 ## Own project database (`[db] own = true`, 21/10/2026)
 
-A project can own its SQL engine instead of using the global MariaDB. The
-project's compose declares the `mysql`/`mariadb` service and fluxd
-materializes **one dedicated container per group** — the MariaDB model,
-per project:
+A project can own its SQL engine instead of using the global MariaDB — the
+MariaDB model, per project, with the compose kept CLEAN:
 
 ```
 [db]
-own = true        # materialize the compose db service as flux-db-{grupo}
-# grupo = "vippers"  # default: the project name; worktrees point at the main project
-# ttl_days = 7    # idle DEV databases are dropped (dump first); prod never expires
+own = true            # flux materializes flux-db-{grupo} by itself
+image = "mysql:9.3"   # optional; default mysql:8.4 (platform default)
+# grupo = "vippers"   # default: the project name; worktrees point at the main project
+# ttl_days = 7        # idle DEV databases are dropped (dump first); prod never expires
 ```
+
+**The project compose does NOT need a db service** (Gabriel, 21/10 v2: "não
+é para ter mysql no compose — ele baixa sozinho"). When the rendered compose
+has no mysql/mariadb service, fluxd builds the definition from `[db] image`
+with credentials GENERATED once per group into the state SQLite
+(`db-root/db-user/db-pass/{grupo}`, 48-char hex via `randomblob`) and
+synchronizes the MySQL user on every up (`CREATE USER IF NOT EXISTS` +
+`ALTER USER IDENTIFIED BY` — covers containers that already existed with
+older credentials). The full `DB_*` package injected into the app beats the
+`.env`, so generated credentials are invisible to the project. If the
+compose DOES declare the service, its capture wins (image + credentials
+from the compose — v1 path, still valid). `own = true` with neither a
+service nor anything to generate is an ERROR with the cause.
 
 Mechanism (`crates/fluxd/src/banco.rs`):
 
-1. **Capture from the engine render** — `capturar_banco` takes the single
-   mysql/mariadb service of the rendered compose (image + `environment`
-   verbatim, so credentials are exactly what the compose declares). `own`
-   without a db service, two db services, or missing `MYSQL_*` credentials
-   is an ERROR with the cause — never a silent fallback to flux-db.
-2. **One container per group** — fluxd writes
+1. **One container per group** — fluxd writes
    `/srv/flux/state/db/{grupo}/compose.yml` (healthcheck `mysqladmin ping`,
    named volume `flux-db-{grupo}-data`, `restart: "no"`, **no published
    ports**) and runs it as compose project `flux-db-{grupo}` with
    `container_name flux-db-{grupo}`.
-3. **Injection beats `.env`** — every live service gets the full package:
-   `DB_CONNECTION: "mysql"`, `DB_HOST: flux-db-{grupo}`, `DB_PORT: "3306"`,
-   `DB_DATABASE: {name}_{env}`, `DB_USERNAME/DB_PASSWORD` from the capture.
-   A phpmyadmin service gets `PMA_HOST` instead (the original `mysql`
-   hostname disappears with the strip). Databases are `{name}_{env}`
-   (`vippers_dev`, `vippers-agenda_dev`, …) created idempotently with
-   `GRANT ALL` for the compose user; SQL runs via `docker exec` with the
-   SQL on **stdin** and the root password inherited from the container env
-   — never argv.
-4. **Sleeps and wakes with the project** — `up` guarantees container
+2. **Databases are `{name}_{env}`** (`vippers_dev`, `vippers-agenda_dev`,
+   …) created idempotently with `GRANT ALL` for the group user; SQL runs
+   via `docker exec` with the SQL on **stdin** and the root password taken
+   from the STATE (never the container env — a recreated container skips
+   init, so its env can diverge from the datadir's real password; caught
+   live in the v2 cutover).
+3. **Sleeps and wakes with the project** — `up` guarantees container
    healthy + database BEFORE the app's `compose up` (health cap 300 s;
    cold init ≈ 40 s with image pull, warm wake `start → healthy` ≈ 5 s);
    wake (`docker.rs`) starts the DB before the app containers; sleep
    (`stop` actions) and `down` stop the DB only when the LAST instance of
    the group stops (`dormir_se_ninguem`; a listing failure never puts the
    DB to sleep). Prod `pause` never touches the DB.
-5. **TTL (dev only)** — the 60 s sweep drops dev databases idle past
+4. **TTL (dev only)** — the 60 s sweep drops dev databases idle past
    `ttl_days` (default 7): `mysqldump --single-transaction` (64 MiB cap —
    exceeded aborts without dropping) to `/srv/flux/state/db-backups/
    {db}-{epoch}.sql`, then `DROP`, with a warn event trail. No clock

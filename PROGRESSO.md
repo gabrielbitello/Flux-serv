@@ -2,6 +2,44 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 22/10 (madrugada) — own-db v2: o compose do projeto fica SEM banco; o flux baixa sozinho (`4cece4a`…`b291f62`)
+
+**Pedido do Gabriel depois de ler a v1**: "que merda é essa, ele já tem
+mysql, por que tem aqui de novo — não é para ter no compose, ele baixa
+sozinho se eu coloco a config que aponta pro mysql em vez do mariadb". O
+service `mysql` que a v1 tinha colocado na base do compose do vippers era
+declaração duplicada — saiu.
+
+**Contrato v2**: compose do projeto SEM service de banco; `[db] own = true`
++ `[db] image = "mysql:9.3"` (opcional, default `mysql:8.4`). Quando o
+render não tem service, o fluxd gera a definição sozinho com credenciais
+GERADAS uma vez por grupo no settings do state (`randomblob` 24 → 48 chars
+hex; user/senha/root não compartilham entre grupos) e **sincroniza o
+usuário MySQL a cada up** (`CREATE USER IF NOT EXISTS` + `ALTER USER`) —
+cobre container que já existia com credenciais antigas. A injeção `DB_*`
+no app continua vencendo o `.env`, então as credenciais geradas são
+invisíveis pro projeto. Se o compose TIVER o service, a captura dele vence
+(v1 segue válida para quem declara).
+
+**Dois aprendizados do cutover v2, ambos apanhados no runtime**:
+
+1. Container recriado com env nova **pula o init** (datadir existe) — a
+   senha REAL do datadir ficou a antiga enquanto a env dizia a nova →
+   `Access denied for 'root'`. Fix `b291f62`: a senha do SQL vem do STATE
+   (`-e MYSQL_ROOT_PASSWORD` no exec), nunca da env do container; para o
+   vippers as credenciais do datadir foram semeadas no settings
+   (`root_password`/`vippers`/`password` — as mesmas que o compose dele
+   sempre usou) — zero perda de dados, zero re-seed.
+2. O fast path de container saudável agora também sincroniza
+   usuário/database — convergência sem recriar nada.
+
+Prova final: up completo com `services: php` no compose (mysql fora),
+evento "flux-db-vippers gerado pelo flux (imagem mysql:9.3, sem service no
+compose)", `vippers_dev` intocada (482 migrations, rides do fixture no
+lugar), `/cms/login` 200, live religado. O compose do vippers ficou
+php-only (o outro agente do Gabriel tinha chegado lá junto — `c7500d1d` —
+e também consertou o VehicleSeeder por id em `994689ca`).
+
 ## 21/10/2026 (noite) — feature: banco PRÓPRIO do projeto (`[db] own`) — o vippers sai do MariaDB global para o MySQL do próprio compose; 6 SIM provados em runtime
 
 **O pedido do Gabriel** (depois do episódio das seeders locais): "cansei,
