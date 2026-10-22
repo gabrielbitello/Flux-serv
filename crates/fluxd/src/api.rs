@@ -22,7 +22,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use flux_common::config::ProjectToml;
 use flux_common::framework::Framework;
-use flux_common::protocol::{ApiErrorBody, DbRow, DbStatusOut, Env, HealthBody, ProjectSummary};
+use flux_common::protocol::{
+    ApiErrorBody, DbQueryIn, DbQueryOut, DbRow, DbStatusOut, Env, HealthBody, ProjectSummary,
+};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +45,11 @@ pub(crate) use auth::{bearer_token, hash_confere, sha256_hex};
 /// linha; nada legítimo pede meia hora de garantia de uma vez.
 pub const LEASE_MAX_SECS: i64 = 6 * 3600;
 
+/// Teto de saída do db/query (22/10): leitura exploratória da IA não precisa
+/// de dump — dataset maior que isso pede SELECT mais fino (o dump de verdade
+/// é o sql_dump com o próprio teto dele).
+const TETO_QUERY_BYTES: usize = 1024 * 1024;
+
 pub fn build_api(app: Arc<AppState>) -> Router {
     // Rotas de controle nascem JÁ atrás do gate `auth` — endpoint novo não
     // tem janela aberta (a fundação respondia 501 no fallback; o fallback
@@ -51,6 +58,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/projects", post(register).get(list_projects))
         .route("/projects/{name}", get(project_status))
         .route("/projects/{name}/db", get(db_status))
+        .route("/projects/{name}/db/query", post(db_query))
         .route("/projects/{name}/lease", post(grant_lease))
         .route("/projects/{name}/schema", post(run_schema))
         .route("/projects/{name}/up", post(subir))
@@ -554,6 +562,78 @@ async fn db_status(State(app): State<Arc<AppState>>, Path(name): Path<String>) -
         databases,
     })
     .into_response()
+}
+
+/// POST /projects/{name}/db/query — LEITURA SQL no banco próprio (MCP, 22/10).
+/// Guarda única em `banco::sql_e_leitura` (um statement, SELECT/SHOW/
+/// DESCRIBE/EXPLAIN, sem trava); credenciais de root vêm do STATE (mesma
+/// fonte do sql_exec interno). Projeto sem `[db] own` = 422 (o banco único
+/// compartilhado não é alvo desta rota). Teto de saída do sql_exec (1 MiB).
+async fn db_query(
+    State(app): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(corpo): Json<DbQueryIn>,
+) -> Response {
+    if let Err(r) = garante_projeto(&app, &name) {
+        return *r;
+    }
+    if let Err(e) = crate::banco::sql_e_leitura(&corpo.sql) {
+        return erro(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+    let cfg = match app.state.project_toml(&name) {
+        Ok(Some(src)) => match crate::banco::config_de(&src, &name) {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
+                return erro(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("banco próprio de {name}: {e}"),
+                );
+            }
+            None => {
+                return erro(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("projeto {name} sem [db] own — db/query só fala com banco próprio"),
+                );
+            }
+        },
+        Ok(None) => {
+            return erro(
+                StatusCode::NOT_FOUND,
+                format!("projeto {name:?} sem flux.toml no state"),
+            );
+        }
+        Err(e) => {
+            return erro(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("lendo flux.toml de {name}: {e}"),
+            );
+        }
+    };
+    // Database de contexto: identificador validado (mesma régua do resto do
+    // banco próprio) e executado ANTES da consulta — o guard do statement do
+    // usuário continua valendo, o USE é gerado aqui.
+    let sql_final = match corpo.database.as_deref() {
+        Some(db) => {
+            if let Err(e) = crate::banco::identificador_seguro(db, "database") {
+                return erro(StatusCode::UNPROCESSABLE_ENTITY, e);
+            }
+            format!("USE `{db}`;\n{}", corpo.sql)
+        }
+        None => corpo.sql.clone(),
+    };
+    let (root, _, _) = match crate::banco::credenciais_de(&app.state, &cfg.grupo) {
+        Ok(c) => c,
+        Err(e) => {
+            return erro(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("credenciais do grupo {}: {e}", cfg.grupo),
+            );
+        }
+    };
+    match crate::banco::sql_exec(&cfg.grupo, &root, &sql_final, TETO_QUERY_BYTES).await {
+        Ok(saida) => Json(DbQueryOut { saida }).into_response(),
+        Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 /// Linhas do /db — PURO. Gerenciado = database de um membro dev do grupo:
@@ -1112,6 +1192,60 @@ mod tests {
             importada.expira_em_secs, None,
             "fora do padrão nunca expira"
         );
+    }
+
+    /// db/query (22/10): guarda de leitura vence a checagem de own (escrita
+    /// recusa com causa), e projeto sem `[db] own` recusa a rota inteira —
+    /// o banco único compartilhado não é alvo dela. Feliz-caminho (SQL de
+    /// verdade no container) é smoke na VM: o teste não tem Docker.
+    #[tokio::test]
+    async fn db_query_recusa_escrita_e_projeto_sem_own() {
+        let (base, _app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+        let (s, c) = registra(&cli, &base, "semown", "name = \"semown\"").await;
+        assert_eq!(s, 200, "{c}");
+
+        let pedir = |sql: &str| serde_json::json!({ "sql": sql }).to_string();
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/projects/semown/db/query",
+            Some("segredo"),
+            Some(&pedir("SELECT 1")),
+        )
+        .await;
+        assert_eq!(s, 422, "{c}");
+        assert!(c.contains("sem [db] own"), "{c}");
+
+        for sql in [
+            "DROP DATABASE x",
+            "UPDATE t SET a = 1",
+            "SELECT 1; SELECT 2",
+        ] {
+            let (s, c) = req(
+                &cli,
+                &base,
+                "POST",
+                "/projects/semown/db/query",
+                Some("segredo"),
+                Some(&pedir(sql)),
+            )
+            .await;
+            assert_eq!(s, 422, "{sql}: {c}");
+            assert!(!c.contains("sem [db] own"), "guarda vence: {sql} → {c}");
+        }
+
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/projects/fantasma/db/query",
+            Some("segredo"),
+            Some(&pedir("SELECT 1")),
+        )
+        .await;
+        assert_eq!(s, 404, "projeto não registrado: {c}");
     }
 
     type TestClient = hyper_util::client::legacy::Client<

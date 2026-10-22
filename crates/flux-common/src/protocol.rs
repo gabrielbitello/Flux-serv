@@ -142,6 +142,25 @@ pub struct DbRow {
     pub expira_em_secs: Option<i64>,
 }
 
+/// POST /projects/{name}/db/query — leitura SQL no banco próprio (MCP, 22/10).
+/// Só leitura: o fluxd valida com `sql_e_leitura` e recusa o resto com 422 —
+/// a regra tem UM dono (o servidor); cliente manda verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbQueryIn {
+    pub sql: String,
+    /// Database de contexto (`USE` antes da consulta); ausente = sem USE
+    /// (a SQL qualifica com `db.tabela`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+}
+
+/// Corpo 200 do db/query: a saída crua do cliente `mysql -N` (TSV, uma linha
+/// por registro, sem header) — formatação é do consumidor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbQueryOut {
+    pub saida: String,
+}
+
 /// Envelope padrão de erro da API de controle.
 #[derive(Debug, Serialize)]
 pub struct ApiErrorBody {

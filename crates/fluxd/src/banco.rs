@@ -82,7 +82,7 @@ pub fn container_name(grupo: &str) -> String {
 /// Sempre devolve o MESMO conjunto para o grupo: container e apps convergem
 /// (a sincronização no container cobre container que já existia com
 /// credenciais antigas).
-fn credenciais_de(st: &State, grupo: &str) -> Result<(String, String, String), String> {
+pub(crate) fn credenciais_de(st: &State, grupo: &str) -> Result<(String, String, String), String> {
     let gerar = |st: &State, chave: &str| -> Result<String, String> {
         let existente = st
             .with(|c| {
@@ -179,7 +179,7 @@ pub fn database_name(projeto: &str, env: Env) -> Result<String, String> {
 }
 
 /// Identificador SQL seguro (charset de `database_name` + user do compose).
-fn identificador_seguro(s: &str, o_que: &str) -> Result<(), String> {
+pub(crate) fn identificador_seguro(s: &str, o_que: &str) -> Result<(), String> {
     let ok = !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
@@ -425,13 +425,56 @@ fn yaml_container(grupo: &str, c: &crate::compose::CapturaBanco) -> String {
 
 // ----------------------------------------------------------------- SQL exec
 
+/// Guarda de LEITURA do db/query (MCP, 22/10): aceita só um statement único
+/// cuja primeira palavra seja SELECT/SHOW/DESCRIBE/DESC/EXPLAIN, sem travas
+/// (`FOR UPDATE`/`LOCK IN SHARE MODE` — leitura que bloqueia escrita não é
+/// leitura aqui). Regra com UM dono: o servidor valida; ninguém replica.
+pub fn sql_e_leitura(sql: &str) -> Result<(), String> {
+    let limpa = sql.trim();
+    if limpa.is_empty() {
+        return Err("SQL vazio".into());
+    }
+    // Um statement só: `;` no meio (não no fim) é segundo statement — recusa.
+    let sem_ponto_virgula_final = limpa.trim_end_matches([';', ' ', '\n', '\r', '\t']);
+    if sem_ponto_virgula_final.contains(';') {
+        return Err("db/query aceita UM statement — remova o `;` extra".into());
+    }
+    let primeira = sem_ponto_virgula_final
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match primeira.as_str() {
+        "select" | "show" | "describe" | "desc" | "explain" => {}
+        outra => {
+            return Err(format!(
+                "db/query é SÓ leitura (SELECT/SHOW/DESCRIBE/EXPLAIN) — recebido `{outra}`"
+            ));
+        }
+    }
+    let minusculo = sem_ponto_virgula_final.to_ascii_lowercase();
+    for trava in ["for update", "lock in share mode"] {
+        if minusculo.contains(trava) {
+            return Err(format!(
+                "db/query recusa trava de escrita (`{trava}`) — leitura não bloqueia"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Roda SQL no container do grupo. A senha de root vem DO STATE (fonte da
 /// verdade, `credenciais_de`) e entra via `-e MYSQL_ROOT_PASSWORD` do exec —
 /// NUNCA da env do container: datadir que existe de antes pode ter senha
 /// diferente da env atual (container recriado pula o init — apanhado ao
 /// vivo no cutover v2). O `-e` aparece no argv do CLI do docker na VM por
 /// instantes; VM single-user, aceito e documentado. SQL vai por stdin.
-async fn sql_exec(grupo: &str, root_senha: &str, sql: &str, teto: usize) -> Result<String, String> {
+pub(crate) async fn sql_exec(
+    grupo: &str,
+    root_senha: &str,
+    sql: &str,
+    teto: usize,
+) -> Result<String, String> {
     let cliente = "mysql -N -uroot -p\"${MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}\"";
     let mut filho = tokio::process::Command::new("docker")
         .args([
@@ -804,6 +847,47 @@ mod tests {
             ttl_days: 7,
             ttl_secs: 7 * 86_400,
         }
+    }
+
+    #[test]
+    fn sql_e_leitura_aceita_consulta_unica_de_leitura() {
+        for sql in [
+            "SELECT * FROM vippers_dev.users",
+            "  select 1 ",
+            "SHOW TABLES;",
+            "describe vippers_dev.migrations",
+            "EXPLAIN SELECT 1",
+            "desc tabela",
+        ] {
+            assert!(sql_e_leitura(sql).is_ok(), "deveria passar: {sql}");
+        }
+    }
+
+    #[test]
+    fn sql_e_leitura_barra_escrita_e_segundo_statement() {
+        for sql in [
+            "DROP DATABASE vippers_dev",
+            "DELETE FROM users",
+            "UPDATE users SET x = 1",
+            "INSERT INTO users VALUES (1)",
+            "ALTER TABLE users ADD c INT",
+            "SELECT 1; DROP DATABASE x",
+            "USE mysql; SELECT 1",
+            "",
+            "   ",
+        ] {
+            assert!(sql_e_leitura(sql).is_err(), "deveria recusar: {sql:?}");
+        }
+    }
+
+    #[test]
+    fn sql_e_leitura_barra_trava_de_escrita() {
+        assert!(sql_e_leitura("SELECT * FROM t FOR UPDATE").is_err());
+        assert!(sql_e_leitura("select * from t lock in share mode").is_err());
+        assert!(
+            sql_e_leitura("SELECT * FROM for_update_test").is_ok(),
+            "nome de tabela que CONTÉM o termo não é trava"
+        );
     }
 
     #[test]
