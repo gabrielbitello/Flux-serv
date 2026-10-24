@@ -429,7 +429,11 @@ fn auditor_429(state: &Arc<EdgeState>, host: &str, headers: &axum::http::HeaderM
     let Some(app) = &state.st else {
         return; // construtor de teste (EdgeLayer::new) — sem estado, sem evento
     };
-    let origem = crate::events::origem_de(headers, crate::waf::fonte_externa(headers, None));
+    let ip_txt = crate::waf::ip_real(headers, None)
+        .map(|i| i.to_string())
+        .unwrap_or_default();
+    let origem =
+        crate::events::origem_de(headers, crate::waf::fonte_externa(headers, None), &ip_txt);
     crate::events::event(
         &app.state,
         "warn",

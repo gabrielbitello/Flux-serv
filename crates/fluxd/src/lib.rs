@@ -32,6 +32,7 @@ pub mod sweep;
 pub mod sync;
 pub mod temporary;
 mod ui;
+pub mod vigia;
 pub mod waf;
 
 use bollard::Docker;

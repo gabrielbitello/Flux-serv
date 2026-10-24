@@ -81,7 +81,7 @@ pub async fn beat(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Respo
                     "/__flux/beat",
                     404,
                     started.elapsed().as_millis(),
-                    &crate::events::origem_de(&headers, true),
+                    &crate::events::origem_de(&headers, true, &ip),
                 );
                 return StatusCode::NOT_FOUND.into_response();
             }

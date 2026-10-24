@@ -12,6 +12,9 @@ use axum::http::{HeaderMap, header};
 /// Authorization são redigidos no dump: segredo de sessão não vira linha de
 /// log legível no painel.
 pub struct Origem {
+    /// IP real do cliente (régua `waf::ip_real`) — coluna `ip` da tabela
+    /// `events` (schema v6): é o que o vigia agrega por SQL.
+    pub ip: String,
     pub xff: String,
     pub user_agent: String,
     pub headers: Option<String>,
@@ -21,6 +24,7 @@ impl Origem {
     /// Request sem origem identificada (chamadas locais de teste).
     pub fn local() -> Self {
         Self {
+            ip: String::new(),
             xff: String::new(),
             user_agent: String::new(),
             headers: None,
@@ -36,8 +40,9 @@ const DUMP_TETO: usize = 2048;
 
 /// Origem a partir dos headers do request. `externo` decide o dump — a
 /// classificação é da MESMA régua do WAF (`waf::fonte_externa`), nunca
-/// reinventada aqui.
-pub fn origem_de(headers: &HeaderMap, externo: bool) -> Origem {
+/// reinventada aqui. `ip` é o IP real já resolvido pelo chamador (a mesma
+/// régua `waf::ip_real` — o events.rs não resolve nada).
+pub fn origem_de(headers: &HeaderMap, externo: bool, ip: &str) -> Origem {
     let pega = |name: &str| {
         headers
             .get(name)
@@ -47,6 +52,7 @@ pub fn origem_de(headers: &HeaderMap, externo: bool) -> Origem {
             .to_owned()
     };
     Origem {
+        ip: ip.to_owned(),
         xff: pega("x-forwarded-for"),
         user_agent: pega(header::USER_AGENT.as_str()),
         headers: externo.then(|| dump_headers(headers)),
@@ -85,8 +91,8 @@ pub(crate) fn linha_access(
     origem: &Origem,
 ) -> String {
     let mut message = format!(
-        "{method} {path} {status} {dur_ms}ms host={host} xff={}",
-        origem.xff
+        "{method} {path} {status} {dur_ms}ms host={host} ip={} xff={}",
+        origem.ip, origem.xff
     );
     if !origem.user_agent.is_empty() {
         message.push_str(&format!(" ua=\"{}\"", origem.user_agent));
@@ -97,7 +103,8 @@ pub(crate) fn linha_access(
     message
 }
 
-/// Log de acesso (07) com a origem do request.
+/// Log de acesso (07) com a origem do request — grava na coluna `ip` (v6),
+/// que é o que o vigia agrega.
 pub fn access(
     st: &State,
     host: &str,
@@ -107,19 +114,24 @@ pub fn access(
     dur_ms: u128,
     origem: &Origem,
 ) {
-    event(
+    event_com_ip(
         st,
         "info",
         "access",
         &linha_access(host, method, path, status, dur_ms, origem),
+        &origem.ip,
     );
 }
 
 pub fn event(st: &State, level: &str, scope: &str, message: &str) {
+    event_com_ip(st, level, scope, message, "");
+}
+
+pub fn event_com_ip(st: &State, level: &str, scope: &str, message: &str, ip: &str) {
     let r = st.with(|c| {
         c.execute(
-            "INSERT INTO events(level, scope, message) VALUES (?1, ?2, ?3)",
-            rusqlite::params![level, scope, message],
+            "INSERT INTO events(level, scope, message, ip) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![level, scope, message, ip],
         )
     });
     if let Err(e) = r {
@@ -141,7 +153,7 @@ mod tests {
 
     #[test]
     fn origem_interna_nao_tem_dump_de_headers() {
-        let o = origem_de(&headers_backend(), false);
+        let o = origem_de(&headers_backend(), false, "");
         assert_eq!(o.xff, "192.168.140.1");
         assert_eq!(o.user_agent, "curl/8.0");
         assert!(o.headers.is_none(), "interno não carrega dump");
@@ -158,7 +170,7 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer tok-en-secreto"),
         );
-        let o = origem_de(&h, true);
+        let o = origem_de(&h, true, "");
         let dump = o.headers.expect("externo tem dump");
         assert!(dump.contains("curl/8.0"), "UA entra: {dump}");
         assert!(
@@ -189,7 +201,7 @@ mod tests {
                 HeaderValue::from_str(&"a".repeat(100)).unwrap(),
             );
         }
-        let dump = origem_de(&h, true).headers.expect("dump");
+        let dump = origem_de(&h, true, "").headers.expect("dump");
         assert!(
             dump.len() <= DUMP_TETO + 16,
             "dump estourou o teto: {}",
@@ -202,7 +214,7 @@ mod tests {
     fn linha_access_tem_a_forma_fixa_com_origem_e_dump() {
         let mut h = headers_backend();
         h.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
-        let o = origem_de(&h, true);
+        let o = origem_de(&h, true, "");
         let linha = linha_access("vippers-d.bitello.xyz", "GET", "/a?b=c", 404, 7, &o);
         // A ordem DENTRO do dump segue a iteração do HeaderMap (não
         // especificada) — o formato fixo é o esqueleto, não a ordem interna.

@@ -3,6 +3,7 @@
 
 use flux_common::protocol::{ContainerState, Env};
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 
 use crate::AppState;
 use crate::decision::HostSource as _;
@@ -102,6 +103,33 @@ pub(super) fn eventos_recentes(app: &AppState, n: i64) -> Result<Vec<EventoRow>,
             ))?;
             let rows = stmt.query_map(params![n], row_evento)?;
             rows.collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Últimas anomalias do vigia (mais novas primeiro) — card do dashboard.
+pub(super) fn anomalias_recentes(app: &AppState, n: i64) -> Result<Vec<EventoRow>, String> {
+    app.state
+        .with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {COLUNAS_EVENTO} FROM events WHERE scope='anomalia'                  ORDER BY id DESC LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map(params![n], row_evento)?;
+            rows.collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Época do último ciclo do vigia — a prova de que o detector está VIVO.
+pub(super) fn vigia_ultimo_ciclo(app: &AppState) -> Result<Option<String>, String> {
+    app.state
+        .with(|c| {
+            c.query_row(
+                "SELECT v FROM settings WHERE k = 'vigia_ultimo_ciclo'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
         })
         .map_err(|e| e.to_string())
 }

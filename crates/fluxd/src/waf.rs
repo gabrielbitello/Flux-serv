@@ -410,8 +410,12 @@ where
                 .get(header::HOST)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or_default();
-            let origem = crate::events::origem_de(&parts.headers, true);
-            crate::events::event(
+            let origem = crate::events::origem_de(
+                &parts.headers,
+                true,
+                &ip.map(|i| i.to_string()).unwrap_or_default(),
+            );
+            crate::events::event_com_ip(
                 &app.state,
                 "warn",
                 "waf",
@@ -426,6 +430,7 @@ where
                         &origem,
                     )
                 ),
+                &ip.map(|i| i.to_string()).unwrap_or_default(),
             );
             let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
             Ok(bloqueado(wants_json))

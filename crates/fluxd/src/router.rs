@@ -192,8 +192,16 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
     // Origem do request (24/10) capturada UMA vez, ANTES de qualquer braço
     // do dispatch: os headers do dump são os ORIGINAIS (o Proxy insere
     // x-forwarded-host/proto no caminho, e `parts` é consumido nos braços
-    // Panel/Deploy). Externo pela MESMA régua do WAF — fonte única.
-    let origem = events::origem_de(&parts.headers, waf::fonte_externa(&parts.headers, connect));
+    // Panel/Deploy). Externo pela MESMA régua do WAF — fonte única. O IP
+    // real vai na coluna `events.ip` (v6) — o vigia agrega por ele.
+    let ip_txt = waf::ip_real(&parts.headers, connect)
+        .map(|i| i.to_string())
+        .unwrap_or_default();
+    let origem = events::origem_de(
+        &parts.headers,
+        waf::fonte_externa(&parts.headers, connect),
+        &ip_txt,
+    );
 
     let src = match &app.docker {
         Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
@@ -246,9 +254,6 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         && projeto_do_host(&host).as_deref() != Some(redroom::PROJETO_CONTROLE)
         && waf::fonte_externa(&parts.headers, connect)
     {
-        let ip_txt = waf::ip_real(&parts.headers, connect)
-            .map(|i| i.to_string())
-            .unwrap_or_default();
         match gate::estado_ip(&app.state, &ip_txt) {
             gate::EstadoIp::Banido => {
                 tracing::debug!(target: "gate", host = %host_raw, path, "dev: request de IP banido");

@@ -530,6 +530,10 @@ async fn ciclo(docker: &Docker, st: &State) -> Result<(), crate::state::StateErr
         Err(e) => tracing::error!("observe: retenção falhou: {e}"),
     }
     pericia(st, &amostras, agora);
+    // Vigia (24/10): varre a janela recente de access atrás de padrão
+    // anômalo (recarga em loop, martelada, dança de ws). Erro dele NUNCA
+    // afeta a coleta de recursos — falha é logada e o sampler segue.
+    crate::vigia::ciclo(st);
     Ok(())
 }
 

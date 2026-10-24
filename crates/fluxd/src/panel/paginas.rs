@@ -325,6 +325,36 @@ pub(super) fn render_dashboard(app: &AppState, aviso: Option<&str>) -> String {
     }
     body.push_str("</section>");
 
+    // Vigia (24/10): anomalias detectadas + prova de vida do detector —
+    // silêncio SEM marca de ciclo = vigia morto, e isso é problema.
+    body.push_str("<section><h2>Vigia</h2>");
+    match leitura::vigia_ultimo_ciclo(app) {
+        Ok(Some(marca)) => body.push_str(&format!(
+            "<p class=\"muted\">último ciclo: {} UTC — silêncio sem marca de ciclo = vigia morto</p>",
+            esc(&marca)
+        )),
+        Ok(None) => body.push_str("<p class=\"muted\">vigia ainda não rodou nenhum ciclo</p>"),
+        Err(e) => body.push_str(&format!("<div class=\"empty err-t\">{}</div>", esc(&e))),
+    }
+    match leitura::anomalias_recentes(app, 5) {
+        Ok(rows) if rows.is_empty() => {
+            body.push_str("<div class=\"empty\">sem anomalias — silêncio saudável</div>")
+        }
+        Ok(rows) => {
+            body.push_str("<table><tr><th>quando (UTC)</th><th>mensagem</th></tr>");
+            for ev in rows {
+                body.push_str(&format!(
+                    "<tr><td class=\"muted\">{}</td><td>{}</td></tr>",
+                    esc(&ev.created_at),
+                    esc(&ev.message)
+                ));
+            }
+            body.push_str("</table>");
+        }
+        Err(e) => body.push_str(&format!("<div class=\"empty err-t\">{}</div>", esc(&e))),
+    }
+    body.push_str("</section>");
+
     layout("Flux — painel", &body, true)
 }
 

@@ -11,7 +11,7 @@ use flux_common::protocol::{ContainerState, Env};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Versão do schema guardada em `settings.schema_version`.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
 pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -136,6 +136,19 @@ CREATE TABLE IF NOT EXISTS gate_tentativa(
     ip TEXT PRIMARY KEY,
     falhas INTEGER NOT NULL,
     atualizada_em INTEGER NOT NULL
+);
+"#;
+
+/// v6 (vigia de anomalia, 24/10 — lição dos incidentes de 22 e 24/10): o IP
+/// REAL do cliente vira coluna da tabela `events` (o `access` grava; sem a
+/// coluna, o IP real só existia dentro do dump de headers, impossível de
+/// agregar por SQL). E o cooldown do vigia: UMA anomalia por métrica+IP a
+/// cada 15 min, tempestade não enche a tabela.
+const SCHEMA_V6: &str = r#"
+ALTER TABLE events ADD COLUMN ip TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS vigia_alerta(
+    chave TEXT PRIMARY KEY,
+    ultima_em INTEGER NOT NULL
 );
 "#;
 
@@ -649,6 +662,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V3)?;
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
+            conn.execute_batch(SCHEMA_V6)?;
             conn.execute(
                 "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION],
@@ -662,6 +676,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V3)?;
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
+            conn.execute_batch(SCHEMA_V6)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -673,6 +688,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V3)?;
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
+            conn.execute_batch(SCHEMA_V6)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -682,6 +698,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         Some(3) => {
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
+            conn.execute_batch(SCHEMA_V6)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -690,6 +707,15 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         // v4 → atual (gate do dev, 24/10): acrescenta as tabelas do desafio.
         Some(4) => {
             conn.execute_batch(SCHEMA_V5)?;
+            conn.execute_batch(SCHEMA_V6)?;
+            conn.execute(
+                "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        // v5 → atual (vigia, 24/10): `events.ip` + cooldown do vigia.
+        Some(5) => {
+            conn.execute_batch(SCHEMA_V6)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],

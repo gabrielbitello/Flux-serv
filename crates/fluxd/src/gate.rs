@@ -395,7 +395,7 @@ pub async fn pagina(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Res
     let ip = waf::ip_real(&headers, None)
         .map(|i| i.to_string())
         .unwrap_or_default();
-    let origem = events::origem_de(&headers, true);
+    let origem = events::origem_de(&headers, true, &ip);
     let mut status = StatusCode::UNAUTHORIZED;
     let r = match estado_ip(&app.state, &ip) {
         EstadoIp::Banido => {
@@ -432,7 +432,7 @@ pub async fn processar(
     let ip = waf::ip_real(&headers, None)
         .map(|i| i.to_string())
         .unwrap_or_default();
-    let origem = events::origem_de(&headers, true);
+    let origem = events::origem_de(&headers, true, &ip);
 
     if estado_ip(&app.state, &ip) == EstadoIp::Banido {
         events::access(
