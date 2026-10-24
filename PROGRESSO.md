@@ -2,6 +2,24 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 24/10 (parte 4) — VIGIA de anomalia no sampler: recarga em loop, martelada por IP e dança de ws disparam evento (`ea77d91`)
+
+Pedido do Gabriel depois do incidente fechado: "como melhorar o log pra
+coisas bizarras nunca mais passarem sem serem notadas". O vigia roda no
+ciclo do sampler (60 s), varre a janela recente de `events` e dispara
+UM evento `warn` escopo `anomalia` por sinal, com anti-spam de 15 min por
+métrica+IP (`vigia_alerta`): **recarga em loop** (mesmo IP + mesmo documento
+GET 200 > 8×/min), **martelada** (> 180 requests/3 min por IP) e **dança do
+websocket** (> 6 upgrades `/@vite/ws`/min por IP). Limiares nascidos das
+medições dos dois incidentes. **NUNCA bloqueia** — o pânico segue manual
+(o "atacante" do incidente era o próprio operador). Vigia olha TODO MUNDO,
+inclusive IP confiável (decisão do Gabriel: "os piores problemas vieram do
+dev"). Infra: schema v6 (`events.ip` — o IP real virou coluna agregável;
+`vigia_alerta`); `Origem` carrega o ip; painel ganhou card Vigia com
+prova de vida do detector (`vigia_ultimo_ciclo` — silêncio sem marca de
+ciclo = vigia morto). Deploy `fluxd.bak-20261024-vigia`, primeiro ciclo
+registrado. TRIO verde (285 unit + 9 integration).
+
 ## 24/10 (parte 3) — Incidente "auto-ddos" FECHADO: WARP matava o ws do HMR (`89ffac4` + relatório em [docs/incidentes](docs/incidentes/2026-10-24-auto-ddos-warp-vite.md))
 
 Causa raiz do loop de reload que o Gabriel viu (e da rajada de 22/10): **o
