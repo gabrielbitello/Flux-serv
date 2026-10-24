@@ -2,6 +2,39 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 24/10 — Access 100% auditável (xff/ua/dump de headers) + gate LAN-only de dev (`21e322f`)
+
+Pós-forense php2shell (ver seção 22/10): o caso fechou com "nada executado,
+mas o gatilho por HEADER seria invisível no log". O Gabriel pediu duas coisas:
+**tudo 100% auditável** e **`-d` só abrir pra LAN**. Entregue num commit só
+(`crates/fluxd/src/{events,router,waf,beat}.rs` + `tests/integration.rs`):
+
+- `events::access` grava `xff=` + `ua="…"` em TODO request. Request EXTERNO
+  (mesma régua do WAF — `waf::fonte_externa`: `cf-connecting-ip` > XFF >
+  `ConnectInfo`) carrega `hdrs[nome=valor; …]` com o dump completo de headers,
+  teto de 2 KiB, `cookie`/`authorization` REDIGIDOS (`<redigido:NB>` — segredo
+  de sessão não vira linha de log). Path do log passou a incluir a query.
+- Bloqueio do WAF virou evento `warn` escopo `waf` com o mesmo dump — antes
+  só ia pro journal, e bloqueio de WAF é exatamente o tráfego que interessa
+  auditar. O `WafLayer` agora carrega `Arc<AppState>` SÓ para isso.
+- Gate LAN-only: host de dev (`-d`/`vite-*`/custom-dev) responde só pra
+  allowlist LAN (192.168.140.0/24 + loopback). Externo = 404 brandiado ANTES
+  de qualquer wake/proxy/hold (request de fora NÃO acorda container) e vira
+  access auditado. Beat de dev idem (rota real não passa pelo fallback do
+  router — o corte mora dentro do handler). Exceção ÚNICA: `zcode-api`
+  (plano de controle, mesma do redroom).
+- **Comportamento declarado**: hosts de dev deixaram de responder via túnel
+  Cloudflare. Acesso do Gabriel = hosts file no Windows → Caddy :443 da VM
+  (CA interna já confiável). Sem isso, o próprio browser dele leva 404.
+
+Provas ao vivo (deploy backup `fluxd.bak-20261024-gate`): loopback LAN 200,
+loopback externo 404, `zcode-api-d` externo 400 do app (passou pelo gate),
+edge CF real em `vippers-d` → **404** com o evento gravando
+`cf-connecting-ip=<meu IP público>` + `cdn-loop=cloudflare` + UA completo —
+o request "sem rastro" agora deixa rastro inteiro. Painel 200, MCP :7430 de pé.
+TRIO verde (258 unit + 9 integration). Pendente da conversa: poda de `events`
+(A1 da rajada) e rotação do `APP_KEY` de dev — oferecidos, sem ok ainda.
+
 ## 22/10 (noite, parte 2) — MCP vai pra DENTRO da VM (`:7430/mcp`) + sync do vippers consertada (`1d02df8`, `8cd096d`)
 
 **Correção de rota do Gabriel**: "o MCP era pra usar URL vindo de dentro do
