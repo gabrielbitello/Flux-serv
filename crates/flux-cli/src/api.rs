@@ -292,6 +292,72 @@ pub struct RedroomOut {
     pub redroom: bool,
 }
 
+// ------------------------------------------------------------ gate (24/10)
+
+/// Espelho de `GET /gate`.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct GateStatusOut {
+    pub senha_definida: bool,
+    pub turnstile: bool,
+    pub teto_tentativas: i64,
+    pub dias_confianca: i64,
+    pub confiancas: Vec<GateConfiancaDto>,
+    pub bans: Vec<GateBanDto>,
+    pub tentativas: Vec<GateTentativaDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GateConfiancaDto {
+    pub ip: String,
+    pub expira_em: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GateBanDto {
+    pub ip: String,
+    pub criado_em: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GateTentativaDto {
+    pub ip: String,
+    pub falhas: i64,
+}
+
+/// `POST /gate/senha` — `senha` só vem quando foi GERADA pelo fluxd.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct GateSenhaOut {
+    pub gerada: bool,
+    pub senha: Option<String>,
+}
+
+/// Resposta dos endpoints de flag do gate (`unban`/`revogar`/`turnstile`).
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct GateFlagOut {
+    pub desbanido: Option<bool>,
+    pub revogada: Option<bool>,
+    pub turnstile: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct GateSenhaIn {
+    senha: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GateIpIn {
+    ip: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GateTurnstileIn {
+    site: String,
+    secret: String,
+}
+
 #[derive(Debug, Serialize)]
 struct RedroomIn {
     on: bool,
@@ -734,6 +800,59 @@ impl ApiClient {
     /// GET /redroom — estado atual do modo.
     pub async fn redroom_status(&self) -> Result<RedroomOut, ApiError> {
         let r = self.call("GET", "/redroom", None).await?;
+        self.json_out(r)
+    }
+
+    // ---------------------------------------------------------- gate (24/10)
+
+    /// GET /gate — estado do desafio: senha/turnstile definidos, confianças,
+    /// bans e contadores de falha.
+    pub async fn gate_status(&self) -> Result<GateStatusOut, ApiError> {
+        let r = self.call("GET", "/gate", None).await?;
+        self.json_out(r)
+    }
+
+    /// POST /gate/senha — define a senha do desafio (`None` = o fluxd gera e
+    /// devolve UMA vez).
+    pub async fn gate_senha(&self, senha: Option<String>) -> Result<GateSenhaOut, ApiError> {
+        let corpo =
+            serde_json::to_string(&GateSenhaIn { senha }).map_err(|e| ApiError::Protocolo {
+                msg: format!("serializando gate senha: {e}"),
+            })?;
+        let r = self.call("POST", "/gate/senha", Some(corpo)).await?;
+        self.json_out(r)
+    }
+
+    /// POST /gate/unban — remove o ban de um IP (comando do operador).
+    pub async fn gate_unban(&self, ip: String) -> Result<GateFlagOut, ApiError> {
+        let corpo = serde_json::to_string(&GateIpIn { ip }).map_err(|e| ApiError::Protocolo {
+            msg: format!("serializando gate unban: {e}"),
+        })?;
+        let r = self.call("POST", "/gate/unban", Some(corpo)).await?;
+        self.json_out(r)
+    }
+
+    /// POST /gate/revogar — revoga a confiança de um IP antes do prazo.
+    pub async fn gate_revogar(&self, ip: String) -> Result<GateFlagOut, ApiError> {
+        let corpo = serde_json::to_string(&GateIpIn { ip }).map_err(|e| ApiError::Protocolo {
+            msg: format!("serializando gate revogar: {e}"),
+        })?;
+        let r = self.call("POST", "/gate/revogar", Some(corpo)).await?;
+        self.json_out(r)
+    }
+
+    /// POST /gate/turnstile — configura o widget anti-bot do form do desafio.
+    pub async fn gate_turnstile(
+        &self,
+        site: String,
+        secret: String,
+    ) -> Result<GateFlagOut, ApiError> {
+        let corpo = serde_json::to_string(&GateTurnstileIn { site, secret }).map_err(|e| {
+            ApiError::Protocolo {
+                msg: format!("serializando gate turnstile: {e}"),
+            }
+        })?;
+        let r = self.call("POST", "/gate/turnstile", Some(corpo)).await?;
         self.json_out(r)
     }
 

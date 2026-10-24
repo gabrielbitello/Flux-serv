@@ -80,6 +80,12 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         // da página estática. Toggle e status, atrás do gate como as demais
         // rotas: quem tem o token da API tem o interruptor da plataforma.
         .route("/redroom", post(redroom_set).get(redroom_status))
+        // Gate do dev (24/10): gestão do desafio de senha/confiança/ban.
+        .route("/gate", get(gate_status))
+        .route("/gate/senha", post(gate_senha))
+        .route("/gate/unban", post(gate_unban))
+        .route("/gate/revogar", post(gate_revogar))
+        .route("/gate/turnstile", post(gate_turnstile))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
         // credencial fica invisível, então o gate grava a recusa no `events`
@@ -1153,6 +1159,217 @@ async fn redroom_status(State(app): State<Arc<AppState>>) -> Response {
         redroom: crate::redroom::ativo(&app.state),
     })
     .into_response()
+}
+
+// ------------------------------------------------------------------ gate 24/10
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GateSenhaBody {
+    /// Ausente/vazio = o fluxd GERA uma senha forte e devolve UMA vez — o
+    /// segredo em claro nunca é gravado nem logado, só esta resposta.
+    #[serde(default)]
+    pub senha: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GateSenhaOut {
+    gerada: bool,
+    /// Só presente quando GERADA aqui — mostrar agora, não existe depois.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    senha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GateIpBody {
+    pub ip: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GateTurnstileBody {
+    pub site: String,
+    pub secret: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GateConfianca {
+    ip: String,
+    expira_em: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct GateBanDto {
+    ip: String,
+    criado_em: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct GateTentativaDto {
+    ip: String,
+    falhas: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct GateStatusOut {
+    senha_definida: bool,
+    turnstile: bool,
+    teto_tentativas: i64,
+    dias_confianca: i64,
+    confiancas: Vec<GateConfianca>,
+    bans: Vec<GateBanDto>,
+    tentativas: Vec<GateTentativaDto>,
+}
+
+async fn gate_status(State(app): State<Arc<AppState>>) -> Response {
+    let cfg = crate::gate::turnstile_config(&app.state);
+    let (confiancas, bans, tentativas) = app
+        .state
+        .with(|c| {
+            let mut conf = Vec::new();
+            let mut q = c.prepare(
+                "SELECT ip, expira_em FROM gate_trust ORDER BY expira_em DESC LIMIT 100",
+            )?;
+            let rows = q.query_map([], |r| {
+                Ok(GateConfianca {
+                    ip: r.get(0)?,
+                    expira_em: r.get(1)?,
+                })
+            })?;
+            for row in rows {
+                conf.push(row?);
+            }
+            let mut bans = Vec::new();
+            let mut q =
+                c.prepare("SELECT ip, criado_em FROM gate_ban ORDER BY criado_em DESC LIMIT 100")?;
+            let rows = q.query_map([], |r| {
+                Ok(GateBanDto {
+                    ip: r.get(0)?,
+                    criado_em: r.get(1)?,
+                })
+            })?;
+            for row in rows {
+                bans.push(row?);
+            }
+            let mut tent = Vec::new();
+            let mut q =
+                c.prepare("SELECT ip, falhas FROM gate_tentativa ORDER BY falhas DESC LIMIT 100")?;
+            let rows = q.query_map([], |r| {
+                Ok(GateTentativaDto {
+                    ip: r.get(0)?,
+                    falhas: r.get(1)?,
+                })
+            })?;
+            for row in rows {
+                tent.push(row?);
+            }
+            Ok::<_, rusqlite::Error>((conf, bans, tent))
+        })
+        .unwrap_or_else(|e| {
+            tracing::error!("gate: lendo estado para o status: {e}");
+            (Vec::new(), Vec::new(), Vec::new())
+        });
+    Json(GateStatusOut {
+        senha_definida: crate::gate::senha_definida(&app.state),
+        turnstile: cfg.secret.is_some(),
+        teto_tentativas: crate::gate::TETO_TENTATIVAS,
+        dias_confianca: crate::gate::DIAS_CONFIANCA,
+        confiancas,
+        bans,
+        tentativas,
+    })
+    .into_response()
+}
+
+async fn gate_senha(State(app): State<Arc<AppState>>, Json(b): Json<GateSenhaBody>) -> Response {
+    let senha_digitada = b.senha.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    match senha_digitada {
+        Some(s) => {
+            if s.len() < 12 {
+                return erro(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "senha do gate muito curta — mínimo de 12 caracteres",
+                );
+            }
+            if let Err(e) = crate::gate::definir_senha(&app.state, s) {
+                return erro(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("gravando a senha do gate: {e}"),
+                );
+            }
+            Json(GateSenhaOut {
+                gerada: false,
+                senha: None,
+            })
+            .into_response()
+        }
+        None => {
+            let mut buf = [0u8; 32];
+            if let Err(e) = getrandom::fill(&mut buf) {
+                return erro(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("gerando senha do gate: {e}"),
+                );
+            }
+            let gerada: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+            if let Err(e) = crate::gate::definir_senha(&app.state, &gerada) {
+                return erro(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("gravando a senha do gate: {e}"),
+                );
+            }
+            Json(GateSenhaOut {
+                gerada: true,
+                senha: Some(gerada),
+            })
+            .into_response()
+        }
+    }
+}
+
+async fn gate_unban(State(app): State<Arc<AppState>>, Json(b): Json<GateIpBody>) -> Response {
+    match crate::gate::desbanir(&app.state, b.ip.trim()) {
+        Ok(true) => Json(serde_json::json!({ "desbanido": true })).into_response(),
+        Ok(false) => erro(
+            StatusCode::NOT_FOUND,
+            format!("IP {} não estava banido", b.ip.trim()),
+        ),
+        Err(e) => erro(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("removendo o ban: {e}"),
+        ),
+    }
+}
+
+async fn gate_revogar(State(app): State<Arc<AppState>>, Json(b): Json<GateIpBody>) -> Response {
+    match crate::gate::revogar(&app.state, b.ip.trim()) {
+        Ok(true) => Json(serde_json::json!({ "revogada": true })).into_response(),
+        Ok(false) => erro(
+            StatusCode::NOT_FOUND,
+            format!("IP {} não tinha confiança", b.ip.trim()),
+        ),
+        Err(e) => erro(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("revogando a confiança: {e}"),
+        ),
+    }
+}
+
+async fn gate_turnstile(
+    State(app): State<Arc<AppState>>,
+    Json(b): Json<GateTurnstileBody>,
+) -> Response {
+    if b.site.trim().is_empty() || b.secret.trim().is_empty() {
+        return erro(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "site key e secret do Turnstile são obrigatórias",
+        );
+    }
+    if let Err(e) = crate::gate::definir_turnstile(&app.state, b.site.trim(), b.secret.trim()) {
+        return erro(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("gravando o Turnstile do gate: {e}"),
+        );
+    }
+    Json(serde_json::json!({ "turnstile": true })).into_response()
 }
 
 async fn not_implemented() -> Response {

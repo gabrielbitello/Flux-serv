@@ -154,6 +154,12 @@ enum Cmd {
         #[arg(value_parser = ["on", "off", "status"])]
         acao: String,
     },
+    /// Gate do dev: desafio de senha/confiança/ban dos hosts `-d` (24/10).
+    /// Comando GLOBAL: não usa contexto de projeto.
+    Gate {
+        #[command(subcommand)]
+        cmd: GateCmd,
+    },
     /// Escreve o workflow de deploy no projeto a partir do template (10).
     Init {
         /// Só `ci` na spec.
@@ -252,6 +258,34 @@ enum ShieldCmd {
 #[derive(Subcommand)]
 enum ProjectCmd {
     Token { name: String },
+}
+
+/// Gate do dev (24/10): desafio de senha nos hosts `-d` — confiança por IP
+/// (30 dias), ban por 5 falhas, Turnstile no form. Comando GLOBAL.
+#[derive(Subcommand)]
+enum GateCmd {
+    /// Estado do gate: senha/turnstile, confianças, bans, contadores.
+    Status,
+    /// Define a senha do desafio — sem argumento, GERA uma forte e mostra
+    /// UMA vez. Mínimo de 12 caracteres.
+    Senha {
+        /// Senha em claro (se omitida, o fluxd gera).
+        senha: Option<String>,
+    },
+    /// Remove o ban de um IP (o que as 5 falhas criaram).
+    Unban {
+        /// IP na notação do log (ex.: 203.0.113.9).
+        ip: String,
+    },
+    /// Revoga a confiança de um IP antes do prazo de 30 dias.
+    Revogar { ip: String },
+    /// Configura o Turnstile do Cloudflare no form do desafio.
+    Turnstile {
+        /// Site key do widget (pública).
+        site: String,
+        /// Secret key do widget (fica só na settings do fluxd).
+        secret: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -389,6 +423,7 @@ async fn main() {
         Cmd::Maintenance { .. } => stub("fase F18 (spec 15) — modo manutenção com bypass"),
         Cmd::Shield { .. } => stub("fase F19 (spec 16) — WAF próprio, shadow antes de enforce"),
         Cmd::Redroom { acao } => comandos::redroom::redroom(&acao).await,
+        Cmd::Gate { cmd } => comandos::gate::gate(cmd).await,
         Cmd::Db { cmd } => match cmd {
             DbCmd::Fresh {
                 yes,

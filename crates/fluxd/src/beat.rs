@@ -54,18 +54,26 @@ pub async fn beat(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             tocar(&app.state, &name, Env::Prod)
         }
         // Vite (dev server, 06/live) mantém o MESMO container acordado; host
-        // custom de dev ([domains], 09) idem. Gate LAN-only (24/10): beat de
-        // FORA não mantém dev acordado — é o mesmo corte do router (a rota é
-        // REAL, o request nunca chega ao fallback onde fica o gate de lá).
-        // ConnectInfo não chega ao handler (extração por extensão é do
-        // service) — a régua roda com `connect = None`, e request real SEMPRE
-        // chega pelo Caddy com XFF (LAN) ou marcador do túnel (externo).
-        // Beat retido vira access 404 com dump: request externo é auditável.
+        // custom de dev ([domains], 09) idem. Gate do dev (24/10): beat de
+        // FORA só mantém o dev acordado se o IP for CONFIÁVEL (senha certa
+        // no desafio do gate); banido ou sem confiança = 404 sem tocar — é o
+        // mesmo corte do router (a rota é REAL, o request nunca chega ao
+        // fallback onde fica o gate de lá). ConnectInfo não chega ao handler
+        // (extração por extensão é do service) — a régua roda com
+        // `connect = None`, e request real SEMPRE chega pelo Caddy com XFF
+        // (LAN) ou marcador do túnel (externo). Beat retido vira access 404
+        // com dump: request externo é auditável.
         ManagedHost::Dev { name, .. }
         | ManagedHost::Vite { name, .. }
         | ManagedHost::Custom { name, dev: true } => {
             if crate::waf::fonte_externa(&headers, None) {
-                tracing::debug!(target: "gate", host = %host_raw, "dev: beat externo retido (LAN-only)");
+                let ip = crate::waf::ip_real(&headers, None)
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                if crate::gate::estado_ip(&app.state, &ip) == crate::gate::EstadoIp::Confiavel {
+                    return tocar(&app.state, &name, Env::Dev);
+                }
+                tracing::debug!(target: "gate", host = %host_raw, "dev: beat externo sem confiança — retido");
                 crate::events::access(
                     &app.state,
                     host_raw,

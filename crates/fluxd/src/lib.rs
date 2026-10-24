@@ -12,6 +12,7 @@ pub mod deploy;
 pub mod docker;
 pub mod edge;
 pub mod events;
+pub mod gate;
 pub mod guard;
 pub mod mcp;
 pub mod migrations;

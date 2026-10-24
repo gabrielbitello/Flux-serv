@@ -8,7 +8,7 @@ use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, header};
 use axum::response::Response;
-use axum::routing::post;
+use axum::routing::{get, post};
 use flux_common::config::{GlobalConfig, ProjectToml};
 use tower::ServiceExt;
 
@@ -19,6 +19,7 @@ use crate::deploy;
 use crate::docker::DockerSource;
 use crate::edge::{EdgeLayer, EdgeLimits};
 use crate::events;
+use crate::gate;
 use crate::pages;
 use crate::proxy;
 use crate::redroom;
@@ -40,6 +41,10 @@ pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) ->
         // e responde 204 vazio. Adaptador só desembrulha a tupla de estado:
         // axum-core não tem `FromRef` de tupla e beat.rs fica intocado.
         .route("/__flux/beat", post(beat_roteado))
+        .route(
+            gate::PATH,
+            get(gate_pagina_roteada).post(gate_processa_roteada),
+        )
         .fallback(handle)
         // A borda envolve o router inteiro: `layer` aplicado DEPOIS das rotas
         // roda ANTES do fallback — 413/429 morrem aqui, na admissão, antes da
@@ -75,6 +80,25 @@ async fn beat_roteado(
     headers: axum::http::HeaderMap,
 ) -> Response {
     beat::beat(State(app), headers).await
+}
+
+/// Adaptadores do gate (24/10) — mesmo desenho do `beat_roteado`: o router
+/// carrega a tupla `(AppState, Router)` e o handler do gate.rs extrai só o
+/// estado. GET = página do desafio; POST = processamento do form (Form é
+/// extrator de corpo, fica por último na assinatura).
+async fn gate_pagina_roteada(
+    State((app, _panel)): State<(Arc<AppState>, Router)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    gate::pagina(State(app), headers).await
+}
+
+async fn gate_processa_roteada(
+    State((app, _panel)): State<(Arc<AppState>, Router)>,
+    headers: axum::http::HeaderMap,
+    form: axum::Form<gate::GateForm>,
+) -> Response {
+    gate::processar(State(app), headers, form).await
 }
 
 /// Teto do hold de API (`[sleep] api_hold`): tempo máximo que a request fica
@@ -205,32 +229,55 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         return r;
     }
 
-    // Gate LAN-only de dev (24/10, pedido do Gabriel): host de dev DEIXA de
-    // ser público. Fonte fora da allowlist LAN — a MESMA régua do WAF
-    // (`waf::fonte_externa`: cf-connecting-ip > XFF > ConnectInfo) — toma o
-    // 404 brandiado de host desconhecido ANTES de qualquer wake/proxy/hold:
-    // request de fora não acorda container (a rajada de 22/10 não se repete)
-    // e não revela que o host existe. Exceção ÚNICA: o plano de controle
-    // (zcode-api) — o túnel público é o caminho do Claude Code/Desktop
-    // (mesma exceção do redroom). O acesso LAN segue direto pelo hosts file
-    // → Caddy da VM (sem Cloudflare), e TODO request retido fica no log com
-    // o dump de headers.
+    // Gate do dev (24/10, evolução do mesmo dia): host de dev NÃO é público.
+    // Fonte fora da allowlist LAN — a MESMA régua do WAF (`waf::fonte_externa`:
+    // cf-connecting-ip > XFF > ConnectInfo) — cai na régua do desafio do
+    // gate.rs: IP BANIDO = 403 de bloqueio; IP CONFIÁVEL (senha certa, 30
+    // dias) = segue o fluxo normal; IP NOVO = página HTML pura de senha
+    // (Turnstile no form quando configurado) — SEM acordar container. Toda
+    // passagem fica no access com o dump de headers. Exceção ÚNICA: o plano
+    // de controle (zcode-api) — o túnel público é o caminho do Claude Code
+    // (mesma exceção do redroom). O desafio em si mora na rota real
+    // `/__flux/gate` (acima), que vence este fallback.
     if host.is_dev()
         && projeto_do_host(&host).as_deref() != Some(redroom::PROJETO_CONTROLE)
         && waf::fonte_externa(&parts.headers, connect)
     {
-        tracing::debug!(target: "gate", host = %host_raw, path, "dev: request externo retido (LAN-only)");
-        let r = pages::not_found(&host_raw);
-        events::access(
-            &app.state,
-            &host_raw,
-            method.as_str(),
-            &path_log,
-            r.status().as_u16(),
-            started.elapsed().as_millis(),
-            &origem,
-        );
-        return r;
+        let ip_txt = waf::ip_real(&parts.headers, connect)
+            .map(|i| i.to_string())
+            .unwrap_or_default();
+        match gate::estado_ip(&app.state, &ip_txt) {
+            gate::EstadoIp::Banido => {
+                tracing::debug!(target: "gate", host = %host_raw, path, "dev: request de IP banido");
+                let r = gate::resposta_bloqueado();
+                events::access(
+                    &app.state,
+                    &host_raw,
+                    method.as_str(),
+                    &path_log,
+                    r.status().as_u16(),
+                    started.elapsed().as_millis(),
+                    &origem,
+                );
+                return r;
+            }
+            gate::EstadoIp::Livre => {
+                tracing::debug!(target: "gate", host = %host_raw, path, "dev: IP externo novo → desafio de senha");
+                let r =
+                    gate::resposta_desafio(&path_log, &gate::turnstile_config(&app.state), None);
+                events::access(
+                    &app.state,
+                    &host_raw,
+                    method.as_str(),
+                    &path_log,
+                    r.status().as_u16(),
+                    started.elapsed().as_millis(),
+                    &origem,
+                );
+                return r;
+            }
+            gate::EstadoIp::Confiavel => {} // confiança de 30 dias: fluxo normal
+        }
     }
 
     // Hold de API (`[sleep] api_hold`, 18/10): projeto dormindo/subindo com a
@@ -860,12 +907,12 @@ mod tests {
         );
     }
 
-    /// Gate LAN-only de dev (24/10): host `-d` com fonte de FORA (marcador do
-    /// túnel) = 404 brandiado de host desconhecido — sem acordar nada e sem
-    /// revelar existência. A auditoria fica no log: o access gravado carrega
-    /// `hdrs[...]` com o dump completo (request externo = 100% auditável).
+    /// Gate do dev (24/10): host `-d` com fonte de FORA SEM confiança =
+    /// página HTML PURA de desafio (401, CSP restritiva) — sem acordar nada.
+    /// A auditoria fica no log: o access gravado carrega `hdrs[...]` com o
+    /// dump completo (request externo = 100% auditável).
     #[tokio::test]
-    async fn dev_host_externo_e_404_brandiado_com_auditoria_de_headers() {
+    async fn dev_host_externo_sem_confianca_recebe_desafio() {
         let app = app();
         app.state
             .register_project("vipers", "name = \"vipers\"", "h")
@@ -878,8 +925,14 @@ mod tests {
         let resp = router.oneshot(r).await.unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::NOT_FOUND,
-            "dev não responde de fora da LAN"
+            StatusCode::UNAUTHORIZED,
+            "IP externo novo = desafio de senha"
+        );
+        assert!(
+            resp.headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .is_some(),
+            "desafio sai com CSP restritiva"
         );
 
         let msg: String = app
@@ -894,13 +947,59 @@ mod tests {
             .unwrap();
         for pedaco in [
             "POST /cms?x=1", // query entra no log (helper req() é POST)
-            "404",
+            "401",
             "host=vipers-d.bitello.xyz",
             "hdrs[",
             "cf-connecting-ip=203.0.113.9",
         ] {
             assert!(msg.contains(pedaco), "access sem `{pedaco}`: {msg}");
         }
+    }
+
+    /// Mesmo host `-d`, fonte externa CONFIÁVEL (senha já aceita, 30 dias) =
+    /// fluxo normal — o desafio é só para IP novo.
+    #[tokio::test]
+    async fn dev_host_externo_confiavel_passa_pelo_gate() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        crate::gate::confiar(&app.state, "203.0.113.9", crate::gate::DIAS_CONFIANCA).unwrap();
+        let router = router_com(&app);
+
+        let mut r = req("vipers-d.bitello.xyz", "/cms");
+        r.headers_mut()
+            .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let resp = router.oneshot(r).await.unwrap();
+        // Helper req() negocia JSON — sem Docker, dev dormindo = ApiWaking
+        // (contrato 12, 503 + Retry-After). O que importa: NÃO é desafio.
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "confiável corre o fluxo normal"
+        );
+        assert_ne!(resp.headers().get(header::RETRY_AFTER), None);
+    }
+
+    /// IP BANIDO no host `-d` = 403 de bloqueio, mesmo com a senha certa no
+    /// corpo — o ban vence tudo (o processamento do form é que valida, na
+    /// rota real; aqui é o corte do fallback).
+    #[tokio::test]
+    async fn dev_host_banido_recebe_403_de_bloqueio() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        for _ in 0..crate::gate::TETO_TENTATIVAS {
+            crate::gate::registrar_falha(&app.state, "203.0.113.9").unwrap();
+        }
+        let router = router_com(&app);
+
+        let mut r = req("vipers-d.bitello.xyz", "/cms");
+        r.headers_mut()
+            .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let resp = router.oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "banido = bloqueado");
     }
 
     /// Mesmo host `-d` com fonte da LAN (XFF do Caddy) = fluxo normal — o

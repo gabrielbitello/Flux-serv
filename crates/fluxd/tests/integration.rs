@@ -121,12 +121,12 @@ async fn host_desconhecido_recebe_404_brandiado() {
     assert!(body.contains("Host desconhecido"), "corpo: {body}");
 }
 
-/// Gate LAN-only de dev (24/10), ponta a ponta: request com o marcador do
-/// túnel (cf-connecting-ip = fonte externa) em host `-d` registrado = 404
-/// brandiado — dev não é público. O get() sem o marcador = fonte loopback
-/// (allowlist) = fluxo normal.
+/// Gate do dev (24/10), ponta a ponta: request com o marcador do túnel
+/// (cf-connecting-ip = fonte externa) em host `-d` registrado = página de
+/// desafio 401 — dev não é público. E IP CONFIÁVEL atravessa e chega ao
+/// upstream (o get() sem marcador = fonte loopback/allowlist = fluxo normal).
 #[tokio::test]
-async fn dev_host_com_fonte_externa_recebe_404_do_gate() {
+async fn dev_host_externo_recebe_desafio_e_confiavel_atrupa_o_upstream() {
     let upstream_port = spawn_upstream().await;
     let st = State::in_memory().unwrap();
     st.register_project("vipers", "name = \"vipers\"", "h")
@@ -138,6 +138,8 @@ async fn dev_host_com_fonte_externa_recebe_404_do_gate() {
 
     let port = spawn_router(st).await;
     let client = test_client();
+
+    // IP novo de fora: desafio, upstream jamais tocado.
     let uri = format!("http://127.0.0.1:{port}/");
     let req = Request::builder()
         .uri(&uri)
@@ -148,8 +150,33 @@ async fn dev_host_com_fonte_externa_recebe_404_do_gate() {
     let resp = client.request(req).await.unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::NOT_FOUND,
-        "dev com fonte externa: 404 do gate, upstream jamais tocado"
+        StatusCode::UNAUTHORIZED,
+        "IP externo novo: página de desafio, upstream jamais tocado"
+    );
+
+    // Mesmo IP após senha certa (confiança gravada direto no estado):
+    // atravessa o gate e o upstream responde.
+    let st2 = State::in_memory().unwrap();
+    st2.register_project("vipers", "name = \"vipers\"", "h")
+        .unwrap();
+    st2.set_env_state("vipers", Env::Dev, ContainerState::Awake)
+        .unwrap();
+    st2.set_proxy_target("vipers", Env::Dev, &format!("127.0.0.1:{upstream_port}"))
+        .unwrap();
+    fluxd::gate::confiar(&st2, "203.0.113.9", fluxd::gate::DIAS_CONFIANCA).unwrap();
+    let port2 = spawn_router(st2).await;
+    let uri2 = format!("http://127.0.0.1:{port2}/");
+    let req2 = Request::builder()
+        .uri(&uri2)
+        .header("host", "vipers-d.bitello.xyz")
+        .header("cf-connecting-ip", "203.0.113.9")
+        .body(http_body_util::Empty::<axum::body::Bytes>::new())
+        .unwrap();
+    let resp2 = client.request(req2).await.unwrap();
+    assert_eq!(
+        resp2.status(),
+        StatusCode::OK,
+        "IP confiável passa e o upstream responde"
     );
 }
 

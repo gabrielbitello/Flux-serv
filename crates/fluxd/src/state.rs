@@ -11,7 +11,7 @@ use flux_common::protocol::{ContainerState, Env};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Versão do schema guardada em `settings.schema_version`.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
 pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -116,6 +116,27 @@ CREATE TABLE IF NOT EXISTS project_hosts(
     dev INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_project_hosts_project ON project_hosts(project);
+"#;
+
+/// v5 (gate LAN/challenge do dev, 24/10): confiança por IP (senha certa =
+/// 30 dias), bans (5 falhas = eterno até `flux gate unban`) e contador de
+/// falhas. Timestamps em ÉPOCA (inteiro) — a régua do gate compara números,
+/// sem parse de RFC3339 no caminho quente.
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS gate_trust(
+    ip TEXT PRIMARY KEY,
+    expira_em INTEGER NOT NULL,
+    criado_em INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS gate_ban(
+    ip TEXT PRIMARY KEY,
+    criado_em INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS gate_tentativa(
+    ip TEXT PRIMARY KEY,
+    falhas INTEGER NOT NULL,
+    atualizada_em INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, thiserror::Error)]
@@ -627,6 +648,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V2)?;
             conn.execute_batch(SCHEMA_V3)?;
             conn.execute_batch(SCHEMA_V4)?;
+            conn.execute_batch(SCHEMA_V5)?;
             conn.execute(
                 "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION],
@@ -639,6 +661,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V2)?;
             conn.execute_batch(SCHEMA_V3)?;
             conn.execute_batch(SCHEMA_V4)?;
+            conn.execute_batch(SCHEMA_V5)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -649,6 +672,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         Some(2) => {
             conn.execute_batch(SCHEMA_V3)?;
             conn.execute_batch(SCHEMA_V4)?;
+            conn.execute_batch(SCHEMA_V5)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -657,6 +681,15 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         // v3 → atual ([domains]): acrescenta `project_hosts`.
         Some(3) => {
             conn.execute_batch(SCHEMA_V4)?;
+            conn.execute_batch(SCHEMA_V5)?;
+            conn.execute(
+                "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        // v4 → atual (gate do dev, 24/10): acrescenta as tabelas do desafio.
+        Some(4) => {
+            conn.execute_batch(SCHEMA_V5)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
