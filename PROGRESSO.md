@@ -2,6 +2,46 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 24/10 (parte 2) — Gate do dev com DESAFIO DE SENHA: IP novo pede senha, 5 erros banem, acerto confia 30 dias; Turnstile no form (`225099f`)
+
+Evolução pedida pelo Gabriel no mesmo dia ("confiar no ip… pede uma senha…
+se errar 5x bloqueia… 30 dias… página html pura que manda pro rust…
+todas as proteções… captcha do cloudflare"): o gate LAN-only deixa de
+recusar todo externo e passa a ter UM desafio controlado (`gate.rs` novo,
+fail-closed em tudo — é mecanismo de segurança):
+
+- IP externo novo em host `-d` → página HTML PURA de senha servida pelo
+  fluxd (401, CSP sem inline com só o widget da CF, no-store, DENY frame,
+  noindex, zero eco de entrada, redirect pós-login validado contra open
+  redirect). SEM acordar container.
+- Senha certa = `gate_trust` 30 dias + contador zerado; 5 falhas (senha OU
+  captcha) = `gate_ban` eterno até `flux gate unban <ip>` (CLI global, túnel
+  :7420, atrás do token). Acerto → 303 de volta ao caminho original.
+- Argon2id na settings; gerada pelo fluxd = 256 bits, mostrada UMA vez.
+  Hash ausente/corrompido = sempre inválido (fail-closed). Sem senha
+  definida o desafio nunca passa.
+- Turnstile do Cloudflare: siteverify server-side obrigatório quando
+  configurado (remotoip, timeout 10s, rede/timeout = recusa). A chamada
+  HTTPS vai pela PONTE TLS do Caddy (`127.0.0.1:2016` →
+  challenges.cloudflare.com, adicionada ao Caddyfile da VM — `admin off`
+  exige RESTART, não reload) — zero stack TLS nova no Rust.
+- Toda tentativa vira access com dump de headers + evento escopo `gate`.
+- API de controle: `GET /gate`, `POST /gate/senha|unban|revogar|turnstile`.
+  CLI global: `flux gate status|senha|unban|revogar|turnstile`.
+- SCHEMA_V5 (`gate_trust`/`gate_ban`/`gate_tentativa`); `rand_core` promovido
+  a dependência principal (OsRng do salt em runtime).
+
+Provas ao vivo (deploy backup `fluxd.bak-20261024-gatedesafio`): LAN 200
+direto sem senha; externo novo 401 desafio; 5 chutes = 401×4 + 403 ban;
+banido recebendo senha certa = 403 (ban vence); unban por CLI; senha certa
+= 303 + IP confiável = 302 do app Filament; edge CF real = 401 desafio;
+ponte do siteverify provada (CF responde na ponta). TRIO verde (273 unit +
+9 integration).
+
+**Pendente do Gabriel**: criar o widget do Turnstile no dashboard CF e rodar
+`flux gate turnstile <site> <secret>` (sem isso o form roda SEM captcha, com
+warn); trocar a senha de teste com `flux gate senha` (gera forte e mostra 1×).
+
 ## 24/10 — Access 100% auditável (xff/ua/dump de headers) + gate LAN-only de dev (`21e322f`)
 
 Pós-forense php2shell (ver seção 22/10): o caso fechou com "nada executado,
