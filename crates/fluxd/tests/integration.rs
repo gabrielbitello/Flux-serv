@@ -40,9 +40,15 @@ async fn spawn_router(st: State) -> u16 {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
-        axum::serve(l, build_router(app, &GlobalConfig::default(), painel))
-            .await
-            .unwrap();
+        // MESMA montagem do `serve` real (lib.rs): com ConnectInfo — o WAF e
+        // o gate LAN-only de dev classificam a fonte por ele.
+        axum::serve(
+            l,
+            build_router(app, &GlobalConfig::default(), painel)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     port
 }
@@ -113,6 +119,38 @@ async fn host_desconhecido_recebe_404_brandiado() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("Host desconhecido"), "corpo: {body}");
+}
+
+/// Gate LAN-only de dev (24/10), ponta a ponta: request com o marcador do
+/// túnel (cf-connecting-ip = fonte externa) em host `-d` registrado = 404
+/// brandiado — dev não é público. O get() sem o marcador = fonte loopback
+/// (allowlist) = fluxo normal.
+#[tokio::test]
+async fn dev_host_com_fonte_externa_recebe_404_do_gate() {
+    let upstream_port = spawn_upstream().await;
+    let st = State::in_memory().unwrap();
+    st.register_project("vipers", "name = \"vipers\"", "h")
+        .unwrap();
+    st.set_env_state("vipers", Env::Dev, ContainerState::Awake)
+        .unwrap();
+    st.set_proxy_target("vipers", Env::Dev, &format!("127.0.0.1:{upstream_port}"))
+        .unwrap();
+
+    let port = spawn_router(st).await;
+    let client = test_client();
+    let uri = format!("http://127.0.0.1:{port}/");
+    let req = Request::builder()
+        .uri(&uri)
+        .header("host", "vipers-d.bitello.xyz")
+        .header("cf-connecting-ip", "203.0.113.9")
+        .body(http_body_util::Empty::<axum::body::Bytes>::new())
+        .unwrap();
+    let resp = client.request(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "dev com fonte externa: 404 do gate, upstream jamais tocado"
+    );
 }
 
 /// Painel no wildcard público (03/08): host do painel SEM sessão cai no

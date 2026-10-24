@@ -36,6 +36,7 @@ pub const SCRIPT: &str = "(function(){var u=0;function b(){var n=Date.now();if(n
 /// `Arc<AppState>`): host gerenciado → zera o timer e 204 vazio; host não
 /// gerenciado → 404 sem tocar em nada.
 pub async fn beat(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let started = std::time::Instant::now();
     let host_raw = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -53,10 +54,31 @@ pub async fn beat(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             tocar(&app.state, &name, Env::Prod)
         }
         // Vite (dev server, 06/live) mantém o MESMO container acordado; host
-        // custom de dev ([domains], 09) idem.
+        // custom de dev ([domains], 09) idem. Gate LAN-only (24/10): beat de
+        // FORA não mantém dev acordado — é o mesmo corte do router (a rota é
+        // REAL, o request nunca chega ao fallback onde fica o gate de lá).
+        // ConnectInfo não chega ao handler (extração por extensão é do
+        // service) — a régua roda com `connect = None`, e request real SEMPRE
+        // chega pelo Caddy com XFF (LAN) ou marcador do túnel (externo).
+        // Beat retido vira access 404 com dump: request externo é auditável.
         ManagedHost::Dev { name, .. }
         | ManagedHost::Vite { name, .. }
-        | ManagedHost::Custom { name, dev: true } => tocar(&app.state, &name, Env::Dev),
+        | ManagedHost::Custom { name, dev: true } => {
+            if crate::waf::fonte_externa(&headers, None) {
+                tracing::debug!(target: "gate", host = %host_raw, "dev: beat externo retido (LAN-only)");
+                crate::events::access(
+                    &app.state,
+                    host_raw,
+                    "POST",
+                    "/__flux/beat",
+                    404,
+                    started.elapsed().as_millis(),
+                    &crate::events::origem_de(&headers, true),
+                );
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            tocar(&app.state, &name, Env::Dev)
+        }
         // Painel e desconhecido não têm container de app para manter acordado.
         ManagedHost::Panel | ManagedHost::Unknown(_) => StatusCode::NOT_FOUND.into_response(),
     }
@@ -83,8 +105,25 @@ mod tests {
     }
 
     async fn pedir(app: &Arc<AppState>, host: &str) -> StatusCode {
+        pedir_com(app, host, |h| {
+            h.insert(
+                "x-forwarded-for",
+                header::HeaderValue::from_static("192.168.140.1"),
+            );
+        })
+        .await
+    }
+
+    /// Beat com mutação de headers no caminho: LAN por padrão (browser real
+    /// chega pelo Caddy, que seta o XFF); testes de origem sobrescrevem.
+    async fn pedir_com(
+        app: &Arc<AppState>,
+        host: &str,
+        ajusta: impl FnOnce(&mut HeaderMap),
+    ) -> StatusCode {
         let mut h = HeaderMap::new();
         h.insert(header::HOST, header::HeaderValue::from_str(host).unwrap());
+        ajusta(&mut h);
         beat(State(app.clone()), h).await.status()
     }
 
@@ -131,6 +170,45 @@ mod tests {
         );
         let (last, _, _, _) = app.state.sleep_row("zzz", Env::Prod).unwrap();
         assert!(last.is_none(), "fantasma não pode ganhar linha de sono");
+    }
+
+    /// Gate LAN-only (24/10): beat de FORA (marcador do túnel) NÃO mantém o
+    /// dev acordado — 404, sem touch, com access auditado no log.
+    #[tokio::test]
+    async fn beat_externo_nao_mantem_dev_acordado_e_fica_auditado() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "hash")
+            .unwrap();
+        let status = pedir_com(&app, "vipers-d.bitello.xyz", |h| {
+            h.insert(
+                "cf-connecting-ip",
+                header::HeaderValue::from_static("203.0.113.9"),
+            );
+        })
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "beat externo não passa do gate LAN-only de dev"
+        );
+        let (last, _, _, _) = app.state.sleep_row("vipers", Env::Dev).unwrap();
+        assert!(last.is_none(), "beat externo NÃO zera o timer de sono");
+
+        let msg: String = app
+            .state
+            .with(|c| {
+                c.query_row(
+                    "SELECT message FROM events WHERE scope='access' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(
+            msg.contains("POST /__flux/beat 404") && msg.contains("hdrs["),
+            "beat retido auditado com dump: {msg}"
+        );
     }
 
     #[tokio::test]

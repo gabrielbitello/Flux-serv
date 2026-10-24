@@ -1,8 +1,11 @@
-//! WAF local (R32; spec 16, camada 2 — SQLi + path scan na borda). Layer
-//! tower no padrão do `edge.rs`: self-contained (não lê `AppState`, nem
-//! SQLite, nem Docker). O integrador monta DEPOIS da `EdgeLayer` —
-//! `Router.layer(EdgeLayer::new(..)).layer(WafLayer::new())` — então o
-//! request chega aqui já admitido pela borda (413/429 primeiro, WAF depois).
+//! WAF local (R32; spec 16, camada 2 — SQLI + path scan na borda). Layer
+//! tower no padrão do `edge.rs`. Carrega o `Arc<AppState>` por UMA razão:
+//! registrar o bloqueio na tabela `events` (07) — bloqueio de WAF é request
+//! externo e, desde 24/10, request externo é 100% auditável (pedido do
+//! Gabriel). Nada mais do estado é lido. O integrador monta DEPOIS da
+//! `EdgeLayer` — `Router.layer(EdgeLayer::new(..)).layer(WafLayer::new(app))`
+//! — então o request chega aqui já admitido pela borda (413/429 primeiro,
+//! WAF depois).
 //!
 //! Mecanismo:
 //!
@@ -47,14 +50,17 @@
 //!
 //! Eventos: bloqueio e skip-de-LAN viram log `tracing` com `target: "waf"` e
 //! campos (ip, path SEM query, padrão) — path sem query de propósito (spec
-//! 16: o log nunca carrega o corpo; a query carrega o payload). Gravar na
-//! tabela `events` do SQLite (07) é passo do integrador: a layer é
-//! self-contained e não tem `State`.
+//! 16: o log nunca carrega o corpo; a query carrega o payload). O BLOQUEIO
+//! também vira evento `warn` escopo `waf` na tabela `events` (07) com o dump
+//! de headers do `events::origem_de` — é request externo na definição
+//! exata da fonte_externa abaixo, e externo é auditável por inteiro.
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request};
@@ -159,6 +165,16 @@ pub fn na_allowlist(ip: Option<IpAddr>) -> bool {
         Some(IpAddr::V6(v6)) => v6 == Ipv6Addr::LOCALHOST,
         None => false,
     }
+}
+
+/// A fonte veio de FORA da LAN? MESMA régua do `ip_real` + `na_allowlist`
+/// acima — nunca reinventada (fonte única da classificação, 24/10): o
+/// `cf-connecting-ip` vence (indevassável pelo túnel), depois o XFF do
+/// Caddy, depois o `ConnectInfo`. `None` = sem IP identificável = EXTERNO
+/// (fail-closed, igual ao `na_allowlist`). Consumidores: o gate LAN-only de
+/// dev no router e no beat, e o dump de headers do access.
+pub fn fonte_externa(headers: &axum::http::HeaderMap, connect: Option<IpAddr>) -> bool {
+    !na_allowlist(ip_real(headers, connect))
 }
 
 /// IP real do cliente, por precedência:
@@ -268,13 +284,16 @@ pub fn detecta(alvo: &str) -> Option<&'static str> {
 
 // ------------------------------------------------- layer + service tower
 
-/// A layer. Unitária e sem estado (a detecção é pura) — `WafLayer::new()`.
-#[derive(Clone, Default)]
-pub struct WafLayer;
+/// A layer. O `Arc<AppState>` existe por UMA razão: gravar o bloqueio na
+/// tabela `events` — a detecção continua pura e sem estado.
+#[derive(Clone)]
+pub struct WafLayer {
+    app: Arc<crate::AppState>,
+}
 
 impl WafLayer {
-    pub fn new() -> Self {
-        Self
+    pub fn new(app: Arc<crate::AppState>) -> Self {
+        Self { app }
     }
 }
 
@@ -282,7 +301,10 @@ impl<S> Layer<S> for WafLayer {
     type Service = WafService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        WafService { inner }
+        WafService {
+            inner,
+            app: Arc::clone(&self.app),
+        }
     }
 }
 
@@ -291,6 +313,7 @@ impl<S> Layer<S> for WafLayer {
 #[derive(Clone)]
 pub struct WafService<S> {
     inner: S,
+    app: Arc<crate::AppState>,
 }
 
 impl<S> Service<Request> for WafService<S>
@@ -308,7 +331,9 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         let mut inner = self.inner.clone();
+        let app = Arc::clone(&self.app);
         Box::pin(async move {
+            let started = Instant::now();
             let (parts, body) = req.into_parts();
             // Alvo = path + query decodificados UMA vez. O corpo NÃO é lido —
             // streaming segue intocado (v1).
@@ -375,6 +400,32 @@ where
                 path = %path,
                 padrao,
                 "waf: 403 — request bloqueado"
+            );
+            // Auditoria (24/10): bloqueio = request externo por definição —
+            // vira evento `warn` com o dump de headers (o payload de RCE em
+            // header não pode escapar do registro). Path SEM query no evento,
+            // como no tracing (spec 16).
+            let host_raw = parts
+                .headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            let origem = crate::events::origem_de(&parts.headers, true);
+            crate::events::event(
+                &app.state,
+                "warn",
+                "waf",
+                &format!(
+                    "waf: 403 padrão [{padrao}] — {}",
+                    crate::events::linha_access(
+                        host_raw,
+                        parts.method.as_str(),
+                        &path,
+                        403,
+                        started.elapsed().as_millis(),
+                        &origem,
+                    )
+                ),
             );
             let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
             Ok(bloqueado(wants_json))
@@ -630,7 +681,17 @@ mod tests {
     }
 
     fn waf_svc(hits: Arc<AtomicUsize>) -> WafService<Echo> {
-        WafLayer::new().layer(Echo { hits })
+        WafLayer::new(test_app()).layer(Echo { hits })
+    }
+
+    /// Estado real (SQLite em memória): o WAF grava o bloqueio em `events` —
+    /// os testes de bloqueio podem afirmar a linha de auditoria.
+    fn test_app() -> Arc<crate::AppState> {
+        Arc::new(crate::AppState::new(
+            crate::state::State::in_memory().unwrap(),
+            &flux_common::config::GlobalConfig::default(),
+            None,
+        ))
     }
 
     fn req(
@@ -736,17 +797,50 @@ mod tests {
         );
 
         // Sem XFF, o ConnectInfo decide: externo bloqueado.
-        let svc = waf_svc(Arc::clone(&hits));
-        let r = svc
-            .oneshot(req(
-                "/.env",
-                None,
-                None,
-                Some("203.0.113.5:1234".parse().unwrap()),
-            ))
-            .await
-            .unwrap();
+        let app = test_app();
+        let svc = WafLayer::new(Arc::clone(&app)).layer(Echo {
+            hits: Arc::clone(&hits),
+        });
+        let mut r = req(
+            "/.env",
+            None,
+            None,
+            Some("203.0.113.5:1234".parse().unwrap()),
+        );
+        r.headers_mut().insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("php2shell-probe/1.0"),
+        );
+        r.headers_mut().insert(
+            header::COOKIE,
+            HeaderValue::from_static("sessao=valor-que-nao-pode-vazar"),
+        );
+        let r = svc.oneshot(r).await.unwrap();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // Auditoria (24/10): o bloqueio vira evento `waf` com o dump de
+        // headers — UA entra, valor de cookie NUNCA (redigido).
+        let msg: String = app
+            .state
+            .with(|c| {
+                c.query_row(
+                    "SELECT message FROM events WHERE scope='waf' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(msg.contains("padrão ["), "evento do bloqueio: {msg}");
+        assert!(msg.contains("hdrs["), "dump de headers no evento: {msg}");
+        assert!(msg.contains("php2shell-probe/1.0"), "UA capturado: {msg}");
+        assert!(
+            msg.contains("cookie=<redigido:"),
+            "cookie redigido no evento: {msg}"
+        );
+        assert!(
+            !msg.contains("valor-que-nao-pode-vazar"),
+            "valor de cookie NUNCA vira log: {msg}"
+        );
 
         // XFF lixo cai para o ConnectInfo — externo bloqueado, LAN passa.
         let svc = waf_svc(Arc::clone(&hits));

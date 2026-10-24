@@ -24,7 +24,7 @@ use crate::proxy;
 use crate::redroom;
 use crate::sqlite_source::SqliteSource;
 use crate::ui::{NOINDEX, x_robots_tag};
-use crate::waf::WafLayer;
+use crate::waf::{self, WafLayer};
 
 /// `global` alimenta a borda R30 (teto de body vem do config, 09; o resto é
 /// default da 07). Config ausente JÁ chega aqui como `GlobalConfig::default()`
@@ -47,8 +47,10 @@ pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) ->
         // WAF (16) entra DEPOIS da EdgeLayer no fluxo do request: em tower a
         // ÚLTIMA `.layer` é a mais externa (roda primeiro), então EdgeLayer
         // por último = admissão (413/429) antes da inspeção do WAF; o que a
-        // borda deixa passar é o que o WAF inspeciona.
-        .layer(WafLayer::new())
+        // borda deixa passar é o que o WAF inspeciona. O WAF carrega o estado
+        // para registrar o bloqueio em `events` (07) — request externo é
+        // auditável por inteiro (24/10).
+        .layer(WafLayer::new(Arc::clone(&app)))
         .layer(EdgeLayer::new(EdgeLimits::from_global(global)))
         .with_state((app, panel))
 }
@@ -150,8 +152,21 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         .or_else(|| parts.uri.host().map(|h| h.to_owned()))
         .unwrap_or_default();
     let path = parts.uri.path().to_owned();
+    // Rastro do access (24/10): path COM query — payload de SQLi/scanner na
+    // query é exatamente o que a auditoria precisa ver. Decisão e WAF seguem
+    // com o path puro; a query só entra no log.
+    let path_log = match parts.uri.query() {
+        Some(q) if !q.is_empty() => format!("{path}?{q}"),
+        _ => path.clone(),
+    };
     let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
     let method = parts.method.clone();
+    let connect = connect_ip(&parts);
+    // Origem do request (24/10) capturada UMA vez, ANTES de qualquer braço
+    // do dispatch: os headers do dump são os ORIGINAIS (o Proxy insere
+    // x-forwarded-host/proto no caminho, e `parts` é consumido nos braços
+    // Panel/Deploy). Externo pela MESMA régua do WAF — fonte única.
+    let origem = events::origem_de(&parts.headers, waf::fonte_externa(&parts.headers, connect));
 
     let src = match &app.docker {
         Some(d) => Source::Docker(DockerSource::new(d.clone(), &app.state)),
@@ -182,9 +197,38 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
             &app.state,
             &host_raw,
             method.as_str(),
-            &path,
+            &path_log,
             r.status().as_u16(),
             started.elapsed().as_millis(),
+            &origem,
+        );
+        return r;
+    }
+
+    // Gate LAN-only de dev (24/10, pedido do Gabriel): host de dev DEIXA de
+    // ser público. Fonte fora da allowlist LAN — a MESMA régua do WAF
+    // (`waf::fonte_externa`: cf-connecting-ip > XFF > ConnectInfo) — toma o
+    // 404 brandiado de host desconhecido ANTES de qualquer wake/proxy/hold:
+    // request de fora não acorda container (a rajada de 22/10 não se repete)
+    // e não revela que o host existe. Exceção ÚNICA: o plano de controle
+    // (zcode-api) — o túnel público é o caminho do Claude Code/Desktop
+    // (mesma exceção do redroom). O acesso LAN segue direto pelo hosts file
+    // → Caddy da VM (sem Cloudflare), e TODO request retido fica no log com
+    // o dump de headers.
+    if host.is_dev()
+        && projeto_do_host(&host).as_deref() != Some(redroom::PROJETO_CONTROLE)
+        && waf::fonte_externa(&parts.headers, connect)
+    {
+        tracing::debug!(target: "gate", host = %host_raw, path, "dev: request externo retido (LAN-only)");
+        let r = pages::not_found(&host_raw);
+        events::access(
+            &app.state,
+            &host_raw,
+            method.as_str(),
+            &path_log,
+            r.status().as_u16(),
+            started.elapsed().as_millis(),
+            &origem,
         );
         return r;
     }
@@ -436,11 +480,22 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         &app.state,
         &host_raw,
         method.as_str(),
-        &path,
+        &path_log,
         resp.status().as_u16(),
         started.elapsed().as_millis(),
+        &origem,
     );
     resp
+}
+
+/// IP de origem da conexão (extensão do `ConnectInfo` do serve) — `None` em
+/// oneshot de teste. A classificação LAN/externo NUNCA é feita daqui: é
+/// sempre `waf::fonte_externa` (mesma régua, fonte única).
+fn connect_ip(parts: &axum::http::request::Parts) -> Option<std::net::IpAddr> {
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(a)| a.ip())
 }
 
 /// Ambiente da ação corrente — só chega aqui para hosts gerenciados
@@ -539,10 +594,12 @@ mod tests {
             .unwrap();
         let router = router_com(&app);
 
-        let resp = router
-            .oneshot(req("vipers-d.bitello.xyz", "/__flux/beat"))
-            .await
-            .unwrap();
+        // Beat de browser chega PELO Caddy (XFF da LAN) — sem XFF/ConnectInfo
+        // (oneshot nu) a fonte é indistinguível de externa e o gate retém.
+        let mut r = req("vipers-d.bitello.xyz", "/__flux/beat");
+        r.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("192.168.140.1"));
+        let resp = router.oneshot(r).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::NO_CONTENT,
@@ -792,14 +849,128 @@ mod tests {
         crate::redroom::definir(&app.state, true).unwrap();
         let router = router_com(&app);
 
-        let resp = router
-            .oneshot(req("vipers-d.bitello.xyz", "/__flux/beat"))
-            .await
-            .unwrap();
+        let mut r = req("vipers-d.bitello.xyz", "/__flux/beat");
+        r.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("192.168.140.1"));
+        let resp = router.oneshot(r).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::NO_CONTENT,
             "beat é rota real: contenção do fallback não o alcança"
+        );
+    }
+
+    /// Gate LAN-only de dev (24/10): host `-d` com fonte de FORA (marcador do
+    /// túnel) = 404 brandiado de host desconhecido — sem acordar nada e sem
+    /// revelar existência. A auditoria fica no log: o access gravado carrega
+    /// `hdrs[...]` com o dump completo (request externo = 100% auditável).
+    #[tokio::test]
+    async fn dev_host_externo_e_404_brandiado_com_auditoria_de_headers() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        let router = router_com(&app);
+
+        let mut r = req("vipers-d.bitello.xyz", "/cms?x=1");
+        r.headers_mut()
+            .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let resp = router.oneshot(r).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "dev não responde de fora da LAN"
+        );
+
+        let msg: String = app
+            .state
+            .with(|c| {
+                c.query_row(
+                    "SELECT message FROM events WHERE scope='access' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        for pedaco in [
+            "POST /cms?x=1", // query entra no log (helper req() é POST)
+            "404",
+            "host=vipers-d.bitello.xyz",
+            "hdrs[",
+            "cf-connecting-ip=203.0.113.9",
+        ] {
+            assert!(msg.contains(pedaco), "access sem `{pedaco}`: {msg}");
+        }
+    }
+
+    /// Mesmo host `-d` com fonte da LAN (XFF do Caddy) = fluxo normal — o
+    /// gate só corta fora da allowlist (192.168.140.0/24 + loopback).
+    #[tokio::test]
+    async fn dev_host_da_lan_passa_pelo_gate() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        let router = router_com(&app);
+
+        let mut r = req("vipers-d.bitello.xyz", "/cms");
+        r.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("192.168.140.1"));
+        let resp = router.oneshot(r).await.unwrap();
+        // O helper req() negocia JSON (Accept) — sem Docker, dev dormindo
+        // devolve o ApiWaking do contrato 12 (503 JSON + Retry-After). O que
+        // importa: NÃO é o 404 do gate — o request correu o fluxo normal.
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LAN passa pelo gate: ApiWaking do contrato (503), não 404 brandiado"
+        );
+        assert_ne!(
+            resp.headers().get(header::RETRY_AFTER),
+            None,
+            "503 de API acordando traz Retry-After"
+        );
+    }
+
+    /// Host de PROD não é alcançado pelo gate: público por natureza, de fora
+    /// ou de dentro o fluxo é o mesmo.
+    #[tokio::test]
+    async fn prod_host_externo_nao_e_bloqueado_pelo_gate_de_dev() {
+        let app = app();
+        app.state
+            .register_project("vipers", "name = \"vipers\"", "h")
+            .unwrap();
+        let router = router_com(&app);
+
+        let mut r = req("vipers.bitello.xyz", "/");
+        r.headers_mut()
+            .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let resp = router.oneshot(r).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "prod segue público: ApiWaking do fluxo normal, não 404 do gate"
+        );
+    }
+
+    /// A exceção ÚNICA do gate: o plano de controle (zcode-api) segue
+    /// alcançável pelo túnel — é o caminho do Claude Code/Desktop.
+    #[tokio::test]
+    async fn zcode_api_dev_externo_segue_de_pe() {
+        let app = app();
+        app.state
+            .register_project("zcode-api", "name = \"zcode-api\"", "h")
+            .unwrap();
+        let router = router_com(&app);
+
+        let mut r = req("zcode-api-d.bitello.xyz", "/v1/messages");
+        r.headers_mut()
+            .insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let resp = router.oneshot(r).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "plano de controle corre o fluxo normal (JSON de API), não 404 do gate"
         );
     }
 }
