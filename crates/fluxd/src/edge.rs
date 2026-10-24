@@ -60,8 +60,10 @@ use tower::{Layer, Service};
 use crate::decision;
 use crate::pages::CSS;
 
-/// Rate default por host (07): 300 req/min.
-pub const DEFAULT_RATE_PER_MIN: u32 = 300;
+/// Rate default por host (07): era 300; **24/10 Gabriel mandou baixar para
+/// 120** — a rajada de Livewire do vippers (75/min medida) precisa estourar
+/// a borda e ficar VISÍVEL (o 429 agora grava evento; antes morria mudo).
+pub const DEFAULT_RATE_PER_MIN: u32 = 120;
 /// Burst do bucket (07): rajada de 100 antes de secar.
 pub const DEFAULT_BURST: u32 = 100;
 /// Teto de conexões concorrentes por host (07).
@@ -177,7 +179,18 @@ pub struct EdgeState {
     /// Base monótona: o relógio da borda é `epoch.elapsed()` em segundos.
     epoch: std::time::Instant,
     hosts: Mutex<HashMap<String, HostEdge>>,
+    /// Auditoria (24/10): o `429` da borda SEMPRE morreu mudo — nem journal,
+    /// nem tabela `events`. Com o estado do fluxd aqui, o bloqueio vira
+    /// evento `warn` com dedup (uma linha a cada [`DEDUP_429`] s, com o
+    /// total acumulado desde a anterior) — uma tempestade NÃO enche a tabela.
+    /// `None` = construtor de teste (`EdgeLayer::new`) sem estado do fluxd.
+    st: Option<Arc<crate::AppState>>,
+    ultimo_evento_429: std::sync::atomic::AtomicI64,
+    total_429: std::sync::atomic::AtomicU64,
 }
+
+/// Janela do dedup do evento de 429: uma linha por janela, com o total.
+const DEDUP_429: i64 = 30;
 
 impl EdgeState {
     pub fn new(limits: EdgeLimits) -> Self {
@@ -185,6 +198,9 @@ impl EdgeState {
             limits,
             epoch: std::time::Instant::now(),
             hosts: Mutex::new(HashMap::new()),
+            st: None,
+            ultimo_evento_429: std::sync::atomic::AtomicI64::new(0),
+            total_429: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -284,6 +300,16 @@ impl EdgeLayer {
             state: Arc::new(EdgeState::new(limits)),
         }
     }
+
+    /// Montagem de produção: com o estado do fluxd, o 429 vira evento
+    /// auditável (mesma régua do bloqueio do WAF, 24/10).
+    pub fn com_app(limits: EdgeLimits, app: Arc<crate::AppState>) -> Self {
+        let mut state = EdgeState::new(limits);
+        state.st = Some(app);
+        Self {
+            state: Arc::new(state),
+        }
+    }
 }
 
 impl<S> Layer<S> for EdgeLayer {
@@ -347,6 +373,7 @@ where
             // 2) Rate limit por host (token bucket).
             if let Err(retry_after) = state.take_token(&host) {
                 tracing::debug!(host = %host, retry_after, "borda: 429 — bucket vazio");
+                auditor_429(&state, &host, &parts.headers, "rate");
                 return Ok(too_many_requests(wants_json, retry_after));
             }
 
@@ -359,6 +386,7 @@ where
                         limit = state.limits.max_concurrent,
                         "borda: 429 — teto de conexões concorrentes"
                     );
+                    auditor_429(&state, &host, &parts.headers, "concorrencia");
                     return Ok(overloaded(wants_json));
                 }
             };
@@ -383,6 +411,49 @@ where
             fut.await
         })
     }
+}
+
+/// Evento do 429 (24/10): o bloqueio da borda vira linha na `events` com
+/// dedup de janela — UMA linha a cada [`DEDUP_429`] s, carregando o total
+/// acumulado desde a anterior (tempestade não enche a tabela). Origem externa
+/// leva o dump de headers, mesma régua do access.
+fn auditor_429(state: &Arc<EdgeState>, host: &str, headers: &axum::http::HeaderMap, motivo: &str) {
+    use std::sync::atomic::Ordering;
+    let total = state.total_429.fetch_add(1, Ordering::Relaxed) + 1;
+    let agora = chrono_now_secs();
+    let ultimo = state.ultimo_evento_429.load(Ordering::Relaxed);
+    if agora - ultimo < DEDUP_429 {
+        return;
+    }
+    state.ultimo_evento_429.store(agora, Ordering::Relaxed);
+    let Some(app) = &state.st else {
+        return; // construtor de teste (EdgeLayer::new) — sem estado, sem evento
+    };
+    let origem = crate::events::origem_de(headers, crate::waf::fonte_externa(headers, None));
+    crate::events::event(
+        &app.state,
+        "warn",
+        "edge",
+        &format!(
+            "borda: 429 ({motivo}) host={host} bloqueados_no_total={total} xff={} ua=\"{}\"{}",
+            origem.xff,
+            origem.user_agent,
+            origem
+                .headers
+                .as_ref()
+                .map(|h| format!(" hdrs[{h}]"))
+                .unwrap_or_default(),
+        ),
+    );
+}
+
+/// Época atual em segundos — o dedup do 429 compara inteiros, sem relógio
+/// diferente do que grava (`datetime('now')` do SQLite é UTC igual).
+fn chrono_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Chave do host para os mapas da borda — mesma normalização de
@@ -892,7 +963,9 @@ mod tests {
     #[test]
     fn defaults_batem_a_spec_07() {
         let d = EdgeLimits::default();
-        assert_eq!(d.rate_per_min, 300);
+        // 24/10: Gabriel baixou o rate de 300 para 120 (rajada Livewire
+        // visível na borda; o 429 agora grava evento).
+        assert_eq!(d.rate_per_min, 120);
         assert_eq!(d.burst, 100);
         assert_eq!(d.max_concurrent, 100);
         assert_eq!(d.queue_wait, Duration::from_secs(2));

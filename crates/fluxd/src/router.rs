@@ -56,7 +56,10 @@ pub fn build_router(app: Arc<AppState>, global: &GlobalConfig, panel: Router) ->
         // para registrar o bloqueio em `events` (07) — request externo é
         // auditável por inteiro (24/10).
         .layer(WafLayer::new(Arc::clone(&app)))
-        .layer(EdgeLayer::new(EdgeLimits::from_global(global)))
+        .layer(EdgeLayer::com_app(
+            EdgeLimits::from_global(global),
+            Arc::clone(&app),
+        ))
         .with_state((app, panel))
 }
 
