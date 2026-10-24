@@ -2,6 +2,33 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 24/10 (parte 3) — Incidente "auto-ddos" FECHADO: WARP matava o ws do HMR (`89ffac4` + relatório em [docs/incidentes](docs/incidentes/2026-10-24-auto-ddos-warp-vite.md))
+
+Causa raiz do loop de reload que o Gabriel viu (e da rajada de 22/10): **o
+Cloudflare WARP do Windows fechava o websocket do HMR em ~1–2s**; o client do
+Vite, ao perder a conexão, testava o servidor e disparava `location.reload()`
+em loop — 2 abas × ~3s = o "auto-ddos por causa do vite". Prova por exclusão
+com medida em cada elo: o servidor Vite nunca manda `full-reload` (escuta do
+ws cru: só `connected` + silêncio), nenhum arquivo mudava, sync limpa, zero
+4xx/desafios no HAR, e o ws aguenta 40s+ em TODOS os elos quando a origem não
+é o browser com WARP. Relatório completo com a cadeia de evidências em
+`docs/incidentes/2026-10-24-auto-ddos-warp-vite.md`.
+
+Ações: varredura completa da zona CF com a API (autorização do Gabriel) —
+`cache_level` aggressive→**basic** (aggressive ignorava query string: módulos
+do Vite e `livewire.js?id=` podiam vir velhos), **regra de cache BYPASS** para
+`-d.bitello.xyz` + `/livewire/*` + `/__flux/*`, `min_tls` 1.0→**1.2**,
+`security_level` medium→**essentially_off**; proteções LIGADAS: browser
+integrity, WAF custom bloqueando `/wp-*`//phpmyadmin//.env//.git//xmlrpc na
+borda (scanner não acorda mais a VM) e rate limit de login 10 POSTs/10s por IP
+(Bot fight/Precursor seguem OFF de propósito — sem isenção de IP no Free).
+E no vippers: fix do RangeBoundsInput (commit `1ba826a0` no cms3). O widget
+`DriverAvailability` polla `10s` por design (só com corrida em andamento) —
+decisão de manter/afrouxar é do Gabriel.
+
+**Pendente de segurança**: rotacionar token CF + chaves R2 (passaram por chat);
+`flux gate senha`; Turnstile; poda `events`; `APP_KEY` dev.
+
 ## 24/10 (parte 2) — Gate do dev com DESAFIO DE SENHA: IP novo pede senha, 5 erros banem, acerto confia 30 dias; Turnstile no form (`225099f`)
 
 Evolução pedida pelo Gabriel no mesmo dia ("confiar no ip… pede uma senha…
