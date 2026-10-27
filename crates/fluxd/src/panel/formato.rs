@@ -168,3 +168,109 @@ pub(super) fn badge_sync(row: Option<&crate::sync::SyncRow>) -> (&'static str, &
         base
     }
 }
+
+// ---------------------------------------------------- eventos 26/10
+
+/// Uma linha de access digerida — o formato é o canônico de
+/// `events::linha_access` (`{metodo} {caminho} {status} {dur}ms host=…`).
+#[derive(Debug, PartialEq)]
+pub(super) struct AccessInfo {
+    pub(super) metodo: String,
+    pub(super) caminho: String,
+    pub(super) status: u16,
+    pub(super) dur_ms: u64,
+    pub(super) host: String,
+}
+
+/// Digei a linha de access para a tabela estruturada de /events. `None` =
+/// mensagem não é access (escopos waf/anomalia/edge/painel…): a página mostra
+/// o texto CRU — o que não é access nunca é disfarçado de access.
+pub(super) fn parse_access(message: &str) -> Option<AccessInfo> {
+    let mut t = message.split(' ');
+    let metodo = t.next()?.to_owned();
+    let mut pedacos: Vec<&str> = Vec::new();
+    let mut status = None;
+    let mut dur_ms = None;
+    let mut host = String::new();
+    for p in t {
+        if status.is_none() {
+            if let Ok(s) = p.parse::<u16>() {
+                status = Some(s);
+            } else {
+                pedacos.push(p);
+            }
+        } else if dur_ms.is_none() {
+            dur_ms = p.strip_suffix("ms").and_then(|v| v.parse().ok());
+        } else if let Some(h) = p.strip_prefix("host=") {
+            host = h.to_owned();
+        }
+    }
+    Some(AccessInfo {
+        metodo,
+        caminho: pedacos.join(" "),
+        status: status?,
+        dur_ms: dur_ms.unwrap_or(0),
+        host,
+    })
+}
+
+/// Classe de cor do status HTTP na tabela: 2xx verde, 3xx neutro, 429/5xx
+/// vermelho (429 é o sinal que o operador caça), demais 4xx âmbar.
+pub(super) fn classe_status(status: u16) -> &'static str {
+    match status {
+        200..=299 => "st-ok",
+        300..=399 => "st-3",
+        429 | 500..=599 => "st-err",
+        400..=499 => "st-warn",
+        _ => "st-3",
+    }
+}
+
+/// Percent-encoding mínimo (RFC 3986 unreserved) para montar hrefs de filtro
+/// com a busca do operador dentro.
+pub(super) fn query_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Decodifica `%XX` e `+` (form-urlencoded). Bytes malformados caem como
+/// texto literal — a busca é do próprio operador, nunca executa nada.
+pub(super) fn query_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(v) => {
+                        out.push(v);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            v => {
+                out.push(v);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}

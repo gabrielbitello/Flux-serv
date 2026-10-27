@@ -4,7 +4,9 @@
 use flux_common::protocol::{ContainerState, Env};
 use rusqlite::OptionalExtension;
 use rusqlite::params;
+use rusqlite::types::Value;
 
+use super::formato;
 use crate::AppState;
 use crate::decision::HostSource as _;
 use crate::docker;
@@ -134,33 +136,6 @@ pub(super) fn vigia_ultimo_ciclo(app: &AppState) -> Result<Option<String>, Strin
         .map_err(|e| e.to_string())
 }
 
-/// Página de eventos — a página é CLAMPADA ao total ANTES do fetch (pedir
-/// página 99 sem clampa devolveria "página 3" com zero linhas: desconexo).
-pub(super) fn eventos_pagina(
-    app: &AppState,
-    page: i64,
-    size: i64,
-) -> Result<(i64, Vec<EventoRow>, i64), String> {
-    let total: i64 = app
-        .state
-        .with(|c| c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)))
-        .map_err(|e| e.to_string())?;
-    let paginas = ((total + size - 1) / size).max(1);
-    let page = page.min(paginas);
-    let offset = (page - 1) * size;
-    let rows = app
-        .state
-        .with(|c| {
-            let mut stmt = c.prepare(&format!(
-                "SELECT {COLUNAS_EVENTO} FROM events ORDER BY id DESC LIMIT ?1 OFFSET ?2"
-            ))?;
-            let rows = stmt.query_map(params![size, offset], row_evento)?;
-            rows.collect()
-        })
-        .map_err(|e| e.to_string())?;
-    Ok((page, rows, total))
-}
-
 /// Época atual em segundos, pela MESMA fonte dos timestamps gravados
 /// (`datetime('now')` é UTC no SQLite) — relógio único, sem drift de host.
 pub(super) fn agora_epoch(app: &AppState) -> Result<i64, String> {
@@ -210,4 +185,110 @@ pub(super) fn curva_contagem(app: &AppState) -> Result<Option<(Vec<u64>, u64, u6
     }
     let max = *conts.iter().max().unwrap_or(&1);
     Ok(Some((conts, total, max)))
+}
+
+// --------------------------------------------------- eventos com filtro 26/10
+
+/// Filtros da página de eventos. `None` = sem filtro (a SQL não ganha cláusula).
+#[derive(Default, Clone, PartialEq)]
+pub(super) struct FiltroEventos {
+    pub(super) scope: Option<String>,
+    pub(super) nivel: Option<String>,
+    pub(super) busca: Option<String>,
+}
+
+/// Parse da query string (`?escopo=access&nivel=warn&q=...`) com valores
+/// url-encoded — a busca do operador vem com %XX e `+` do browser.
+pub(super) fn filtro_de(query: Option<&str>) -> FiltroEventos {
+    let mut f = FiltroEventos::default();
+    let Some(q) = query else {
+        return f;
+    };
+    for par in q.split('&') {
+        let Some((k, v)) = par.split_once('=') else {
+            continue;
+        };
+        let v = formato::query_decode(v);
+        let v = (!v.trim().is_empty()).then_some(v);
+        match k {
+            "escopo" => f.scope = v,
+            "nivel" => f.nivel = v,
+            "q" => f.busca = v,
+            _ => {}
+        }
+    }
+    f
+}
+
+/// Cláusula WHERE + bindings dos filtros — UMA definição usada pelo COUNT e
+/// pelo SELECT (contagem e página nunca divergem).
+fn clausula_filtro(f: &FiltroEventos) -> (String, Vec<Value>) {
+    let mut onde = String::from("1=1");
+    let mut vals: Vec<Value> = Vec::new();
+    if let Some(s) = &f.scope {
+        vals.push(Value::from(s.clone()));
+        onde.push_str(&format!(" AND scope = ?{}", vals.len()));
+    }
+    if let Some(n) = &f.nivel {
+        vals.push(Value::from(n.clone()));
+        onde.push_str(&format!(" AND level = ?{}", vals.len()));
+    }
+    if let Some(q) = &f.busca {
+        vals.push(Value::from(format!("%{}%", formato::like_esc(q))));
+        onde.push_str(&format!(" AND message LIKE ?{} ESCAPE '\\'", vals.len()));
+    }
+    (onde, vals)
+}
+
+/// Página de eventos COM filtro — a página é clampada ao total filtrado
+/// (mesma promessa da paginação antiga: pedir página 99 não devolve vazia
+/// desconexa). Sem filtro (`FiltroEventos::default()`) é o caso geral.
+pub(super) fn eventos_filtrados(
+    app: &AppState,
+    page: i64,
+    size: i64,
+    f: &FiltroEventos,
+) -> Result<(i64, Vec<EventoRow>, i64), String> {
+    let (onde, vals) = clausula_filtro(f);
+    let total: i64 = app
+        .state
+        .with(|c| {
+            c.query_row(
+                &format!("SELECT COUNT(*) FROM events WHERE {onde}"),
+                rusqlite::params_from_iter(vals.iter()),
+                |r| r.get(0),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    let paginas = ((total + size - 1) / size).max(1);
+    let page = page.min(paginas);
+    let offset = (page - 1) * size;
+    let mut binds = vals.clone();
+    binds.push(Value::from(size));
+    binds.push(Value::from(offset));
+    let rows = app
+        .state
+        .with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {COLUNAS_EVENTO} FROM events WHERE {onde} \
+                 ORDER BY id DESC LIMIT ?{} OFFSET ?{}",
+                binds.len() - 1,
+                binds.len()
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), row_evento)?;
+            rows.collect()
+        })
+        .map_err(|e| e.to_string())?;
+    Ok((page, rows, total))
+}
+
+/// Escopos existentes na trilha — os chips do filtro nunca inventam opção.
+pub(super) fn escopos_distintos(app: &AppState) -> Result<Vec<String>, String> {
+    app.state
+        .with(|c| {
+            let mut stmt = c.prepare("SELECT DISTINCT scope FROM events ORDER BY scope")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect()
+        })
+        .map_err(|e| e.to_string())
 }

@@ -1,8 +1,10 @@
 //! Painel web do fluxd (08): HTML gerado server-side — SVG desenhado aqui no
-//! servidor, CSS próprio embutido como `const`, ZERO JavaScript (nem htmx
-//! nesta fase: `meta refresh` resolve a atualização e tudo continua legível
-//! com JS desligado, critério 4 da 08). Sem rust-embed e sem build de
-//! frontend — `cargo build` gera tudo, como a spec manda.
+//! servidor, CSS próprio embutido como `const`. JS MÍNIMO e autorizado
+//! (26/10, Gabriel: "pode ter js sim"): só a página /events refetcha a si
+//! mesma a cada 5 s e troca o corpo da tabela sem reload (pausável, aba
+//! oculta não refetch, falha visível no rótulo); o resto do painel continua
+//! zero JS com `meta refresh`. Sem rust-embed e sem build de frontend —
+//! `cargo build` gera tudo, como a spec manda.
 //!
 //! AUTH REAL (08/09): login único com senha em Argon2id
 //! (`/srv/flux/secrets/panel.argon2`), sessão por cookie httpOnly +
@@ -251,7 +253,9 @@ async fn detalhe_projeto(State(app): State<Arc<AppState>>, params: RawPathParams
 }
 
 async fn pagina_eventos(State(app): State<Arc<AppState>>, RawQuery(q): RawQuery) -> Response {
-    resposta(StatusCode::OK, render_eventos(&app, page_de(q.as_deref())))
+    // A query crua carrega os filtros (escopo/nível/busca) — quem digere é o
+    // leitura::filtro_de.
+    resposta(StatusCode::OK, render_eventos(&app, q.as_deref()))
 }
 
 /// POST /projects/{name}/rescan: pede re-scan da sessão de sync do projeto
@@ -313,7 +317,6 @@ mod paginas;
 #[cfg(test)]
 mod tests;
 
-use formato::page_de;
 use paginas::{
     detalhe_status, layout, render_dashboard, render_detalhe, render_eventos, render_login,
 };

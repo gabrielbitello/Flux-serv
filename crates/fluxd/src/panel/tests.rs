@@ -752,3 +752,165 @@ async fn com_engine_a_fonte_e_docker() {
         "com engine, a fonte é o Docker: {body}"
     );
 }
+
+// -------------------------------------------------- eventos com filtro 26/10
+
+#[test]
+fn parse_access_digei_a_linha_canonica() {
+    let a = super::formato::parse_access(
+        "GET /cms/records/rides 200 120ms host=vippers-d.bitello.xyz \
+         ip=1.2.3.4 xff=192.168.140.1 ua=\"Chrome\" hdrs[cookie=<redigido:5B>]",
+    )
+    .expect("access parseia");
+    assert_eq!(a.metodo, "GET");
+    assert_eq!(a.caminho, "/cms/records/rides");
+    assert_eq!(a.status, 200);
+    assert_eq!(a.dur_ms, 120);
+    assert_eq!(a.host, "vippers-d.bitello.xyz");
+
+    // Caminho com query e POST; duração ilegível vira 0 (nunca inventada).
+    let b = super::formato::parse_access("POST /livewire/update?x=1 429 ??ms host=h ip=i")
+        .expect("parseia");
+    assert_eq!(b.caminho, "/livewire/update?x=1");
+    assert_eq!(b.status, 429);
+    assert_eq!(b.dur_ms, 0);
+
+    // O que não é access vem cru — nunca disfarçado.
+    assert!(super::formato::parse_access("vigia: recarga — caminho `/`").is_none());
+}
+
+#[test]
+fn classe_status_separa_o_que_importa() {
+    assert_eq!(super::formato::classe_status(200), "st-ok");
+    assert_eq!(super::formato::classe_status(304), "st-3");
+    assert_eq!(super::formato::classe_status(404), "st-warn");
+    assert_eq!(super::formato::classe_status(429), "st-err", "429 é sinal");
+    assert_eq!(super::formato::classe_status(502), "st-err");
+}
+
+#[test]
+fn query_encode_decode_roundtrip_com_acento_e_especial() {
+    let casos = [
+        "tráfego & <caminho>/?#",
+        "recarga em loop",
+        "50%+de+max",
+        "áéíóú çãõ",
+    ];
+    for c in casos {
+        let enc = super::formato::query_encode(c);
+        assert!(
+            !enc.contains(['&', '<', '>', ' ', '+']),
+            "encoded seguro: {enc}"
+        );
+        assert_eq!(super::formato::query_decode(&enc), c, "roundtrip de {c}");
+    }
+}
+
+#[tokio::test]
+async fn eventos_filtram_por_escopo_nivel_e_busca() {
+    let app = app_sem_docker();
+    crate::events::event(
+        &app.state,
+        "info",
+        "access",
+        "GET /a 200 1ms host=h ip=1.1.1.1",
+    );
+    crate::events::event(
+        &app.state,
+        "warn",
+        "anomalia",
+        "vigia: recarga — caminho `/`",
+    );
+    crate::events::event(&app.state, "error", "edge", "borda: 429 host=h");
+
+    // Escopo isola.
+    let (_, rows, total) = leitura::eventos_filtrados(
+        &app,
+        1,
+        50,
+        &leitura::FiltroEventos {
+            scope: Some("anomalia".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((rows.len(), total), (1, 1));
+    assert!(rows[0].message.contains("recarga"));
+
+    // Nível isola.
+    let (_, rows, total) = leitura::eventos_filtrados(
+        &app,
+        1,
+        50,
+        &leitura::FiltroEventos {
+            nivel: Some("error".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((rows.len(), total), (1, 1));
+    assert!(rows[0].message.contains("429"));
+
+    // Busca bate na mensagem com aspas e sintaxe de URL limpa.
+    let (_, rows, total) = leitura::eventos_filtrados(
+        &app,
+        1,
+        50,
+        &leitura::FiltroEventos {
+            busca: Some("caminho".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((rows.len(), total), (1, 1));
+}
+
+#[tokio::test]
+async fn pagina_de_eventos_tem_filtros_estrutura_e_js_de_refresh() {
+    let app = app_sem_docker();
+    crate::events::event(
+        &app.state,
+        "info",
+        "access",
+        "GET /cms 200 120ms host=vipers-d.bitello.xyz ip=1.2.3.4",
+    );
+    crate::events::event(
+        &app.state,
+        "warn",
+        "anomalia",
+        "vigia: recarga — caminho `/`",
+    );
+    let (_, _, body) = get(&app, "/events").await;
+    assert!(
+        body.contains("corpo-eventos"),
+        "tbody com id pro JS: {body}"
+    );
+    assert!(
+        body.contains("cabecalho-eventos"),
+        "contagem com id: {body}"
+    );
+    assert!(body.contains("btn-pausa"), "auto-refresh pausável: {body}");
+    assert!(body.contains("chip"), "chips de filtro: {body}");
+    // Access digerido na célula + o cru à um clique.
+    assert!(
+        body.contains("GET /cms"),
+        "método+caminho estruturados: {body}"
+    );
+    assert!(body.contains("st-ok"), "badge de status 200: {body}");
+    assert!(
+        body.contains("vipers-d.bitello.xyz"),
+        "host na célula: {body}"
+    );
+    assert!(body.contains("<details"), "mensagem cru acessível: {body}");
+    // Warn destacado na linha.
+    assert!(body.contains("lwarn"), "linha de warn destacada: {body}");
+
+    // Filtro aplicado via query (url-encoded de "anomalia" é ele mesmo).
+    let (_, _, filtrado) = get(&app, "/events?escopo=anomalia&nivel=warn&page=1").await;
+    assert!(filtrado.contains("recarga"), "evento filtrado presente");
+    assert!(!filtrado.contains("GET /cms"), "access de fora sai");
+    assert!(
+        filtrado.contains("chip-at"),
+        "chip ativo visível no filtro: {filtrado}"
+    );
+}

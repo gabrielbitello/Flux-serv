@@ -4,10 +4,13 @@
 use axum::http::StatusCode;
 use rusqlite::params;
 
-use super::formato::{badge_level, badge_sync, dot, epoch_de, esc, like_esc, quando};
+use super::formato::{
+    badge_level, badge_sync, classe_status, dot, epoch_de, esc, like_esc, page_de, parse_access,
+    quando, query_encode,
+};
 use super::leitura::{
     self, EVENTOS_DASHBOARD, EVENTOS_POR_PAGINA, EventoRow, PainelEnv, agora_epoch, ambiente,
-    eventos_pagina, eventos_recentes, projetos, row_evento,
+    eventos_filtrados, eventos_recentes, projetos, row_evento,
 };
 use crate::AppState;
 use flux_common::config::ProjectToml;
@@ -25,7 +28,33 @@ font-size:.72rem;font-weight:600}
 .sb-info{background:var(--infobg);color:var(--info)}
 .sb-idle{background:var(--idlebg);color:var(--idle)}
 .sync{margin:.6rem 0 0;font-size:.82rem}
-.sync table{margin-top:.3rem}"#;
+.sync table{margin-top:.3rem}
+/* Filtros + tabela de eventos (26/10 — liberado JS mínimo pelo Gabriel). */
+.filtros{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin:.4rem 0 .8rem}
+.chip{display:inline-block;border:1px solid var(--line);border-radius:999px;
+padding:.08rem .6rem;font-size:.78rem;color:var(--text);text-decoration:none}
+.chip:hover{border-color:var(--accent)}
+.chip-at{background:var(--accentbg);color:var(--accent);border-color:var(--accent)}
+.filtros form{display:flex;gap:.35rem;margin-left:auto}
+.filtros input{background:var(--bg);color:var(--text);border:1px solid var(--line);
+border-radius:6px;padding:.2rem .5rem}
+.filtros button{background:var(--accentbg);color:var(--accent);border:1px solid var(--accent);
+border-radius:6px;padding:.2rem .6rem;cursor:pointer}
+.st{display:inline-block;border-radius:4px;padding:0 .35rem;font-size:.76rem;font-weight:600}
+.st-ok{background:var(--okbg);color:var(--ok)}
+.st-3{background:var(--idlebg);color:var(--idle)}
+.st-warn{background:var(--warnbg);color:var(--warn)}
+.st-err{background:var(--errbg);color:var(--err)}
+tr.lwarn td{background:var(--warnbg)}
+tr.lerr td{background:var(--errbg)}
+.cru{margin-top:.15rem}
+.cru summary{color:var(--muted);font-size:.76rem;cursor:pointer}
+.cru pre{white-space:pre-wrap;word-break:break-all;font-size:.74rem;margin:.2rem 0 0;
+background:var(--bg);border-radius:6px;padding:.3rem .4rem}
+.atualiza{display:flex;gap:.6rem;align-items:center;margin:.3rem 0 .6rem}
+.atualiza button{background:var(--idlebg);color:var(--text);border:1px solid var(--line);
+border-radius:6px;padding:.15rem .6rem;cursor:pointer;font-size:.78rem}
+"#;
 
 /// último erro quando existe, badge de rescan pendente e o botão de rescan.
 /// SVG da curva de eventos — APRESENTAÇÃO (a consulta é
@@ -114,8 +143,8 @@ fn linha_sync(now: i64, row: Option<&crate::sync::SyncRow>, name: &str) -> Strin
 // ------------------------------------------------------------------ layout
 
 /// Esqueleto de página: tokens CSS, botão Sair, `meta robots` (R22) e
-/// `meta refresh` opcional (só dashboard — eventos/detalhe são leitura sob
-/// demanda; zero JS: o refresh é mecânico do browser).
+/// `meta refresh` opcional (só dashboard — /events atualiza por JS mínimo
+/// autorizado, detalhe é leitura sob demanda).
 pub(super) fn layout(title: &str, body: &str, auto_refresh: bool) -> String {
     let refresh = if auto_refresh {
         "<meta http-equiv=\"refresh\" content=\"5\">"
@@ -144,7 +173,7 @@ border:1px solid var(--line);border-radius:6px;padding:.2rem .7rem;cursor:pointe
 </form>
 </header>
 {body}
-<footer>fluxd — painel server-side, zero JS (spec 08) · horários em UTC</footer>
+<footer>fluxd — painel server-side · JS mínimo só no auto-refresh de /events · horários em UTC</footer>
 </div>
 </body>
 </html>"#,
@@ -525,51 +554,180 @@ pub(super) fn render_detalhe(app: &AppState, name: &str) -> String {
 
 // ------------------------------------------------------------------ eventos
 
-pub(super) fn render_eventos(app: &AppState, page_pedida: i64) -> String {
-    let mut body = String::new();
-    match eventos_pagina(app, page_pedida, EVENTOS_POR_PAGINA) {
+/// Query string com os filtros + página — os chips e o pager nunca perdem o
+/// filtro de onde vieram.
+fn qs_eventos(f: &leitura::FiltroEventos, page: i64) -> String {
+    let mut pares = vec![format!("page={page}")];
+    if let Some(e) = &f.scope {
+        pares.push(format!("escopo={}", query_encode(e)));
+    }
+    if let Some(n) = &f.nivel {
+        pares.push(format!("nivel={}", query_encode(n)));
+    }
+    if let Some(q) = &f.busca {
+        pares.push(format!("q={}", query_encode(q)));
+    }
+    pares.join("&")
+}
+
+/// Chip de filtro ativo ganha `.chip-at` — o operador vê o que está aplicado.
+fn chip(rotulo: &str, href: &str, ativo: bool) -> String {
+    let classe = if ativo { "chip chip-at" } else { "chip" };
+    format!("<a class=\"{classe}\" href=\"{href}\">{}</a>", esc(rotulo))
+}
+
+/// Uma célula de conteúdo da tabela: access vira linha estruturada (método +
+/// caminho + badge de status + duração + host) com o texto CRU num
+/// `<details>` — a mensagem integral segue à mostra, um clique de distância.
+/// O que não é access fica CRU, esc passado.
+fn celula_conteudo(ev: &EventoRow) -> String {
+    match parse_access(&ev.message) {
+        Some(a) => format!(
+            "<code>{} {}</code> <span class=\"st {classe}\">{status}</span> \
+             <span class=\"muted\">{dur} ms · {host}</span>\
+             <details class=\"cru\"><summary>cru</summary><pre>{cru}</pre></details>",
+            esc(&a.metodo),
+            esc(&a.caminho),
+            classe = classe_status(a.status),
+            status = a.status,
+            dur = a.dur_ms,
+            host = esc(&a.host),
+            cru = esc(&ev.message),
+        ),
+        None => esc(&ev.message),
+    }
+}
+
+pub(super) fn render_eventos(app: &AppState, query: Option<&str>) -> String {
+    let filtro = leitura::filtro_de(query);
+    let page_pedida = page_de(query);
+    let escopos = leitura::escopos_distintos(app).unwrap_or_default();
+
+    let mut body = String::from("<h1>Eventos</h1>");
+
+    // Barra de filtros: escopos existentes + níveis fixos + busca. Todo link
+    // volta com page=1 (trocar de filtro sem cair no meio de uma página velha).
+    body.push_str("<div class=\"filtros\">");
+    body.push_str(&chip(
+        "todos",
+        &format!(
+            "/events?{}",
+            qs_eventos(&leitura::FiltroEventos::default(), 1)
+        ),
+        filtro.scope.is_none() && filtro.nivel.is_none() && filtro.busca.is_none(),
+    ));
+    for e in &escopos {
+        let mut f2 = filtro.clone();
+        f2.scope = Some(e.clone());
+        let ativo = filtro.scope.as_deref() == Some(e);
+        body.push_str(&chip(e, &format!("/events?{}", qs_eventos(&f2, 1)), ativo));
+    }
+    body.push_str("</div>");
+    body.push_str("<div class=\"filtros\">");
+    for n in ["info", "warn", "error"] {
+        let mut f2 = filtro.clone();
+        f2.nivel = Some(n.to_owned());
+        let ativo = filtro.nivel.as_deref() == Some(n);
+        body.push_str(&chip(n, &format!("/events?{}", qs_eventos(&f2, 1)), ativo));
+    }
+    body.push_str(&format!(
+        "<form method=\"get\" action=\"/events\"><input type=\"text\" name=\"q\" \
+         value=\"{}\" placeholder=\"buscar na mensagem…\" autofocus> \
+         <button type=\"submit\">buscar</button></form>",
+        esc(filtro.busca.as_deref().unwrap_or(""))
+    ));
+    body.push_str("</div>");
+
+    match eventos_filtrados(app, page_pedida, EVENTOS_POR_PAGINA, &filtro) {
         Ok((page, rows, total)) => {
             let paginas = ((total + EVENTOS_POR_PAGINA - 1) / EVENTOS_POR_PAGINA).max(1);
             body.push_str(&format!(
-                "<h1>Eventos</h1><p class=\"muted\">página {page} de {paginas} · \
+                "<p class=\"muted\" id=\"cabecalho-eventos\">página {page} de {paginas} · \
                  {total} eventos no total</p>"
             ));
             if rows.is_empty() {
-                body.push_str("<div class=\"empty\">sem eventos registrados ainda</div>");
+                body.push_str("<div class=\"empty\">nenhum evento com esse filtro</div>");
             } else {
                 body.push_str(
-                    "<table><tr><th>quando (UTC)</th><th>nível</th><th>escopo</th><th>mensagem</th></tr>",
+                    "<table id=\"tab-eventos\"><thead><tr><th>quando (UTC)</th><th>nível</th>\
+                     <th>escopo</th><th>conteúdo</th></tr></thead><tbody id=\"corpo-eventos\">",
                 );
                 for ev in rows {
+                    let destaque = match ev.level.as_str() {
+                        "warn" => " class=\"lwarn\"",
+                        "error" | "err" => " class=\"lerr\"",
+                        _ => "",
+                    };
                     body.push_str(&format!(
-                        "<tr><td class=\"muted\">{}</td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+                        "<tr{destaque}><td class=\"muted\">{}</td><td>{}</td>\
+                         <td><code>{}</code></td><td>{}</td></tr>",
                         esc(&ev.created_at),
                         badge_level(&ev.level),
                         esc(&ev.scope),
-                        esc(&ev.message)
+                        celula_conteudo(&ev)
                     ));
                 }
-                body.push_str("</table>");
+                body.push_str("</tbody></table>");
             }
             body.push_str("<div class=\"pager\">");
             if page > 1 {
                 body.push_str(&format!(
-                    "<a href=\"/events?page={}\">← anterior</a>",
-                    page - 1
+                    "<a href=\"/events?{}\">← anterior</a>",
+                    qs_eventos(&filtro, page - 1)
                 ));
             }
             if page < paginas {
                 body.push_str(&format!(
-                    "<a href=\"/events?page={}\">próxima →</a>",
-                    page + 1
+                    "<a href=\"/events?{}\">próxima →</a>",
+                    qs_eventos(&filtro, page + 1)
                 ));
             }
-            body.push_str("</div><p><a href=\"/\">← dashboard</a></p>");
+            body.push_str("</div>");
         }
         Err(e) => body.push_str(&format!(
-            "<h1>Eventos</h1><div class=\"empty err-t\">Falha lendo eventos: {}</div>",
+            "<div class=\"empty err-t\">Falha lendo eventos: {}</div>",
             esc(&e)
         )),
     }
+
+    // Auto-refresh SEM reload de página (26/10 — liberado JS mínimo pelo
+    // Gabriel): refetch da própria URL a cada 5 s e troca só o corpo da
+    // tabela + o cabeçalho de contagem. Pausável; aba oculta não refetch;
+    // falha de rede fica visível no rótulo (nada engolido).
+    body.push_str(
+        r#"<div class="atualiza"><button id="btn-pausa" type="button">⏸ pausar</button>\
+<span id="st-atualiza" class="muted">atualiza a cada 5 s</span></div>
+<script>
+(function () {
+  var vivo = true;
+  var btn = document.getElementById('btn-pausa');
+  var st = document.getElementById('st-atualiza');
+  btn.addEventListener('click', function () {
+    vivo = !vivo;
+    btn.textContent = vivo ? '⏸ pausar' : '▶ retomar';
+    st.textContent = vivo ? 'atualiza a cada 5 s' : 'atualização pausada';
+  });
+  setInterval(function () {
+    if (!vivo || document.hidden) return;
+    fetch(location.href).then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (txt) {
+        if (!txt) return;
+        var novo = new DOMParser().parseFromString(txt, 'text/html');
+        var corpo = novo.getElementById('corpo-eventos');
+        var cab = novo.getElementById('cabecalho-eventos');
+        var atual = document.getElementById('corpo-eventos');
+        var cabAtual = document.getElementById('cabecalho-eventos');
+        if (corpo && atual) atual.innerHTML = corpo.innerHTML;
+        if (cab && cabAtual) cabAtual.innerHTML = cab.innerHTML;
+        st.textContent = 'atualiza a cada 5 s';
+      })
+      .catch(function (e) {
+        st.textContent = 'falhou em atualizar (' + e + ') — tenta de novo no próximo ciclo';
+      });
+  }, 5000);
+})();
+</script>"#,
+    );
+    body.push_str("<p><a href=\"/\">← dashboard</a></p>");
     layout("Flux — eventos", &body, false)
 }
