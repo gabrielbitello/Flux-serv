@@ -62,9 +62,10 @@ fn linha(rotulo: &str, item: &ItemCli, cor: bool) -> String {
     }
 }
 
-/// Resolução do host NO WINDOWS (getaddrinfo lê o hosts file): verde só se
-/// cai no IP host-only da VM — resolvido pra outro lugar é site morto com
-/// cara de vivo.
+/// Resolução do host NO WINDOWS (getaddrinfo lê o hosts file). Três estados
+/// honestos: IP host-only = LAN direta (verde); DNS público (Cloudflare) =
+/// verde com o caminho na causa — os `*-d.bitello.xyz` funcionam pelo túnel
+/// sem entrada no hosts file; não resolver = vermelho (site morto de fato).
 fn item_dns(host: &str) -> ItemCli {
     match (host, 443u16).to_socket_addrs() {
         Err(e) => ItemCli {
@@ -75,17 +76,16 @@ fn item_dns(host: &str) -> ItemCli {
         Ok(mut ips) => match ips.next() {
             Some(addr) if addr.ip().to_string() == sync::VM_HOST => ItemCli {
                 ok: true,
-                estado: sync::VM_HOST.to_owned(),
+                estado: format!("{} (LAN direta)", sync::VM_HOST),
                 detalhe: None,
             },
             Some(addr) => ItemCli {
-                ok: false,
+                ok: true,
                 estado: format!("→ {}", addr.ip()),
-                detalhe: Some(format!(
-                    "resolvido fora da VM ({}) — esperado {} (hosts file)",
-                    addr.ip(),
-                    sync::VM_HOST
-                )),
+                detalhe: Some(
+                    "via DNS público (túnel Cloudflare) — para LAN direta, entrada no hosts file"
+                        .into(),
+                ),
             },
             None => ItemCli {
                 ok: false,
@@ -175,12 +175,10 @@ pub(crate) async fn doctor(projeto: Option<String>) {
 
     match &projeto {
         Some(_) => {
-            let v = item_de(&rel);
             println!(
                 "projeto {}",
                 rel.get("projeto").and_then(Value::as_str).unwrap_or("?")
             );
-            marca(v.ok, linha("agregado", &v, cor));
         }
         None => {
             let fluxd = item_de(rel.get("fluxd").unwrap_or(&Value::Null));
@@ -224,8 +222,8 @@ pub(crate) async fn doctor(projeto: Option<String>) {
     for (ok, texto) in veredito_sync_local(&sync::status_all().unwrap_or_default()) {
         let item = ItemCli {
             ok,
-            estado: String::new(),
-            detalhe: Some(texto),
+            estado: texto,
+            detalhe: None,
         };
         marca(ok, linha("sessão", &item, cor));
     }

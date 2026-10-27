@@ -167,9 +167,10 @@ async fn checar_containers(app: &AppState, name: &str) -> Item {
 
 /// Sync pela visão do fluxd (relatos do `flux watch` no HOST). Mesma regra do
 /// `badge_sync` do painel (panel/formato.rs): watching + sem problems + sem
-/// erro = verde. SEM relato é vermelho: o watch é quem mantém a linha viva —
-/// ausência dele significa sync parada de verdade (a sessão mutagen local só
-/// o Windows vê; o CLI acrescenta a checagem do lado de lá).
+/// erro = verde. Duas vermelhisses próprias do doctor: SEM relato e relato
+/// VELHO (o watch parou de reportar — o `problems` de um relato morto é
+/// snapshot, não sintoma atual; a idade domina). A sessão mutagen local só o
+/// Windows vê; o CLI acrescenta a checagem do lado de lá.
 fn checar_sync(app: &AppState, name: &str) -> Item {
     let Some(r) = sync::sync_states(app)
         .into_iter()
@@ -181,6 +182,20 @@ fn checar_sync(app: &AppState, name: &str) -> Item {
     };
     if r.paused {
         return item(false, "pausada").com_detalhe("sync pausada — `flux sync resume`");
+    }
+    // Idade do relato (relógio do SQLite): > 1 h = watch parado, qualquer
+    // diagnóstico do relato é lixo congelado.
+    if let Some(idade) = idade_relato(app, name)
+        && idade > 3600
+    {
+        return item(false, "relato-velho").com_detalhe(format!(
+            "flux watch não reporta há {} (relato de {}) — rode o watch; \
+             problemas congelados: {}, last_error: {}",
+            humano_secs(idade),
+            r.updated_at,
+            r.problems,
+            r.last_error.as_deref().unwrap_or("nenhum")
+        ));
     }
     if let Some(e) = &r.last_error {
         return item(false, "erro").com_detalhe(format!("status {}: {e}", r.status));
@@ -273,6 +288,35 @@ fn checar_assets(name: &str, toml_src: Option<&str>) -> Item {
             item(false, "build-vazio").com_detalhe("manifest.json vazio — rode `flux build`")
         }
         Ok(_) => item(true, "buildado"),
+    }
+}
+
+/// Idade do relato de sync em segundos, pelo relógio do SQLite (o mesmo
+/// `strftime('now')` que grava `updated_at` — sem parsing de RFC3339 aqui).
+/// `None` = linha sem relato ou leitura falhou (o item cuida do resto).
+fn idade_relato(app: &AppState, name: &str) -> Option<i64> {
+    app.state
+        .with(|c| {
+            c.query_row(
+                "SELECT CAST((julianday('now') - julianday(updated_at)) * 86400 AS INTEGER)
+                 FROM sync_status WHERE project = ?1",
+                rusqlite::params![name],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .ok()
+        .filter(|idade| *idade >= 0)
+}
+
+/// Duração curta pra humanos: `3d 4h`, `2h 15m`, `40m 5s`.
+fn humano_secs(secs: i64) -> String {
+    let (d, h, m) = (secs / 86_400, (secs % 86_400) / 3600, (secs % 3600) / 60);
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m {}s", secs % 60)
     }
 }
 
@@ -429,6 +473,62 @@ mod tests {
         assert!(!item.ok);
         assert_eq!(item.estado, "declaração quebrada");
         assert!(item.detalhe.unwrap_or_default().contains("GRUPO_RUIM"));
+    }
+
+    #[tokio::test]
+    async fn sync_relato_velho_domina_problemas_congelados() {
+        let app = app();
+        app.state
+            .register_project("vipa", TOML_LARAVEL, "hash")
+            .unwrap();
+        sync::upsert_report(
+            &app,
+            &sync::SyncReport {
+                project: "vipa".into(),
+                session: "flux-vipa".into(),
+                status: "watching".into(),
+                paused: false,
+                files: Some(11),
+                problems: 71,
+                last_error: Some("boom".into()),
+                rescan_applied: false,
+            },
+        )
+        .unwrap();
+        // Relato recém-gravado: a idade não domina; com last_error, o ramo
+        // "erro" vence (mesma regra do badge_sync).
+        let fresco = checar_sync(&app, "vipa");
+        assert!(!fresco.ok);
+        assert_eq!(fresco.estado, "erro");
+
+        // Envelhece o relato 6 dias (relógio do próprio SQLite): a idade é a
+        // causa raiz — problemas viram "congelados" no detalhe.
+        app.state
+            .with(|c| {
+                c.execute(
+                    "UPDATE sync_status SET updated_at = datetime('now', '-6 days') \
+                     WHERE project = 'vipa'",
+                    [],
+                )
+            })
+            .unwrap();
+        let velho = checar_sync(&app, "vipa");
+        assert!(!velho.ok);
+        assert_eq!(velho.estado, "relato-velho");
+        let detalhe = velho.detalhe.unwrap_or_default();
+        assert!(detalhe.contains("6d"), "idade humanizada: {detalhe}");
+        assert!(
+            detalhe.contains("71"),
+            "problemas congelados citados: {detalhe}"
+        );
+        assert!(detalhe.contains("boom"), "{detalhe}");
+    }
+
+    #[test]
+    fn humano_secs_nas_três_escalas() {
+        assert_eq!(humano_secs(40), "0m 40s");
+        assert_eq!(humano_secs(2 * 3600 + 15 * 60), "2h 15m");
+        assert_eq!(humano_secs(3 * 86_400 + 4 * 3600), "3d 4h");
     }
 
     #[tokio::test]
