@@ -136,6 +136,13 @@ pub struct DbSection {
     /// plataforma (`banco::IMAGEM_PADRAO`). Se o compose TEM o service, a
     /// captura dele vence (imagem + credenciais do compose).
     pub image: Option<String>,
+    /// Publica a porta do MySQL do grupo no IP host-only da VM
+    /// (27/10, pedido do Gabriel: PHPUnit no Windows usando o banco da VM).
+    /// LAN-only — mesma confiança do adminer :8081. Só UM grupo pode expor
+    /// por vez: colisão é erro declarado na subida, nunca bind falho
+    /// silencioso. Aplica no próximo `flux up` (o YAML do banco regenera e
+    /// o compose recria o container; o volume preserva o dado).
+    pub expose: Option<bool>,
 }
 
 impl DbSection {
@@ -155,6 +162,12 @@ impl DbSection {
     /// flux-db global (mesmo idioma de `[temporary] enabled`).
     pub fn own(&self) -> bool {
         self.own.unwrap_or(false)
+    }
+
+    /// Porta do grupo publicada no IP host-only? Default `false` — mantém a
+    /// regra a68e4ba (nenhuma porta no banco) para quem nunca pediu.
+    pub fn expose(&self) -> bool {
+        self.expose.unwrap_or(false)
     }
 
     /// Grupo efetivo do banco próprio: declarado vence; default = nome do

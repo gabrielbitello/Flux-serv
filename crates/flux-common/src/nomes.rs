@@ -12,6 +12,11 @@ pub fn projeto_valido(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// IP host-only da VirtualBox — FONTE ÚNICA (27/10): o CLI fala com a VM
+/// por aqui (sync), o MCP da VM binda aqui e a porta do banco com
+/// `[db] expose` publica aqui. LAN da plataforma, não roteável pra fora.
+pub const VM_IP: &str = "192.168.140.2";
+
 #[cfg(test)]
 mod tests {
     use super::*;

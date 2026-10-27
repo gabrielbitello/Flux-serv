@@ -25,8 +25,9 @@ use crate::api;
 /// Porta do MCP HTTP (LAN-only, host-only da VirtualBox).
 pub const MCP_PORT: u16 = 7430;
 /// IP do bind: a interface host-only da VM. Nunca 0.0.0.0 (a superfície é
-/// LAN da plataforma, não roteável).
-pub const MCP_BIND_IP: &str = "192.168.140.2";
+/// LAN da plataforma, não roteável). Valor da fonte única
+/// `flux_common::nomes::VM_IP`.
+pub const MCP_BIND_IP: &str = flux_common::nomes::VM_IP;
 
 /// Teto do corpo de resposta lido dos handlers (logs/toolchain podem ser
 /// grandes; 16 MiB é folga acima de qualquer teto interno).

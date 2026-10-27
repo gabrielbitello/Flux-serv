@@ -701,8 +701,16 @@ pub async fn subir_projeto(app: std::sync::Arc<crate::AppState>, name: String, e
         let inj = injecao
             .as_ref()
             .expect("injeção existe quando captura existe");
-        if let Err(e) =
-            crate::banco::garantir(st, &state_dir, d, &cfg.grupo, cap, &inj.database).await
+        if let Err(e) = crate::banco::garantir(
+            st,
+            &state_dir,
+            d,
+            &cfg.grupo,
+            cfg.expose,
+            cap,
+            &inj.database,
+        )
+        .await
         {
             events::event(
                 st,

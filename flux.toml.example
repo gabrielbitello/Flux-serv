@@ -62,6 +62,13 @@
 # dump to `/srv/flux/state/db-backups/`. PROD databases never expire.
 # Default: 7 (one week).
 #ttl_days = 7
+# Publish the MySQL port on the VM's host-only IP (192.168.140.2:3306) so
+# Windows tooling (PHPUnit, composer) talks to the VM database directly.
+# LAN-only, same trust as the adminer on :8081. ONLY ONE group may expose
+# at a time — a collision fails the up with an explicit error. Takes effect
+# on the next `flux up` (the container is recreated; the volume keeps data).
+# Default: false.
+#expose = true
 
 # ---------------------------------------------------------------------------
 # Asset build (02, `flux build`). Runs INSIDE the dev container on the VM,

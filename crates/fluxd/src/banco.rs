@@ -49,7 +49,13 @@ pub struct BancoConfig {
     pub grupo: String,
     pub ttl_days: u64,
     pub ttl_secs: i64,
+    /// Publica a porta do MySQL no IP host-only (`[db] expose`, 27/10).
+    pub expose: bool,
 }
+
+/// Porta publicada quando `[db] expose = true` — a padrão do MySQL, que é o
+/// que o phpunit/composer do Windows espera (`DB_PORT=3306`).
+pub(crate) const PORTA_EXPOSTA: u16 = 3306;
 
 /// Lê o banco próprio do TOML gravado. `None` = projeto não usa (`[db]`
 /// ausente ou `own` false) — caminho de sempre. `Some(Err)` = declaração
@@ -64,6 +70,7 @@ pub fn config_de(toml_src: &str, name: &str) -> Option<Result<BancoConfig, Strin
         ttl_days: db.ttl_days_efetivo(),
         ttl_secs: db.ttl_secs(),
         grupo,
+        expose: db.expose(),
     }))
 }
 
@@ -234,29 +241,48 @@ pub fn membros(st: &State) -> Result<Vec<(String, BancoConfig)>, String> {
 
 /// Garante o container do grupo saudável + o database da instância criado.
 /// Chamado pelo `up` DEPOIS do render (precisa da captura) e ANTES do
-/// `compose up` do app. Idempotente: container saudável pula a subida.
+/// `compose up` do app. Idempotente: container saudável pula a subida —
+/// EXCETO quando o YAML gerado diverge do gravado (`[db] expose` ligou ou
+/// desligou): aí sobe de novo e o compose recria o container (o volume
+/// nomeado preserva o dado).
 pub async fn garantir(
     st: &State,
     state_dir: &Path,
     docker: &Docker,
     grupo: &str,
+    expose: bool,
     captura: &crate::compose::CapturaBanco,
     db_novo: &str,
 ) -> Result<(), String> {
     identificador_seguro(db_novo, "database")?;
     let container = container_name(grupo);
 
-    // Fast path: já está de pé e saudável — nada a fazer além do database.
-    if estado_saude(docker, &container).await.as_deref() == Some("healthy") {
-        return pos_saude(st, grupo, captura, db_novo).await;
-    }
-
     // Compose gerado do render do engine — determinístico (BTreeMap), então
     // dois `up` concorrentes do mesmo grupo escrevem o MESMO arquivo.
     let dir = state_dir.join("db").join(grupo);
     std::fs::create_dir_all(&dir).map_err(|e| format!("criando {}: {e}", dir.display()))?;
     let arquivo = dir.join("compose.yml");
-    std::fs::write(&arquivo, yaml_container(grupo, captura))
+    let yaml = yaml_container(grupo, captura, expose);
+    let yaml_igual = std::fs::read_to_string(&arquivo)
+        .map(|atual| atual == yaml)
+        .unwrap_or(false);
+
+    // Fast path: já está de pé, saudável E com o YAML que o flux.toml pede.
+    if yaml_igual && estado_saude(docker, &container).await.as_deref() == Some("healthy") {
+        return pos_saude(st, grupo, captura, db_novo).await;
+    }
+
+    // Porta publicada é recurso EXCLUSIVO: só um flux-db pode expor por vez
+    // (a armadilha do 5173 — bind falho deixa container Running sem IP — não
+    // pode nascer aqui). Erro ANTES do up, com o dono do conflito na causa.
+    if expose && let Some(dono) = conflito_de_porta(docker, &container).await? {
+        return Err(format!(
+            "não publico {PORTA_EXPOSTA}: {dono} — remova [db] expose de um dos dois \
+             (a porta do banco no host-only é exclusiva)"
+        ));
+    }
+
+    std::fs::write(&arquivo, &yaml)
         .map_err(|e| format!("escrevendo {}: {e}", arquivo.display()))?;
 
     let projeto = container.clone();
@@ -295,6 +321,62 @@ pub async fn garantir(
         ),
     );
     pos_saude(st, grupo, captura, db_novo).await
+}
+
+/// Dono do conflito de porta no host-only, se houver: qualquer container
+/// `flux-*` (exceto o próprio grupo) já publicando `PORTA_EXPOSTA`.
+/// Falha de engine PROPAGA (recusar a subida por erro falso é pior que um
+/// erro de listagem explícito).
+async fn conflito_de_porta(docker: &Docker, meu_container: &str) -> Result<Option<String>, String> {
+    for c in crate::docker::listar_label(docker, None).await? {
+        let nome = c
+            .names
+            .as_ref()
+            .and_then(|ns| ns.first().map(|n| n.trim_start_matches('/').to_owned()))
+            .unwrap_or_default();
+        if nome == meu_container {
+            continue;
+        }
+        let id = match c.id.as_deref() {
+            Some(i) => i,
+            None => continue,
+        };
+        let Ok(insp) = docker.inspect_container(id, None).await else {
+            continue; // container que já era: o conflito é sobre quem ESTÁ
+        };
+        let Some(bindings) = insp
+            .host_config
+            .as_ref()
+            .and_then(|h| h.port_bindings.as_ref())
+        else {
+            continue;
+        };
+        if bindings_tocam_host(bindings, &format!("{PORTA_EXPOSTA}/tcp"), PORTA_EXPOSTA) {
+            let projeto = c
+                .labels
+                .as_ref()
+                .and_then(|l| l.get("com.docker.compose.project").cloned())
+                .unwrap_or_else(|| nome.clone());
+            return Ok(Some(format!(
+                "{nome} (projeto {projeto}) já publica {PORTA_EXPOSTA}"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Decisão PURA: algum binding publica `host_port` para a porta `porta`?
+/// (testada sem engine — os tipos do bollard só atravessam o iterador.)
+fn bindings_tocam_host(
+    bindings: &std::collections::HashMap<String, Option<Vec<bollard::models::PortBinding>>>,
+    porta: &str,
+    host_port: u16,
+) -> bool {
+    bindings
+        .iter()
+        .filter(|(k, _)| k.as_str() == porta)
+        .flat_map(|(_, v)| v.iter().flatten())
+        .any(|b| b.host_port.as_deref() == Some(&host_port.to_string()))
 }
 
 /// Depois do container saudável (fast path ou subida): sincroniza o usuário
@@ -385,9 +467,10 @@ async fn garantir_database(
 /// Gera o YAML do container dedicado — PURO (testado sem engine). Env verbatim
 /// do compose do projeto (compat: credenciais são as que o .env do projeto já
 /// usa); volume nomeado do grupo; healthcheck com fallback MariaDB/MySQL;
-/// restart "no" (o ciclo é do fluxd, igual aos apps) e NENHUMA porta
-/// publicada (regra a68e4ba vale dobrado para banco).
-fn yaml_container(grupo: &str, c: &crate::compose::CapturaBanco) -> String {
+/// restart "no" (o ciclo é do fluxd, igual aos apps). Porta publicada SOMENTE
+/// com `[db] expose` (27/10): fixa no IP host-only (`nomes::VM_IP`), nunca
+/// 0.0.0.0 — sem a chave vale a regra a68e4ba (nenhuma porta no banco).
+fn yaml_container(grupo: &str, c: &crate::compose::CapturaBanco, expose: bool) -> String {
     let mut y = String::from("services:\n  db:\n");
     y.push_str(&format!("    image: {}\n", yaml_str(&c.imagem)));
     if let Some(cmd) = &c.command
@@ -404,6 +487,15 @@ fn yaml_container(grupo: &str, c: &crate::compose::CapturaBanco) -> String {
         y.push_str(&format!("      {}: {}\n", yaml_str(k), yaml_str(v)));
     }
     y.push_str("    restart: \"no\"\n");
+    if expose {
+        let publicacao = format!(
+            "{}:{}:{PORTA_EXPOSTA}",
+            flux_common::nomes::VM_IP,
+            PORTA_EXPOSTA
+        );
+        y.push_str("    ports:\n");
+        y.push_str(&format!("      - {}\n", yaml_str(&publicacao)));
+    }
     y.push_str("    healthcheck:\n");
     let ping = "mysqladmin ping -h 127.0.0.1 -p\"${MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}\"";
     y.push_str(&format!(
@@ -941,9 +1033,14 @@ mod tests {
             BancoConfig {
                 grupo: "vippers".into(),
                 ttl_days: 3,
-                ttl_secs: 3 * 86_400
+                ttl_secs: 3 * 86_400,
+                expose: false,
             }
         );
+        let com_expose = config_de("[db]\nown = true\nexpose = true\n", "vippers")
+            .expect("own=true")
+            .unwrap();
+        assert!(com_expose.expose, "expose declarado vence o default false");
         let com_grupo = config_de("[db]\nown = true\ngrupo = \"vippers\"\n", "vippers-agenda")
             .expect("own=true")
             .unwrap();
@@ -969,7 +1066,7 @@ mod tests {
 
     #[test]
     fn yaml_do_container_cobre_as_regras_sem_porta_publicada() {
-        let y = yaml_container("vippers", &captura_mysql());
+        let y = yaml_container("vippers", &captura_mysql(), false);
         assert!(y.contains("    image: \"mysql:9.3\"\n"));
         assert!(y.contains("    container_name: flux-db-vippers\n"));
         assert!(
@@ -992,18 +1089,75 @@ mod tests {
         assert!(y.contains("external: true"), "flux-net é external");
         assert!(
             !y.contains("ports:"),
-            "banco próprio NUNCA publica porta (mesma regra do override, a68e4ba)"
+            "sem [db] expose vale a regra a68e4ba: nenhuma porta no banco"
         );
+    }
+
+    /// `[db] expose` (27/10): porta publicada SÓ no IP host-only da fonte
+    /// única (nunca 0.0.0.0), com a porta padrão do MySQL nas duas pontas.
+    #[test]
+    fn yaml_do_container_publica_porta_host_only_somente_com_expose() {
+        let y = yaml_container("vippers", &captura_mysql(), true);
+        assert!(
+            y.contains(&format!(
+                "      - \"{}:3306:3306\"\n",
+                flux_common::nomes::VM_IP
+            )),
+            "publicação fixa no host-only: {y}"
+        );
+        assert!(!y.contains("0.0.0.0"), "{y}");
+        // Sem a chave: o YAML não muda um byte do caminho de sempre.
+        let n = yaml_container("vippers", &captura_mysql(), false);
+        assert!(!n.contains("ports:"), "{n}");
     }
 
     #[test]
     fn yaml_do_container_inclui_command_verbatim_quando_ha() {
         let mut c = captura_mysql();
         c.command = Some(vec!["mysqld".into(), "--skip-log-bin".into()]);
-        let y = yaml_container("vippers", &c);
+        let y = yaml_container("vippers", &c, false);
         assert!(
             y.contains("- \"--skip-log-bin\""),
             "command do render entra verbatim: {y}"
+        );
+    }
+
+    /// Decisão pura do conflito: só a porta exata com host_port igual conta;
+    /// porta diferente ou binding de outra porta não conflita.
+    #[test]
+    fn bindings_tocam_host_só_com_porta_e_hostport_exatos() {
+        use bollard::models::PortBinding;
+        use std::collections::HashMap;
+
+        let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        bindings.insert(
+            "3306/tcp".to_owned(),
+            Some(vec![PortBinding {
+                host_ip: Some("192.168.140.2".to_owned()),
+                host_port: Some("3306".to_owned()),
+            }]),
+        );
+        assert!(bindings_tocam_host(&bindings, "3306/tcp", 3306));
+        assert!(
+            !bindings_tocam_host(&bindings, "33060/tcp", 3306),
+            "porta do container diferente não conflita"
+        );
+        assert!(
+            !bindings_tocam_host(&bindings, "3306/tcp", 3307),
+            "host_port diferente não conflita"
+        );
+
+        let mut outra: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        outra.insert(
+            "8080/tcp".to_owned(),
+            Some(vec![PortBinding {
+                host_ip: None,
+                host_port: Some("3306".to_owned()),
+            }]),
+        );
+        assert!(
+            !bindings_tocam_host(&outra, "3306/tcp", 3306),
+            "só 3306/tcp é alvo do expose"
         );
     }
 

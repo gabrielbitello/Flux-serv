@@ -77,7 +77,9 @@ pub const ENV_BIN: &str = "MUTAGEN_BIN";
 /// possível é tunel.rs → sync.rs. Redeclarar noutro arquivo nasce drift
 /// silencioso (sync aponta VM, túnel do token aponta outra).
 pub const VM_USER: &str = "flux";
-pub const VM_HOST: &str = "192.168.140.2";
+/// Valor vem de `flux_common::nomes::VM_IP` (fonte única do IP host-only,
+/// 27/10 — a mesma constante do bind MCP do fluxd e do `[db] expose`).
+pub const VM_HOST: &str = flux_common::nomes::VM_IP;
 
 /// Template que transforma `mutagen sync list` em JSON Lines — um objeto de
 /// sessão (modelo público do mutagen) por linha. O `\\n` do fonte é o escape
