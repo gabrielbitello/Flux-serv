@@ -36,6 +36,7 @@ own = true            # flux materializes flux-db-{grupo} by itself
 image = "mysql:9.3"   # optional; default mysql:8.4 (platform default)
 # grupo = "vippers"   # default: the project name; worktrees point at the main project
 # ttl_days = 7        # idle DEV databases are dropped (dump first); prod never expires
+# expose = true       # publish 192.168.140.2:3306 (host-only) for Windows tooling
 ```
 
 **The project compose does NOT need a db service** (Gabriel, 21/10 v2: "não
@@ -55,9 +56,11 @@ Mechanism (`crates/fluxd/src/banco.rs`):
 
 1. **One container per group** — fluxd writes
    `/srv/flux/state/db/{grupo}/compose.yml` (healthcheck `mysqladmin ping`,
-   named volume `flux-db-{grupo}-data`, `restart: "no"`, **no published
-   ports**) and runs it as compose project `flux-db-{grupo}` with
-   `container_name flux-db-{grupo}`.
+   named volume `flux-db-{grupo}-data`, `restart: "no"`, no published ports
+   UNLESS `[db] expose`, below) and runs it as compose project
+   `flux-db-{grupo}` with `container_name flux-db-{grupo}`. The generated
+   YAML is compared with what is on disk: a divergence (expose toggled)
+   recreates the container on the next up — the named volume keeps data.
 2. **Databases are `{name}_{env}`** (`vippers_dev`, `vippers-agenda_dev`,
    …) created idempotently with `GRANT ALL` for the group user; SQL runs
    via `docker exec` with the SQL on **stdin** and the root password taken
@@ -83,6 +86,22 @@ Mechanism (`crates/fluxd/src/banco.rs`):
 Inspect it with `flux db status` (container, health, group, TTL countdown
 per database) or Adminer. The MariaDB `flux-db` stays the default for
 every project without `[db] own`.
+
+### `[db] expose` — the VM database from Windows (27/10/2026)
+
+`expose = true` publishes `192.168.140.2:3306` (the host-only IP, never
+0.0.0.0 — same trust level as the Adminer on `:8081`) so Windows-side
+tooling — PHPUnit, composer, a GUI client — talks to the VM database
+directly. Use case: run PHPUnit OUTSIDE the VM with the VM database (a
+`.env.testing` with `DB_HOST=192.168.140.2` plus a `{name}_test` database
+and a one-time `GRANT`).
+
+Rules: the port is EXCLUSIVE — when another `flux-*` container already
+publishes 3306, the up FAILS with the conflicting container named in the
+error (never a silent failed bind leaving a running container without IP);
+takes effect on the next `flux up`; default `false` keeps the old
+a68e4ba rule (no published ports on the database) untouched. The single
+source of the host-only IP is `flux_common::nomes::VM_IP`.
 
 ## Migration pipeline
 
@@ -166,3 +185,4 @@ Single-database decision, rebuild policies and the prod-never-rebuilds rule:
 | Date | Change |
 |---|---|
 | 2026-10-14 | Initial English documentation |
+| 2026-10-27 | `[db] expose = true` publishes 192.168.140.2:3306 (host-only, LAN-only) for Windows tooling (PHPUnit outside the VM); exclusive port with explicit collision error; YAML divergence recreates the container, volume keeps data |

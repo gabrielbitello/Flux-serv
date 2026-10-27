@@ -83,6 +83,12 @@ See [database.md](database.md).
 | `flux init ci` | Not implemented yet | Writes the deploy workflow from the template (`doc-old/templates/deploy-workflow.yml`) — pending; the template itself is usable by hand. |
 | `flux maintenance <on\|off> <name> [--bypass]` | Not implemented yet | 503 + Retry-After mode with 24 h bypass token (pending phase). |
 
+## Diagnostics
+
+| Command | Status | Notes |
+|---|---|---|
+| `flux doctor [project]` | **Live** | Validates the WHOLE factory in one shot: fluxd alive, containers (ACORDADO/PARCIAL/DORMINDO), sync (fluxd view — stale reports over 1 h are named as "watch stopped", frozen problems quoted), own-db (state+health; stopped DB is only red when the app is awake), built assets (Laravel manifest), effective hosts, DNS resolution FROM WINDOWS (host-only IP = direct LAN; Cloudflare = green via tunnel; unresolvable = red) and the LOCAL mutagen sessions. Green/red per item, exit 1 with any red, exit 1 with cause when the fluxd is unreachable. NEVER wakes a container. Run this BEFORE hand-debugging any "why is it not working". |
+
 ## Security tools
 
 | Command | Status | Notes |
@@ -125,6 +131,7 @@ the project from a directory.
 
 | Tool | Kind | Notes |
 |---|---|---|
+| `flux_doctor` | read | Whole-factory verdict (containers, sync, own-db, assets, hosts) — green/red per item, NEVER wakes anything. Run FIRST when something "isn't working". Without `projeto` sweeps every registered project; DNS truth lives on Windows (`flux doctor`). |
 | `flux_projetos` | read | Registered projects (name, framework, hosts). |
 | `flux_status` | read | Project state: containers, sleep (dev/prod), migrations, hosts. |
 | `flux_ps` | read | All managed containers grouped with ACORDADO/PARCIAL/DORMINDO. |
@@ -153,3 +160,4 @@ The full CLI design (and which phase owns each command):
 | 2026-10-22 | `flux mcp` → Live (stdio MCP server, 9 tools) + own-db read-only SQL endpoint `POST /projects/{name}/db/query`; zcode plugin under `plugins/flux/` |
 | 2026-10-22 (night) | MCP also served BY THE VM over HTTP (`:7430/mcp`, LAN-only, same token gate) — the AI connects by URL, no flux process on Windows; protocol/catalog single-sourced in `flux-common::mcp` |
 | 2026-10-26 | `flux vigia status\|set\|reset` → Live — per-project reload threshold for the anomaly watchdog (default raised 8→24/min to tolerate self-refreshing pages); `GET/POST /vigia` on the control API, POST runs the cycle immediately |
+| 2026-10-27 | `flux doctor [project]` → Live + MCP tool `flux_doctor` + `GET /doctor` — read-only whole-factory verdict (green/red per item; stale sync reports >1h named as "watch stopped"; never wakes anything). `[db] expose` publishes 192.168.140.2:3306 for Windows PHPUnit against the VM database |

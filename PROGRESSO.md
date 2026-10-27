@@ -2,6 +2,69 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 27/10 — Doctor (fábrica inteira em 10 s), tool MCP `flux_doctor`, gatilho "doctor primeiro" na skill e PHPUnit FORA da VM com o banco da VM (`7c19ba8`, `00932e0`, `82c9926`, `565356f`)
+
+Contexto: Gabriel pediu três coisas — um `flux doctor` que valida a fábrica
+toda (hoje cada "por que não está funcionando" custa ~20 min de investigação),
+a tool MCP com um gatilho que mande o agente rodar o doctor ANTES de quebrar a
+cabeça (decidiu: regra na skill `flux`, sem hook), e rodar PHPUnit FORA da VM
+usando o banco da VM. Investigação com 3 agents de exploração antes de
+propor; plano aprovado no modo de planejamento. Entregue em 4 commits de
+código, TRIO verde em cada (468 testes no fim):
+
+- **Doctor** (`7c19ba8` + `565356f`): fonte única `fluxd/src/doctor.rs` —
+  vereditos read-only por projeto (containers pela agregação do `flux ps`,
+  sync pela visão fluxd, own-db read-only com coerência app×banco, assets
+  Laravel, hosts estruturados, sono informativo) — NUNCA acorda container.
+  `GET /doctor` atrás do gate, CLI `flux doctor [projeto]` (primeiro helper
+  de cor ANSI do CLI, com detecção de TTY) que acrescenta o que só o Windows
+  sabe: sessões mutagen LOCAIS e getaddrinfo dos hosts. Exit 1 com vermelho.
+  Ajustes que o primeiro smoke real exigiu (declarados no `565356f`): relato
+  de sync >1 h vira `relato-velho` com idade humanizada (o "71 problemas" do
+  vippers era relato de 21/10 — watch parado, não sintoma atual); DNS pro
+  Cloudflare é verde pelo túnel (hosts file só tem `zcode-api-d`); modo
+  focado sem o "agregado ilegível".
+- **MCP** (`00932e0`): tool `flux_doctor` no catálogo + dispatch + instructions
+  ("rode primeiro quando algo não funciona"); chama o MESMO handler do
+  `GET /doctor`; fantasma vira `isError` com a causa. Provada por HTTP na VM.
+- **Gatilho na skill** (fora do repo): SKILL.md do plugin `flux` ganhou o
+  item 0 do "Debug rápido" (sintoma = doctor antes de investigar) + a tool na
+  tabela MCP + changelog. Sem hook — decisão do Gabriel ("só regra na skill").
+- **PHPUnit fora da VM** (`82c9926`): chave `[db] expose = true` publica
+  `192.168.140.2:3306` (host-only, LAN-only — mesma confiança do adminer
+  :8081). Porta EXCLUSIVA: colisão com outro flux-db = erro ANTES do up com o
+  dono na causa (nunca o bind falho silencioso do 5173). Fast path do
+  `garantir` compara o YAML gerado com o gravado — divergência recria o
+  container, o volume preserva o dado. MUDANÇA DE COMPORTAMENTO DECLARADA:
+  relaxa opt-in a regra a68e4ba (nenhuma porta no banco) — agora há
+  consumidor de verdade. IP host-only virou fonte única
+  (`flux_common::nomes::VM_IP`; eram 2 cópias: sync do CLI e bind do MCP).
+  Fato que destravou: PHP 8.5.12 + PHPUnit 12.5.30 + vendor/ JÁ funcionavam
+  no Windows e o usuário do banco já era `vippers@'%'` — faltava SÓ o
+  caminho TCP.
+- **Deploy + prova real**: fluxd reconstruído na VM (repo re-extraído de
+  `git archive` do HEAD, build release 1m45s, backups
+  `fluxd.bak-20261027-doctor{,2}`). vippers com expose → `docker port`
+  prova `3306/tcp -> 192.168.140.2:3306`; `vippers_test` criado com GRANT;
+  `.env.testing` no Windows (derivado do `.env` — Laravel NÃO faz merge entre
+  eles, o primeiro `.env.testing` mínimo quebrou no `HERE_API_KEY`; protegido
+  por `.env.*` no .gitignore). **PHPUnit 9 tests · 58 assertions OK no
+  Windows contra o banco da VM (1m41s), `vippers_dev` intacto (200 tabelas
+  nos dois lados).** Doctor ponta a ponta: 5 projetos varridos, vippers
+  ACORDADO/banco healthy/buildado, dois relatos-velhos nomeados (5d21h,
+  8d4h), 2 sessões locais com conflito/problemas flagradas.
+
+Pendências deixadas no caminho: `flux watch` está PARADO no Windows desde
+21/10 (os relatos-velhos que o doctor expõe — rodar o watch); sessão
+`flux-vipa` com 1 conflito e `flux-presente-digital` com 2 problemas de
+scan/transition (o doctor flagra, correção é manual); 3 projetos sem
+`flux build` (base-laravel, memap-api, vamofecha — doctor aponta); o CLI
+instalado do Gabriel (`flux.exe` no PATH) ficou NA VERSÃO VELHA por decisão
+de não relincar binário em uso — o novo está em
+`Projetos/Flux/target/release/flux.exe` (substituir quando ele quiser);
+flux.toml do vippers editado (expose) SEM commit — repositório dele tem
+trabalho paralelo não-commitado de outra sessão.
+
 ## 26/10 — Vigia configurável por projeto (base 24/min), falso positivo do painel morto, `/events` reformado com filtros e auto-refresh JS (`34769ac`, `23e17cd`, `1ffa7fc`)
 
 Contexto: Gabriel abriu o vippers e viu "Too Many Requests" — diagnóstico do
