@@ -160,6 +160,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: GateCmd,
     },
+    /// Vigia de anomalia: limiar de recarga por projeto (26/10). Páginas que
+    /// se atualizam sozinhas até 23x/min já passam no default; `set` sobe o
+    /// teto de um projeto SEM reiniciar o fluxd. Comando GLOBAL.
+    Vigia {
+        #[command(subcommand)]
+        cmd: VigiaCmd,
+    },
     /// Escreve o workflow de deploy no projeto a partir do template (10).
     Init {
         /// Só `ci` na spec.
@@ -286,6 +293,23 @@ enum GateCmd {
         /// Secret key do widget (fica só na settings do fluxd).
         secret: String,
     },
+}
+
+/// Vigia de anomalia (26/10): o limiar BASE é a régua de recarga do projeto;
+/// martelada e ws derivam dele com piso nos valores dos incidentes.
+#[derive(Subcommand)]
+enum VigiaCmd {
+    /// Default global + overrides por projeto com os limiares derivados.
+    Status,
+    /// Define o limite base (recargas/min, 1–600) do projeto — grava e roda
+    /// o ciclo do vigia na hora, sem reiniciar o fluxd.
+    Set {
+        projeto: String,
+        /// Recargas/min que a página pode fazer sem virar anomalia.
+        limite: i64,
+    },
+    /// Remove o override do projeto (volta ao default global).
+    Reset { projeto: String },
 }
 
 #[derive(Subcommand)]
@@ -424,6 +448,7 @@ async fn main() {
         Cmd::Shield { .. } => stub("fase F19 (spec 16) — WAF próprio, shadow antes de enforce"),
         Cmd::Redroom { acao } => comandos::redroom::redroom(&acao).await,
         Cmd::Gate { cmd } => comandos::gate::gate(cmd).await,
+        Cmd::Vigia { cmd } => comandos::vigia::vigia(cmd).await,
         Cmd::Db { cmd } => match cmd {
             DbCmd::Fresh {
                 yes,

@@ -86,6 +86,9 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/gate/unban", post(gate_unban))
         .route("/gate/revogar", post(gate_revogar))
         .route("/gate/turnstile", post(gate_turnstile))
+        // Vigia (26/10): status do limiar e override por projeto — o POST
+        // roda o ciclo do vigia na hora (o novo limite vale sem reiniciar).
+        .route("/vigia", get(vigia_status).post(vigia_set))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
         // credencial fica invisível, então o gate grava a recusa no `events`
@@ -1219,6 +1222,120 @@ struct GateStatusOut {
     tentativas: Vec<GateTentativaDto>,
 }
 
+// ------------------------------------------------------------------ vigia
+
+/// Override do vigia com os limiares derivados do base (26/10).
+#[derive(Debug, Serialize)]
+struct VigiaOverrideDto {
+    projeto: String,
+    base: i64,
+    recarga_por_min: i64,
+    martelada_3min: i64,
+    ws_por_min: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct VigiaStatusOut {
+    default_recarga_por_min: i64,
+    default_martelada_3min: i64,
+    default_ws_por_min: i64,
+    overrides: Vec<VigiaOverrideDto>,
+}
+
+/// `base: Some(n)` grava o override; `None` remove (volta ao default).
+#[derive(Debug, Deserialize)]
+pub(crate) struct VigiaSetBody {
+    pub projeto: String,
+    pub base: Option<i64>,
+}
+
+/// Limiares derivados de um projeto (override ou default) em DTO.
+fn vigia_override_dto(projeto: String, base: i64) -> VigiaOverrideDto {
+    let l = crate::vigia::limiares(base);
+    VigiaOverrideDto {
+        projeto,
+        base,
+        recarga_por_min: l.recarga_por_min,
+        martelada_3min: l.martelada_3min,
+        ws_por_min: l.ws_por_min,
+    }
+}
+
+async fn vigia_status(State(app): State<Arc<AppState>>) -> Response {
+    let l = crate::vigia::limiares(crate::vigia::BASE_RECARGA_POR_MIN);
+    let overrides = match crate::vigia::bases(&app.state) {
+        Ok(lista) => lista
+            .into_iter()
+            .map(|(projeto, base)| vigia_override_dto(projeto, base))
+            .collect(),
+        Err(e) => return erro(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    Json(VigiaStatusOut {
+        default_recarga_por_min: l.recarga_por_min,
+        default_martelada_3min: l.martelada_3min,
+        default_ws_por_min: l.ws_por_min,
+        overrides,
+    })
+    .into_response()
+}
+
+/// POST /vigia — grava/remove o override do base E roda o ciclo do vigia NA
+/// HORA: o limiar novo vale no instante (a leitura é por ciclo, mas o
+/// operador não espera o sampler de 60 s nem reinicia o fluxd).
+async fn vigia_set(State(app): State<Arc<AppState>>, Json(b): Json<VigiaSetBody>) -> Response {
+    let projeto = b.projeto.trim();
+    if projeto.is_empty() {
+        return erro(StatusCode::UNPROCESSABLE_ENTITY, "projeto é obrigatório");
+    }
+    let existe: i64 = app
+        .state
+        .with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM projects WHERE name = ?1",
+                [projeto],
+                |r| r.get(0),
+            )
+        })
+        .unwrap_or(0);
+    if existe == 0 {
+        return erro(
+            StatusCode::NOT_FOUND,
+            format!("projeto {projeto} não está registrado no fluxd"),
+        );
+    }
+    match b.base {
+        Some(base) => {
+            if let Err(e) = crate::vigia::definir_base(&app.state, projeto, base) {
+                return erro(StatusCode::UNPROCESSABLE_ENTITY, e);
+            }
+            crate::events::event(
+                &app.state,
+                "info",
+                "vigia",
+                &format!("base de recarga de {projeto} → {base}/min (override)"),
+            );
+        }
+        None => match crate::vigia::remover_base(&app.state, projeto) {
+            Ok(true) => crate::events::event(
+                &app.state,
+                "info",
+                "vigia",
+                &format!("override de {projeto} removido — volta ao default"),
+            ),
+            Ok(false) => {
+                return erro(
+                    StatusCode::NOT_FOUND,
+                    format!("{projeto} não tinha override do vigia"),
+                );
+            }
+            Err(e) => return erro(StatusCode::INTERNAL_SERVER_ERROR, e),
+        },
+    }
+    crate::vigia::ciclo(&app.state);
+    let base = crate::vigia::base_de(&app.state, projeto);
+    Json(vigia_override_dto(projeto.to_owned(), base)).into_response()
+}
+
 async fn gate_status(State(app): State<Arc<AppState>>) -> Response {
     let cfg = crate::gate::turnstile_config(&app.state);
     let (confiancas, bans, tentativas) = app
@@ -1391,6 +1508,7 @@ mod tests {
     use http_body_util::BodyExt;
     use http_body_util::Full;
     use hyper::body::Bytes;
+    use rusqlite::OptionalExtension;
 
     /// Banco próprio (21/10): linhas do /db — gerenciado mostra relógio e
     /// contagem de TTL; database de fora do padrão aparece como não
@@ -2237,5 +2355,104 @@ mod tests {
         .await;
         assert_eq!(s5, 422, "corpo malformado não liga nada");
         assert!(!crate::redroom::ativo(&app.state));
+    }
+
+    #[tokio::test]
+    async fn vigia_status_e_override_por_projeto() {
+        let (base, app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+        registra(&cli, &base, "vipers", "name = \"vipers\"").await;
+
+        // Status sem override: default derivado + lista vazia.
+        let (s, c) = req(&cli, &base, "GET", "/vigia", Some("segredo"), None).await;
+        assert_eq!(s, 200, "{c}");
+        assert!(
+            c.contains(&format!(
+                "\"default_recarga_por_min\":{}",
+                crate::vigia::BASE_RECARGA_POR_MIN
+            )),
+            "{c}"
+        );
+
+        // Set válido: grava, devolve os limiares derivados e RODA o ciclo
+        // (prova de vida atualizada = "na hora", sem reiniciar).
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/vigia",
+            Some("segredo"),
+            Some(r#"{"projeto":"vipers","base":40}"#),
+        )
+        .await;
+        assert_eq!(s, 200, "{c}");
+        assert!(c.contains(r#""projeto":"vipers""#), "{c}");
+        assert!(c.contains(r#""recarga_por_min":40"#), "{c}");
+        assert!(c.contains(r#""martelada_3min":280"#), "40×7=280: {c}");
+        let marca: Option<String> = app
+            .state
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT v FROM settings WHERE k = 'vigia_ultimo_ciclo'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .unwrap();
+        assert!(marca.is_some(), "POST rodou o ciclo na hora");
+
+        // Set em projeto que não existe: 404 com causa.
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/vigia",
+            Some("segredo"),
+            Some(r#"{"projeto":"fantasma","base":40}"#),
+        )
+        .await;
+        assert_eq!(s, 404, "{c}");
+        assert!(c.contains("não está registrado"), "{c}");
+
+        // Base fora da faixa: 422 com a causa (nada gravado).
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/vigia",
+            Some("segredo"),
+            Some(r#"{"projeto":"vipers","base":601}"#),
+        )
+        .await;
+        assert_eq!(s, 422, "{c}");
+
+        // Reset sem override de outro projeto: 404.
+        let (s, _) = req(
+            &cli,
+            &base,
+            "POST",
+            "/vigia",
+            Some("segredo"),
+            Some(r#"{"projeto":"vipers2","base":null}"#),
+        )
+        .await;
+        assert_eq!(s, 404, "reset de quem nunca setou recusa");
+
+        // Reset real: volta ao default.
+        let (s, c) = req(
+            &cli,
+            &base,
+            "POST",
+            "/vigia",
+            Some("segredo"),
+            Some(r#"{"projeto":"vipers","base":null}"#),
+        )
+        .await;
+        assert_eq!(s, 200, "{c}");
+        assert!(
+            c.contains(&format!("\"base\":{}", crate::vigia::BASE_RECARGA_POR_MIN)),
+            "base volta ao default: {c}"
+        );
     }
 }

@@ -358,6 +358,33 @@ struct GateTurnstileIn {
     secret: String,
 }
 
+// ----------------------------------------------------------- vigia (26/10)
+
+/// Espelho de `GET /vigia` e do retorno do `POST /vigia`.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct VigiaOverrideDto {
+    pub projeto: String,
+    pub base: i64,
+    pub recarga_por_min: i64,
+    pub martelada_3min: i64,
+    pub ws_por_min: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VigiaStatusOut {
+    pub default_recarga_por_min: i64,
+    pub default_martelada_3min: i64,
+    pub default_ws_por_min: i64,
+    pub overrides: Vec<VigiaOverrideDto>,
+}
+
+#[derive(Debug, Serialize)]
+struct VigiaSetIn {
+    projeto: String,
+    base: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct RedroomIn {
     on: bool,
@@ -853,6 +880,33 @@ impl ApiClient {
             }
         })?;
         let r = self.call("POST", "/gate/turnstile", Some(corpo)).await?;
+        self.json_out(r)
+    }
+
+    // --------------------------------------------------------- vigia (26/10)
+
+    /// GET /vigia — default do limiar + overrides por projeto com os limiares
+    /// derivados.
+    pub async fn vigia_status(&self) -> Result<VigiaStatusOut, ApiError> {
+        let r = self.call("GET", "/vigia", None).await?;
+        self.json_out(r)
+    }
+
+    /// POST /vigia — grava (`Some(base)`) ou remove (`None`) o override do
+    /// base de recarga de um projeto; o fluxd roda o ciclo do vigia na hora.
+    pub async fn vigia_set(
+        &self,
+        projeto: &str,
+        base: Option<i64>,
+    ) -> Result<VigiaOverrideDto, ApiError> {
+        let corpo = serde_json::to_string(&VigiaSetIn {
+            projeto: projeto.to_owned(),
+            base,
+        })
+        .map_err(|e| ApiError::Protocolo {
+            msg: format!("serializando vigia set: {e}"),
+        })?;
+        let r = self.call("POST", "/vigia", Some(corpo)).await?;
         self.json_out(r)
     }
 
