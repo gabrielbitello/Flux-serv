@@ -2,6 +2,54 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 26/10 — Vigia configurável por projeto (base 24/min), falso positivo do painel morto, `/events` reformado com filtros e auto-refresh JS (`34769ac`, `23e17cd`, `1ffa7fc`)
+
+Contexto: Gabriel abriu o vippers e viu "Too Many Requests" — diagnóstico do
+dia provou que o 429 NÃO veio da VM (zero 429 nos eventos, zero request de
+`vippers-d` chegando, edge limpa em rajada de teste pelo mesmo IP público);
+foi na borda CF/WARP (tag do WARP de volta nos headers dele — mesma história
+do incidente de 24/10, agora bloqueando em vez de fazer loop). Efeito
+colateral do diagnóstico: o vigia disparou `recarga 10x/min` às 18:02 contra
+o PRÓPRIO painel dele aberto (meta-refresh de 5s = 12/min > limiar 8) —
+falso positivo permanente por design.
+
+Pedido dele em cima disso: suportar atualização de até 23x/min sem alerta,
+comando por projeto para o limite base, os outros limiares derivados do base,
+aplicar na hora sem reiniciar, e reformar a exibição dos logs do painel com
+JS liberado ("pode ter js sim"). Entregue em 3 commits, TRIO verde em cada
+(290 testes no fluxd):
+
+- **Vigia** (`34769ac`): default do limiar de recarga 8 → **24 recargas/min**
+  (comportamento DECLARADO: loop real de 15–24/min deixa de disparar a régua
+  de recarga; o caso WARP segue coberto pela dança de ws e pela borda de
+  120/min). Martelada e ws DERIVAM do base com PISO nos valores calibrados
+  dos incidentes (`max(180, base×7)` e `max(6, base÷4)`) — base pequeno herda
+  exatamente a régua de 24/10, derivar nunca afrouxa abaixo do piso. Régua
+  de recarga agrupa por **IP + HOST + caminho** (a `/` do painel e a `/` de
+  um projeto não são a mesma página — bug de precisão aproveitado e fechado).
+  Override por projeto em `settings` (`vigia_base|{projeto}`), lido A CADA
+  ciclo: vale em ≤60 s sem reiniciar o fluxd.
+- **API + CLI** (`23e17cd`): `GET /vigia` (default + overrides com limiares
+  derivados) e `POST /vigia {projeto, base|null}` (grava/remove com 404/422
+  com causa e RODA o ciclo do vigia NA HORA — o operador não espera o
+  sampler). `flux vigia status|set <projeto> <limite>|reset <projeto>`,
+  comando global como o gate; set/remove viram evento (auditável).
+- **Painel /events** (`1ffa7fc`): filtros por escopo (chips dos escopos
+  existentes), nível e busca na mensagem — tudo server-side com bindings e
+  página clamped ao total filtrado; access renderiza estruturado (método+
+  caminho, badge de status com cor por faixa — 429/5xx em vermelho —, duração
+  e host) com a mensagem CRU integral num `<details>`; linhas warn/error
+  destacadas; JS mínimo AUTORIZADO: a página refetcha a si mesma a cada 5 s e
+  troca só o corpo da tabela — pausável, aba oculta não refetch, falha de rede
+  visível no rótulo. `formato.rs` ganhou `parse_access`/`classe_status`/
+  `query_encode`/`query_decode` (busca com acento sobrevive à query string).
+
+Docs: `docs/cli.md` (Security tools + changelog), `docs/panel.md` (/events +
+contrato de JS), `docs/STATUS.md`. **PENDENTE: deploy do fluxd na VM** (o
+binário do dia a dia continua o de 24/10 — rebuild via `flux vm ssh` segue o
+procedimento de sempre, mv não cp). Gap notado sem mexer: `flux gate`
+(24/10) nunca entrou na tabela Security tools do `docs/cli.md`.
+
 ## 24/10 (parte 4) — VIGIA de anomalia no sampler: recarga em loop, martelada por IP e dança de ws disparam evento (`ea77d91`)
 
 Pedido do Gabriel depois do incidente fechado: "como melhorar o log pra

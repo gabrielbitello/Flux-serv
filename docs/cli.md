@@ -88,6 +88,9 @@ See [database.md](database.md).
 | Command | Status | Notes |
 |---|---|---|
 | `flux shield unban <ip>` | Not implemented yet | Unban IPs blocked by the WAF (pending phase). |
+| `flux vigia status` | **Live** | Anomaly watchdog thresholds: global default + per-project overrides with the derived limits (reload/hammer/ws). |
+| `flux vigia set <project> <limite>` | **Live** | Sets the reload threshold base (recargas/min, 1–600) for a project — pages that self-refresh up to 23×/min pass the 24/min default. Hammer and ws limits DERIVE from the base with floors at the incident-calibrated values. The POST also runs the watchdog cycle immediately — no fluxd restart. |
+| `flux vigia reset <project>` | **Live** | Removes the override (back to the global default). |
 
 ## Tools and misc
 
@@ -149,3 +152,4 @@ The full CLI design (and which phase owns each command):
 | 2026-10-14 | Initial English documentation |
 | 2026-10-22 | `flux mcp` → Live (stdio MCP server, 9 tools) + own-db read-only SQL endpoint `POST /projects/{name}/db/query`; zcode plugin under `plugins/flux/` |
 | 2026-10-22 (night) | MCP also served BY THE VM over HTTP (`:7430/mcp`, LAN-only, same token gate) — the AI connects by URL, no flux process on Windows; protocol/catalog single-sourced in `flux-common::mcp` |
+| 2026-10-26 | `flux vigia status\|set\|reset` → Live — per-project reload threshold for the anomaly watchdog (default raised 8→24/min to tolerate self-refreshing pages); `GET/POST /vigia` on the control API, POST runs the cycle immediately |

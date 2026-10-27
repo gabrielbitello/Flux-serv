@@ -31,13 +31,15 @@ Single user, **fail-closed** on every layer (`crates/fluxd/src/panel_auth.rs`):
 | `/` | Dashboard: projects with sleep state, hosts, and the live sync status; confirmations arrive as query flags (`/?rescan=1`). |
 | `/projects/{name}` | Project detail: containers, sleep/lease, migrations applied, and events mentioning the project. The sync state and the **Rescan** button live on the dashboard card, not here. |
 | `/projects/{name}/rescan` (POST) | Queues a full rescan of the project's sync session — `flux watch` consumes the queue and runs `flux sync reset`-style work. Post/redirect/get: success returns with `?rescan=1` ("rescan queued"); an error re-renders the page with the real message and a 503 — the panel never fakes success. Every outcome is written to the event trail. |
-| `/events` | Paginated event trail (auth refusals, deploys, rescan requests, errors) — the "nothing is silent" rule made visible. |
+| `/events` | Paginated event trail (auth refusals, deploys, rescan requests, errors) — the "nothing is silent" rule made visible. **26/10**: filters by scope (chips), level (info/warn/error) and free-text search on the message, all server-side; access lines render structured (method+path, colored status badge — 429/5xx red, duration, host) with the raw message one click away in a `<details>`; warn/error rows are highlighted. The page refetches itself every 5 s and swaps only the table body (pausable button; hidden tabs don't refetch; a network failure is shown on the label). |
 | `/observe` | 24-hour resource monitor: CPU/RAM curves (server-rendered SVG, zero JavaScript), filters from global → project → container, per-container mini-curves, and a **peaks table** where `<details>` opens the forensics snapshot — a JSON of the peaked container **and all its sibling containers at the same instant** (image + state), captured when CPU > 80% or memory > 85% of limit, anti-spam capped at one peak per container per 300 s. |
 
-Pages are generated server-side with no JavaScript requirement: filters are
-plain GET forms, meta-refresh handles auto-update, and empty data is stated
-honestly ("no data yet" / "no disk truth in this phase") — inventing a zero
-is treated as a bug (`crates/fluxd/src/panel.rs` header contract).
+Pages are generated server-side; JavaScript is minimal and deliberate
+(authorized by Gabriel on 26/10 — "pode ter js sim"): ONLY `/events` re-fetches
+itself to keep the trail live without a full page reload. Everything else
+stays JavaScript-free: filters are plain GET forms, meta-refresh handles the
+dashboard auto-update, and empty data is stated honestly ("no data yet" /
+"no disk truth in this phase") — inventing a zero is treated as a bug.
 
 ## Adminer
 
