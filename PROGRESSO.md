@@ -65,6 +65,35 @@ de não relincar binário em uso — o novo está em
 flux.toml do vippers editado (expose) SEM commit — repositório dele tem
 trabalho paralelo não-commitado de outra sessão.
 
+### 27/10 (tarde) — watch autostartado com regeneração, sessões órfãs limpas
+
+Pedido do Gabriel: arrumar as sessões fantasmas, fazer o watch autostartar E
+se regenerar, sem afetar o XYZCode; autorizou atualizar o flux. Feito:
+
+- **Sessões órfãs terminadas**: `flux-vipa` (alpha `vippers-afiliados-dev`
+  — pasta DELETADA, órfã dupla) e `flux-presente-digital` (pasta existe,
+  projeto desregistrado do fluxd). `mutagen sync terminate` — one-way
+  replica, repo Windows intocado; `flux up` na pasta recria se quiser.
+  Restaram 6 sessões, todas com projeto registrado — fim do 404 a cada tick.
+- **Autostart + regeneração** (padrão caseiro do Startup dele, zero
+  dependência nova, zero efeito no XYZCode): `tools\flux-watch.cmd` (loop
+  infinito: roda o watch, se cair espera 10 s e religa; log em
+  `%LOCALAPPDATA%\flux-watch.log` com teto de 5 MB) + `flux-watch.vbs` no
+  Startup (janela oculta, mesmo padrão dos vbs do caddy/coredns). O binário
+  do serviço é a CÓPIA em `~\.flux\bin\flux.exe` — descoberta do dia: o
+  `flux` do PATH dele é um shim (`bin\flux.cmd`) apontando DIRETO pro
+  `target\release` — o build de ontem já atualizou o "instalado" de graça,
+  mas watch rodando do target TRAVARIA builds futuros (cargo não substitui
+  .exe em execução); a cópia isola o serviço do build.
+- **Provas**: regeneração 2× (kill -9 → religa com 10,04 s medidos — o 1º
+  teste expôs que `timeout /t` ABORTA sem console interativo e viraria
+  spin; trocado por `ping -n 11`); watch medido: 8,2 MB residente, 0,1%
+  CPU + ~40 ms/tick do mutagen filho; `flux doctor vippers` 100% VERDE com
+  sync `sincronizando` (relato fresco) e log sem 404.
+- **Remendo no diagnóstico anterior**: o CLI do Gabriel nunca esteve
+  "velho por escolha" — o shim aponta pro target; a pendência acima morreu
+  junto (o PATH já serve a versão nova).
+
 ## 26/10 — Vigia configurável por projeto (base 24/min), falso positivo do painel morto, `/events` reformado com filtros e auto-refresh JS (`34769ac`, `23e17cd`, `1ffa7fc`)
 
 Contexto: Gabriel abriu o vippers e viu "Too Many Requests" — diagnóstico do
