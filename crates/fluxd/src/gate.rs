@@ -1000,11 +1000,11 @@ mod tests {
     async fn banido_recebe_403_ate_antes_de_validar_senha() {
         let app = app();
         definir_senha(state(&app), "certa").unwrap();
-        registrar_falha(state(&app), "203.0.113.9");
-        registrar_falha(state(&app), "203.0.113.9");
-        registrar_falha(state(&app), "203.0.113.9");
-        registrar_falha(state(&app), "203.0.113.9");
-        registrar_falha(state(&app), "203.0.113.9");
+        let _ = registrar_falha(state(&app), "203.0.113.9");
+        let _ = registrar_falha(state(&app), "203.0.113.9");
+        let _ = registrar_falha(state(&app), "203.0.113.9");
+        let _ = registrar_falha(state(&app), "203.0.113.9");
+        let _ = registrar_falha(state(&app), "203.0.113.9");
         let h = headers_host_ip("vipers-d.bitello.xyz", "203.0.113.9");
         let r = processar(
             State(Arc::clone(&app)),

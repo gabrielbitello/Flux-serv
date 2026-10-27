@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
@@ -89,6 +89,10 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         // Vigia (26/10): status do limiar e override por projeto — o POST
         // roda o ciclo do vigia na hora (o novo limite vale sem reiniciar).
         .route("/vigia", get(vigia_status).post(vigia_set))
+        // Doctor (27/10): validação read-only da fábrica por projeto — a
+        // lógica vive em doctor.rs (o CLI e a tool MCP `flux_doctor` falam
+        // com a mesma fonte). `?projeto=` foca um só.
+        .route("/doctor", get(doctor_status))
         // Fallback DENTRO do router protegido: rota de fase futura sem token é
         // 401 (503 sem hash), nunca 501 de graça — probe de superfície sem
         // credencial fica invisível, então o gate grava a recusa no `events`
@@ -1336,6 +1340,30 @@ async fn vigia_set(State(app): State<Arc<AppState>>, Json(b): Json<VigiaSetBody>
     Json(vigia_override_dto(projeto.to_owned(), base)).into_response()
 }
 
+// ------------------------------------------------------------------- doctor
+
+#[derive(Debug, Deserialize)]
+struct DoctorQuery {
+    projeto: Option<String>,
+}
+
+/// GET /doctor[?projeto=] — vereditos read-only da fábrica (doctor.rs).
+/// Handler fino de propósito: regra mora no módulo, endpoint só HTTP.
+async fn doctor_status(State(app): State<Arc<AppState>>, Query(q): Query<DoctorQuery>) -> Response {
+    match q.projeto.as_deref() {
+        None => match crate::doctor::checar_todos(&app).await {
+            Ok(r) => Json(r).into_response(),
+            Err(e) => erro(StatusCode::INTERNAL_SERVER_ERROR, e),
+        },
+        Some(nome) => {
+            if let Err(r) = garante_projeto(&app, nome) {
+                return *r;
+            }
+            Json(crate::doctor::checar_projeto(&app, nome).await).into_response()
+        }
+    }
+}
+
 async fn gate_status(State(app): State<Arc<AppState>>) -> Response {
     let cfg = crate::gate::turnstile_config(&app.state);
     let (confiancas, bans, tentativas) = app
@@ -1587,6 +1615,74 @@ mod tests {
         )
         .await;
         assert_eq!(s, 404, "projeto não registrado: {c}");
+    }
+
+    /// Doctor (27/10): veredito por projeto com verdade honesta SEM engine
+    /// (containers desconhecido-ok, sync sem-relato vermelho) e `?projeto=`
+    /// focando um só; fantasma é 404 com a causa. Sem token o gate recusa.
+    #[tokio::test]
+    async fn doctor_veredito_por_projeto_e_gate() {
+        let (base, _app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+        let (s, c) = registra(
+            &cli,
+            &base,
+            "vipa",
+            "name = \"vipa\"\nframework = \"laravel\"\n",
+        )
+        .await;
+        assert_eq!(s, 200, "{c}");
+
+        // Sem token: o gate gruda em rota nova igual nas antigas.
+        let (s, _) = req(&cli, &base, "GET", "/doctor", None, None).await;
+        assert_eq!(s, 401, "rota do doctor nasce atrás do gate");
+
+        // Todos: fluxd ok + um veredito por projeto.
+        let (s, c) = req(&cli, &base, "GET", "/doctor", Some("segredo"), None).await;
+        assert_eq!(s, 200, "{c}");
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(v["fluxd"]["ok"], serde_json::json!(true), "{c}");
+        let projetos = v["projetos"].as_array().unwrap();
+        assert_eq!(projetos.len(), 1);
+        assert_eq!(projetos[0]["projeto"], serde_json::json!("vipa"));
+        // Verdade sem engine: containers "desconhecido" (não é vermelho) e
+        // sync "sem-relato" (vermelho — watch é quem mantém a linha viva).
+        assert_eq!(
+            projetos[0]["containers"]["estado"],
+            serde_json::json!("desconhecido")
+        );
+        assert_eq!(
+            projetos[0]["sync"]["estado"],
+            serde_json::json!("sem-relato")
+        );
+
+        // Foco num projeto só: mesma verdade, sem o envelope de todos.
+        let (s, c) = req(
+            &cli,
+            &base,
+            "GET",
+            "/doctor?projeto=vipa",
+            Some("segredo"),
+            None,
+        )
+        .await;
+        assert_eq!(s, 200, "{c}");
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(v["projeto"], serde_json::json!("vipa"));
+        assert!(v.get("fluxd").is_none(), "foco não traz o envelope global");
+
+        // Fantasma: 404 com a causa do garante_projeto.
+        let (s, c) = req(
+            &cli,
+            &base,
+            "GET",
+            "/doctor?projeto=fantasma",
+            Some("segredo"),
+            None,
+        )
+        .await;
+        assert_eq!(s, 404, "{c}");
+        assert!(c.contains("não registrado"), "{c}");
     }
 
     type TestClient = hyper_util::client::legacy::Client<

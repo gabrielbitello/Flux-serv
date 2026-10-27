@@ -167,6 +167,14 @@ enum Cmd {
         #[command(subcommand)]
         cmd: VigiaCmd,
     },
+    /// Doctor (27/10): valida a fábrica — fluxd, containers, sync (visão do
+    /// fluxd + sessões locais), banco, assets e DNS dos hosts. Verde/vermelho
+    /// por item; exit 1 com qualquer vermelho. NUNCA acorda container.
+    /// Comando GLOBAL.
+    Doctor {
+        /// Foca um projeto só.
+        projeto: Option<String>,
+    },
     /// Escreve o workflow de deploy no projeto a partir do template (10).
     Init {
         /// Só `ci` na spec.
@@ -449,6 +457,7 @@ async fn main() {
         Cmd::Redroom { acao } => comandos::redroom::redroom(&acao).await,
         Cmd::Gate { cmd } => comandos::gate::gate(cmd).await,
         Cmd::Vigia { cmd } => comandos::vigia::vigia(cmd).await,
+        Cmd::Doctor { projeto } => comandos::doctor::doctor(projeto).await,
         Cmd::Db { cmd } => match cmd {
             DbCmd::Fresh {
                 yes,

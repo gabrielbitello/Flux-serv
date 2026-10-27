@@ -10,6 +10,7 @@ pub mod compose;
 pub mod decision;
 pub mod deploy;
 pub mod docker;
+pub mod doctor;
 pub mod edge;
 pub mod events;
 pub mod gate;

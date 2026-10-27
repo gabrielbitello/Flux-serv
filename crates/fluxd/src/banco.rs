@@ -841,14 +841,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn cfg(grupo: &str) -> BancoConfig {
-        BancoConfig {
-            grupo: grupo.to_owned(),
-            ttl_days: 7,
-            ttl_secs: 7 * 86_400,
-        }
-    }
-
     #[test]
     fn sql_e_leitura_aceita_consulta_unica_de_leitura() {
         for sql in [
