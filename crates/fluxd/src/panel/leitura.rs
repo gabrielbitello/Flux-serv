@@ -2,8 +2,8 @@
 //! sem desenho de HTML (apresentação é paginas.rs).
 
 use flux_common::protocol::{ContainerState, Env};
-use rusqlite::params;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 
 use crate::AppState;
 use crate::decision::HostSource as _;
