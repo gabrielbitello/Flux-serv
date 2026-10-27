@@ -1343,13 +1343,17 @@ async fn vigia_set(State(app): State<Arc<AppState>>, Json(b): Json<VigiaSetBody>
 // ------------------------------------------------------------------- doctor
 
 #[derive(Debug, Deserialize)]
-struct DoctorQuery {
-    projeto: Option<String>,
+pub(crate) struct DoctorQuery {
+    pub(crate) projeto: Option<String>,
 }
 
 /// GET /doctor[?projeto=] — vereditos read-only da fábrica (doctor.rs).
 /// Handler fino de propósito: regra mora no módulo, endpoint só HTTP.
-async fn doctor_status(State(app): State<Arc<AppState>>, Query(q): Query<DoctorQuery>) -> Response {
+/// `pub(crate)`: o dispatch MCP chama o mesmo handler (fonte única).
+pub(crate) async fn doctor_status(
+    State(app): State<Arc<AppState>>,
+    Query(q): Query<DoctorQuery>,
+) -> Response {
     match q.projeto.as_deref() {
         None => match crate::doctor::checar_todos(&app).await {
             Ok(r) => Json(r).into_response(),

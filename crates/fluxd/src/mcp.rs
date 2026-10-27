@@ -108,6 +108,16 @@ impl flux_common::mcp::Despachante for DespachanteFluxd {
                 let projeto = projeto_de(args)?;
                 corpo_json(api::db_status(State(app), Path(projeto)).await).await
             }
+            // Doctor (27/10): mesma fonte do GET /doctor — vereditos
+            // read-only; projeto ausente varre todos. Fantasma vira isError
+            // com a causa (corpo_json/corpo_texto curam o HTTP).
+            "flux_doctor" => {
+                let projeto = flux_common::mcp::arg_str(args, "projeto");
+                corpo_json(
+                    api::doctor_status(State(app), Query(api::DoctorQuery { projeto })).await,
+                )
+                .await
+            }
             "flux_logs" => logs(app, args).await,
             "flux_acordar" => acordar(app, args).await,
             "flux_db_query" => {
@@ -541,6 +551,47 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("whitelist"),
+            "{v}"
+        );
+    }
+
+    /// Doctor (27/10) sobre MCP: estado vazio responde verdade (envelope com
+    /// fluxd ok e lista de projetos vazia — NÃO é erro) e projeto fantasma é
+    /// isError com a causa do garante_projeto.
+    #[tokio::test]
+    async fn flux_doctor_varre_vazio_e_fantasma_e_iserror() {
+        let (base, _app) = servidor(Some("segredo")).await;
+        let cli = cliente();
+        let (s, c) = post(
+            &cli,
+            &base,
+            Some("segredo"),
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"flux_doctor","arguments":{}}}"#,
+        )
+        .await;
+        assert_eq!(s, 200, "{c}");
+        let v: Value = serde_json::from_str(&c).unwrap();
+        assert!(v["result"].get("isError").is_none(), "{v}");
+        let rel: Value =
+            serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(rel["fluxd"]["ok"], json!(true));
+        assert_eq!(rel["projetos"].as_array().unwrap().len(), 0);
+
+        let (s, c) = post(
+            &cli,
+            &base,
+            Some("segredo"),
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"flux_doctor","arguments":{"projeto":"fantasma"}}}"#,
+        )
+        .await;
+        assert_eq!(s, 200, "{c}");
+        let v: Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true));
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("não registrado"),
             "{v}"
         );
     }

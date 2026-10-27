@@ -67,6 +67,14 @@ pub fn catalogo() -> Vec<Value> {
             &[],
         ),
         ferramenta(
+            "flux_doctor",
+            "Validação da fábrica inteira em uma chamada: containers, sync (visão do fluxd), banco, assets buildados e hosts — verde/vermelho por item, NUNCA acorda container. Rode ANTES de depurar qualquer sintoma (não funciona, erro, 500, sync estranha). Sem `projeto`, varre todos os registrados. A resolução de DNS dos hosts é verdade do Windows: complete com `flux doctor` no CLI quando desconfiar do hosts file.",
+            json!({
+                "projeto": texto("Foca um projeto só; ausente = todos os registrados.")
+            }),
+            &[],
+        ),
+        ferramenta(
             "flux_logs",
             "Cauda dos logs do container (SEM follow). `tail` entre 1 e 1000 (padrão 200).",
             json!({
@@ -189,7 +197,7 @@ fn inicializar(params: &Value) -> Value {
             "name": "flux",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "instructions": "Ferramentas da plataforma Flux (dev/prod servers na VM 192.168.140.2). Diagnóstico: flux_status, flux_ps, flux_projetos, flux_sync_status, flux_db_status, flux_logs. Ações: flux_acordar (acorda dev), flux_tool (npm/composer/artisan na VM), flux_db_query (SQL read-only no banco próprio). Passe `projeto` explícito — o servidor não infere projeto pelo diretório."
+        "instructions": "Ferramentas da plataforma Flux (dev/prod servers na VM 192.168.140.2). Diagnóstico: flux_doctor (veredito verde/vermelho da fábrica inteira — rode primeiro quando algo não funciona), flux_status, flux_ps, flux_projetos, flux_sync_status, flux_db_status, flux_logs. Ações: flux_acordar (acorda dev), flux_tool (npm/composer/artisan na VM), flux_db_query (SQL read-only no banco próprio). Passe `projeto` explícito — o servidor não infere projeto pelo diretório."
     })
 }
 
@@ -387,7 +395,7 @@ mod tests {
             .await
             .unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert!(tools.len() >= 9, "catálogo MVP completo: {}", tools.len());
+        assert!(tools.len() >= 10, "catálogo MVP completo: {}", tools.len());
         for t in tools {
             assert!(t["name"].is_string(), "toda tool tem name: {t}");
             assert_eq!(t["inputSchema"]["type"], "object", "{t}");
