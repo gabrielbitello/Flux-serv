@@ -150,6 +150,8 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
     // 22/10: /bootstrap/cache/ e public/storage — runtime do app na VM
     // (cache gerado com DONO do container + uploads do disco público que
     // só existem na VM; o ignore PROTEGE a mídia de delete do one-way).
+    // 28/10: /.worktrees/ — worktree de agente (cópia completa do repo,
+    // .git aninhado) não cruza pra VM; temporário até o desenho de slots/Orca.
     assert_eq!(
         sync::GLOBAL_IGNORES,
         &[
@@ -162,6 +164,7 @@ fn ignores_globais_sao_verbatim_da_spec_02() {
             "/storage/",
             "/bootstrap/cache/",
             "public/storage",
+            "/.worktrees/",
         ]
     );
 }

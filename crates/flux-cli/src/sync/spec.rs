@@ -39,6 +39,11 @@ pub const VM_PROJECTS_ROOT: &str = "/srv/flux/projects";
 /// apagar e o problem fica eterno. ATENÇÃO: `public/storage` contém MÍDIA REAL
 /// enviada pro site — o ignore PROTEGE (sem ele o mutagen tentaria apagar do
 /// beta o que o alpha não tem); nunca "consertar" com chown+delete.
+/// 28/10 (pedido do Gabriel, TEMPORÁRIO — "por enquanto"): `/.worktrees/`
+/// entra. Worktrees de agente nascem na raiz do projeto e são cópias COMPLETAS
+/// do repo (`.git` aninhado incluído) — não cruzam pra VM enquanto não houver
+/// desenho pra elas (plano de slots/Orca). Revertível quando esse design
+/// amadurecer.
 pub const GLOBAL_IGNORES: &[&str] = &[
     ".env",
     ".env.*",
@@ -49,6 +54,7 @@ pub const GLOBAL_IGNORES: &[&str] = &[
     "/storage/",
     "/bootstrap/cache/",
     "public/storage",
+    "/.worktrees/",
 ];
 
 /// Endpoint beta (réplica). Na vida real é a VM via SSH; em dev/testes, um
