@@ -2,6 +2,30 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 28/10 — `/.worktrees/` fora da sync: GLOBAL_IGNORES + toml do vippers + réplica órfã isolada na VM (`890d2e0`)
+
+Contexto: o worktree de agente de hoje (`vipers/.worktrees/fix-here-loading`,
+cópia COMPLETA do repo com `.git` aninhado, 136 MB no Windows) cruzou pra VM
+pela sync — 140 MB em `/srv/flux/projects/vippers/.worktrees`. Pedido do
+Gabriel: por enquanto, worktree de agente não entra na VM (sem desenho de
+slots/Orca ainda).
+
+- **Código** (`890d2e0`): `/.worktrees/` no `GLOBAL_IGNORES` (`sync/spec.rs`),
+  ancorado na raiz (padrão dos dirs gerados — evita casar qualquer nível) e
+  doc comment marcando TEMPORÁRIO/revertível. Teste de caracterização
+  `ignores_globais_sao_verbatim_da_spec_02` atualizado junto. TRIO verde.
+- **Sessão viva**: ignore mutagen só vale em sessão recriada — `extra_ignore`
+  no `flux.toml` do vippers já vale no CLI instalado (velho), sem depender de
+  flux.exe novo; quando o binário atualizar, o `ignores()` deduplica e o
+  extra vira no-op. `flux sync reset` recriou `flux-vippers` e convergiu sem
+  pendências (ignore confirmado no `mutagen sync list -l`).
+- **Réplica órfã**: ignore novo não apaga o que já foi — `mv` de
+  `/srv/flux/projects/vippers/.worktrees` pra `/tmp/vippers-worktrees-orfa-2810`
+  (reversível, nada apagado); 20 s depois não voltou, sessão ok. Fonte no
+  Windows intacta.
+- **Pendência herdada**: o ignore global vale pra sessões novas de QUALQUER
+  projeto só quando o flux.exe instalado atualizar (continua velho).
+
 ## 27/10 — Doctor (fábrica inteira em 10 s), tool MCP `flux_doctor`, gatilho "doctor primeiro" na skill e PHPUnit FORA da VM com o banco da VM (`7c19ba8`, `00932e0`, `82c9926`, `565356f`)
 
 Contexto: Gabriel pediu três coisas — um `flux doctor` que valida a fábrica
