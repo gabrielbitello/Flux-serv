@@ -175,6 +175,36 @@ enum Cmd {
         /// Foca um projeto só.
         projeto: Option<String>,
     },
+    /// Doorman (31/10): espião HTTP local — imprime no terminal, em tempo
+    /// real, cada request completa que entra e repassa ao host de destino
+    /// (Host público preservado). Nada é gravado; Ctrl+C encerra. Só HTTP
+    /// puro; o CLIENTE precisa apontar pro doorman (banner manda o comando).
+    /// Comando GLOBAL.
+    Doorman {
+        /// Host público de destino (ex.: zcode-api-d.bitello.xyz).
+        host: String,
+        /// Porta do destino.
+        #[arg(long, default_value_t = 80)]
+        porta: u16,
+        /// Porta local de escuta (127.0.0.1).
+        #[arg(long, default_value_t = 7440)]
+        ouvir: u16,
+        /// Mostra também as respostas (SSE flui vivo).
+        #[arg(long)]
+        respostas: bool,
+        /// Mostra SÓ as respostas (esconde as entradas).
+        #[arg(long, conflicts_with = "respostas")]
+        so_respostas: bool,
+        /// Sem formatação de JSON — imprime tudo cru.
+        #[arg(long)]
+        cru: bool,
+        /// Encerra após N entradas registradas.
+        #[arg(long = "n")]
+        n: Option<u64>,
+        /// Encerra após a duração (30s | 10m | 1h).
+        #[arg(long)]
+        janela: Option<String>,
+    },
     /// Escreve o workflow de deploy no projeto a partir do template (10).
     Init {
         /// Só `ci` na spec.
@@ -458,6 +488,28 @@ async fn main() {
         Cmd::Gate { cmd } => comandos::gate::gate(cmd).await,
         Cmd::Vigia { cmd } => comandos::vigia::vigia(cmd).await,
         Cmd::Doctor { projeto } => comandos::doctor::doctor(projeto).await,
+        Cmd::Doorman {
+            host,
+            porta,
+            ouvir,
+            respostas,
+            so_respostas,
+            cru,
+            n,
+            janela,
+        } => {
+            comandos::doorman::doorman(comandos::doorman::Opcoes {
+                host,
+                porta,
+                ouvir,
+                respostas,
+                so_respostas,
+                cru,
+                n,
+                janela,
+            })
+            .await
+        }
         Cmd::Db { cmd } => match cmd {
             DbCmd::Fresh {
                 yes,

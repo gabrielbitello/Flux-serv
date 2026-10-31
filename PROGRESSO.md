@@ -2,6 +2,15 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 31/10 — Doorman: `flux doorman <host>` imprime a request COMPLETA em tempo real, no terminal, sem gravar nada (`WIP → commit`)
+
+- **Pedido do Gabriel**: o access do painel só mostra metadado (`events.rs:94` — o corpo NUNCA é lido pelo fluxd, o gate repassa em stream); ele queria ver tudo que vai pro zcode-api. Modelo escolhido: TAP NO CAMINHO, não log em disco.
+- **Mecanismo**: ouve em `127.0.0.1` (`--ouvir`, 7440), imprime cada request (headers com authorization/x-api-key/cookie redigidos + corpo inteiro, JSON bonito quando parseia) e repassa com o HOST PÚBLICO preservado na autoridade da URI (diferente do proxy do fluxd, que aponta pro container) — Caddy roteia, gate do dev e gate Bearer seguem intactos. Flags: `--respostas` (SSE flui VIVO pedaço a pedaço), `--so-respostas`, `--cru`, `--n N`, `--janela 30s|10m|1h`. Ctrl+C encerra; nada em disco na VM nem no PC. O cliente aponta pra ele (`ANTHROPIC_BASE_URL=http://127.0.0.1:7440 opencode`).
+- **Estrutura**: `comandos/doorman/{mod,registro}.rs` — formatação PURA separada (padrão panel/), 10 testes novos. Deps novas JUSTIFICADAS: `http-body` (corpo tee via `poll_recv` do canal, sem tokio-stream) e `chrono` (hora local; std não tem, painel resolve via SQLite). Workspace ganhou `hyper/server` (axum unificava pros outros; dev-dep não unifica no binário — descoberto no build).
+- **PROVADO em runtime**: upstream dummy (POST JSON ecoado + SSE de 3 pedaços — request pretty, resposta bufferizada, SSE ao vivo) E zcode-api REAL via Caddy (`/health` 200 com Bearer — Host público atravessando o gate). `--n` para o accept com graça de 10 s nos fluxos abertos.
+- **Limitações declaradas (v1)**: HTTP puro só (HTTPS pede MITM TLS); corpo de request bufferizado inteiro; sem ws/upgrade; sem pool de upstream. Corpos NÃO são redigidos de propósito (é a razão de ser do comando) — headers sensíveis sim.
+- TRIO verde no WORKSPACE inteiro (463 testes) — fecha o WIP que a sessão do `/events` contornou com escopo `-p fluxd`.
+
 ## 31/10 — `/events`: detalhe expandido fechava sozinho — auto-refresh comia o `<details>` aberto (`377fada`)
 
 - **Causa**: o swap do `innerHTML` do `<tbody>` a cada 5 s (26/10) recriava todas as

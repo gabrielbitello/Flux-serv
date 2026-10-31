@@ -5,6 +5,7 @@ pub(crate) mod build;
 pub(crate) mod ciclo;
 pub(crate) mod db;
 pub(crate) mod doctor;
+pub(crate) mod doorman;
 pub(crate) mod env_cmd;
 pub(crate) mod gate;
 pub(crate) mod live;

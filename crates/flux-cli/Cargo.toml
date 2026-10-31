@@ -11,7 +11,11 @@ path = "src/main.rs"
 [dependencies]
 flux-common = { workspace = true }
 clap = { workspace = true }
+# Doorman (31/10): http-body direto pro corpo tee (repassa e imprime ao
+# mesmo tempo); chrono é o timestamp local do registro.
+http-body = { workspace = true }
 http-body-util = { workspace = true }
+chrono = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 serde = { workspace = true }
