@@ -694,6 +694,10 @@ pub(super) fn render_eventos(app: &AppState, query: Option<&str>) -> String {
     // Gabriel): refetch da própria URL a cada 5 s e troca só o corpo da
     // tabela + o cabeçalho de contagem. Pausável; aba oculta não refetch;
     // falha de rede fica visível no rótulo (nada engolido).
+    // Detalhe `<details>` aberto congela a troca (31/10 — evento expandido
+    // não pode fechar sozinho nem deslizar com eventos novos; a leitura
+    // retoma no ciclo seguinte ao fechar). Checa no fetch E na chegada da
+    // resposta, que pode voltar depois de um clique.
     body.push_str(
         r#"<div class="atualiza"><button id="btn-pausa" type="button">⏸ pausar</button>\
 <span id="st-atualiza" class="muted">atualiza a cada 5 s</span></div>
@@ -707,11 +711,22 @@ pub(super) fn render_eventos(app: &AppState, query: Option<&str>) -> String {
     btn.textContent = vivo ? '⏸ pausar' : '▶ retomar';
     st.textContent = vivo ? 'atualiza a cada 5 s' : 'atualização pausada';
   });
+  function detalheAberto() {
+    return document.querySelector('#corpo-eventos details[open]');
+  }
   setInterval(function () {
     if (!vivo || document.hidden) return;
+    if (detalheAberto()) {
+      st.textContent = 'pausado com detalhe aberto — fecha para retomar';
+      return;
+    }
     fetch(location.href).then(function (r) { return r.ok ? r.text() : null; })
       .then(function (txt) {
         if (!txt) return;
+        if (detalheAberto()) {
+          st.textContent = 'pausado com detalhe aberto — fecha para retomar';
+          return;
+        }
         var novo = new DOMParser().parseFromString(txt, 'text/html');
         var corpo = novo.getElementById('corpo-eventos');
         var cab = novo.getElementById('cabecalho-eventos');
