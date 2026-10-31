@@ -2,6 +2,24 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 31/10 — `/events`: detalhe expandido fechava sozinho — auto-refresh comia o `<details>` aberto (`377fada`)
+
+- **Causa**: o swap do `innerHTML` do `<tbody>` a cada 5 s (26/10) recriava todas as
+  linhas — qualquer `<details class="cru">` aberto morria em ≤ 5 s. Sintoma relatado
+  pelo Gabriel: "expando um evento e ele fica fechando sozinho".
+- **Correção** (JS-only, mesma autorização de JS mínimo de 26/10): ciclo com
+  `details[open]` no corpo da tabela pula fetch E troca, com rótulo visível
+  ("pausado com detalhe aberto — fecha para retomar"); a checagem roda também na
+  chegada da resposta (clicou durante fetch em voo = troca não acontece). A leitura
+  congela em vez de reabrir com linhas deslizando; retoma no ciclo seguinte ao fechar.
+- **TRIO verde com escopo `-p fluxd`**: o workspace INTEIRO está vermelho no fmt pelo
+  WIP `doorman/` de outra sessão (não formatar trabalho alheio). Testes do painel
+  continuam verdes.
+- **NÃO deployado**: fluxd na VM exige rebuild + `mv` (reinicia o daemon) e outra
+  sessão está monitorando eventos — deploy aguarda janela livre, ok do Gabriel.
+  Anotação: STATUS 26/10 dizia a reforma do /events "NOT deployed", mas o sintoma
+  novo já está ao vivo — houve deploy posterior sem anotação no STATUS.
+
 ## 28/10 — `/.worktrees/` fora da sync: GLOBAL_IGNORES + toml do vippers + réplica órfã isolada na VM (`890d2e0`)
 
 Contexto: o worktree de agente de hoje (`vipers/.worktrees/fix-here-loading`,
