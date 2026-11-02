@@ -79,20 +79,24 @@ pub(super) fn projetos(app: &AppState) -> Result<Vec<(String, String)>, String> 
 }
 
 pub(super) struct EventoRow {
+    pub(super) id: i64,
     pub(super) level: String,
     pub(super) scope: String,
     pub(super) message: String,
     pub(super) created_at: String,
 }
 
-const COLUNAS_EVENTO: &str = "level, scope, message, created_at";
+/// O `id` é a chave estável do evento: a API pública e o append do /events
+/// novo usam pra preservar posição/dedupe entre fetches.
+pub(super) const COLUNAS_EVENTO: &str = "id, level, scope, message, created_at";
 
 pub(super) fn row_evento(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventoRow> {
     Ok(EventoRow {
-        level: r.get(0)?,
-        scope: r.get(1)?,
-        message: r.get(2)?,
-        created_at: r.get(3)?,
+        id: r.get(0)?,
+        level: r.get(1)?,
+        scope: r.get(2)?,
+        message: r.get(3)?,
+        created_at: r.get(4)?,
     })
 }
 

@@ -979,3 +979,233 @@ async fn assets_fonte_publica_e_404_para_nome_desconhecido() {
     .await;
     assert_eq!(s2, StatusCode::NOT_FOUND);
 }
+
+// ------------------------------------------------------------------ api pública
+
+const TOKEN_LEITURA: &str = "token-de-leitura-de-teste";
+
+/// Grava o hash do token de leitura nos settings (o que o `flux token
+/// eventos` vai fazer de verdade na fatia de geração).
+fn gravar_token_leitura(app: &Arc<AppState>) {
+    app.state
+        .with(|c| {
+            c.execute(
+                "INSERT INTO settings(k, v) VALUES ('eventos_token_hash', ?1)
+                 ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                [crate::api::auth::sha256_hex(TOKEN_LEITURA.as_bytes())],
+            )
+        })
+        .unwrap();
+}
+
+/// GET na API pública com headers extras (auth/origin/cf-connecting-ip).
+/// Respostas são JSON — utf8 seguro.
+async fn pedir_api(
+    app: &Arc<AppState>,
+    router: Router,
+    uri: &str,
+    cookie: Option<&str>,
+    extra: &[(&str, String)],
+) -> (StatusCode, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url: hyper::Uri = format!("http://{addr}{uri}").parse().unwrap();
+    let mut builder = axum::http::Request::builder()
+        .method("GET")
+        .uri(url)
+        .header(header::HOST, "flux.bitello.xyz");
+    if let Some(c) = cookie {
+        builder = builder.header(header::COOKIE, c);
+    }
+    for (k, v) in extra {
+        builder = builder.header(*k, v.clone());
+    }
+    let resp = app
+        .http
+        .request(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    (status, body)
+}
+
+async fn cookie_de_sessao(app: &Arc<AppState>, router: &Router) -> String {
+    let (_, headers, _) = pedir(
+        app,
+        router.clone(),
+        "POST",
+        "/login",
+        None,
+        Some(format!("password={SENHA_DE_TESTE}")),
+    )
+    .await;
+    let cru = headers
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .expect("login de teste tem que devolver Set-Cookie")
+        .to_owned();
+    cru.split(';').next().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn api_eventos_lan_com_token_retorna_json_com_id() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    crate::events::event(&app.state, "info", "teste", "evento-x-api-42");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, body) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        None,
+        &[
+            ("x-forwarded-for", "192.168.140.50".into()),
+            ("authorization", format!("Bearer {TOKEN_LEITURA}")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"total\""), "contagem no JSON: {body}");
+    assert!(body.contains("\"paginas\""), "paginação no JSON: {body}");
+    assert!(body.contains("\"id\":"), "id estável no JSON: {body}");
+    assert!(body.contains("evento-x-api-42"), "{body}");
+}
+
+#[tokio::test]
+async fn api_eventos_sem_credencial_401() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, body) = pedir_api(&app, router, "/api/events", None, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body.contains("error"), "{body}");
+}
+
+#[tokio::test]
+async fn api_eventos_token_sem_hash_503_e_hash_divergente_401() {
+    let app = app_sem_docker();
+    // Fail-closed: token enviado mas NADA configurado = 503 (postura da :7420).
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (s1, _) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        None,
+        &[
+            ("x-forwarded-for", "192.168.140.50".into()),
+            ("authorization", "Bearer qualquer".into()),
+        ],
+    )
+    .await;
+    assert_eq!(s1, StatusCode::SERVICE_UNAVAILABLE);
+    // Configurado, token errado = 401.
+    gravar_token_leitura(&app);
+    let (router2, _dir2) = painel_com_auth(&app).await;
+    let (s2, _) = pedir_api(
+        &app,
+        router2,
+        "/api/events",
+        None,
+        &[
+            ("x-forwarded-for", "192.168.140.50".into()),
+            ("authorization", "Bearer errado".into()),
+        ],
+    )
+    .await;
+    assert_eq!(s2, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_eventos_token_valido_de_fora_da_lan_403() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, body) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        None,
+        &[
+            ("cf-connecting-ip", "203.0.113.9".into()),
+            ("authorization", format!("Bearer {TOKEN_LEITURA}")),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "token NÃO vale fora da LAN: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_eventos_sessao_de_fora_exige_origem_do_painel() {
+    let app = app_sem_docker();
+    crate::events::event(&app.state, "info", "teste", "msg-sessao-7");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    // Curl direto de fora com o cookie, SEM Origin/Referer = 403 (Here Maps).
+    let (s1, _) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/events",
+        Some(&cookie),
+        &[("cf-connecting-ip", "203.0.113.9".into())],
+    )
+    .await;
+    assert_eq!(s1, StatusCode::FORBIDDEN);
+    // A página do painel chamando (Origin do próprio host) = 200.
+    let (s2, body) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/events",
+        Some(&cookie),
+        &[
+            ("cf-connecting-ip", "203.0.113.9".into()),
+            ("origin", "https://flux.bitello.xyz".into()),
+        ],
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK, "{body}");
+    assert!(body.contains("msg-sessao-7"), "{body}");
+    // Origem de terceiro (Referer) = 403.
+    let (s3, _) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        Some(&cookie),
+        &[
+            ("cf-connecting-ip", "203.0.113.9".into()),
+            ("referer", "https://evil.example/x".into()),
+        ],
+    )
+    .await;
+    assert_eq!(s3, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn api_eventos_sessao_na_lan_sem_origem_passa() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (status, _) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.77".into())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

@@ -34,6 +34,7 @@ use axum::routing::{get, post};
 use crate::observe_page;
 use crate::panel_auth;
 
+mod api_publica;
 mod assets;
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
@@ -88,6 +89,9 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
         // a página de login também carrega o estilo.
         .route("/assets/estilo.css", get(assets::estilo))
         .route("/assets/fontes/{arquivo}", get(assets::fonte))
+        // API pública de leitura (escopo 31/10): auth própria (token LAN /
+        // sessão+origem), fora do guard de sessão.
+        .merge(api_publica::router(&st))
         .merge(protegido)
         .with_state(st)
 }

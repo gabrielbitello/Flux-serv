@@ -519,7 +519,7 @@ pub(super) fn render_detalhe(app: &AppState, name: &str) -> String {
     ));
     match app.state.with(|c| {
         let mut stmt = c.prepare(
-            "SELECT level, scope, message, created_at FROM events
+            "SELECT id, level, scope, message, created_at FROM events
              WHERE message LIKE '%' || ?1 || '%' ESCAPE '\\'
              ORDER BY id DESC LIMIT 20",
         )?;
