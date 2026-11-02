@@ -41,8 +41,23 @@ em fatias, TRIO verde escopado `-p fluxd` por fatia:
 Invariantes novos: painel.js NUNCA injeta HTML de dado do servidor (teste
 garante); 1 SSE por página; contratos espelhados JS↔Rust referenciados
 (linha_access, classe_status, dot); registro de ações é global entre testes
-paralelos (nomes exclusivos). RESTAM: fatia 7 (observe + Chart.js), fatia 9
-(schema v7 host + vigia na UI). DEPLOY SÓ SOB ORDEM DO GABRIEL.
+paralelos (nomes exclusivos). - **7** /observe em Chart.js 4.4.7 vendido: séries JSON (mesmas consultas
+  do SVG), zoom 1h/6h/24h, picos marcados na curva, cores do style guide;
+  observe_page.rs (1265 l.) DELETADO — observe.rs (dados) intacto
+  (`4d97773`).
+- **9a** SCHEMA v7 `events.host` + filtro host/ambiente (dev = `-d.`/
+  `vite-*`; interno sai dos dois; ambiente inválido = nunca casa) + chips
+  dev/prod e select de host no /events (`3dbefbc`).
+- **9b** limiares do vigia na UI: GET/POST /api/vigia/limiares (derivados
+  com a MESMA fórmula), card Vigia editável, vale ≤60 s (`4203764`).
+- **docs** panel.md reescrito (arquitetura shell+API, auth 3 camadas,
+  login endurecido, ações), cli.md (token eventos), STATUS + PROGRESSO
+  (`b3c381c`).
+
+FORNADA COMPLETA (13 fatias + docs). Pendências dela: deploy (SÓ SOB
+ORDEM DO GABRIEL), testar no browser pós-deploy, '/observe' pinado como
+"FICA ÚNICO" no plano — DELETADO por escopo explícito (todas as páginas
+viram API+SSE); anotar no execution-plan se ele ainda for referência.
 
 ## 31/10 — Doorman: `flux doorman <host>` imprime a request COMPLETA em tempo real, no terminal, sem gravar nada (`WIP → commit`)
 
