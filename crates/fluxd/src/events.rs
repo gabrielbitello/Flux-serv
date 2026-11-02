@@ -1,9 +1,38 @@
 //! Escrita de eventos no SQLite (07): log de acesso estruturado (host, método,
 //! caminho, status, duração, origem — sem corpo) + trilha geral para o painel
 //! (08). Falha ao gravar é logada em nível erro, nunca engolida.
+//!
+//! Broadcast (fatia 2 do painel API+SSE, 02/11): TODO evento gravado vira
+//! `EventoNovo` no canal — é o que alimenta o SSE `/api/events/follow` do
+//! painel novo. Canal global com buffer: sem ouvinte o `send` é no-op, os
+//! eventos custam o INSERT de sempre.
+
+use std::sync::LazyLock;
+
+use tokio::sync::broadcast;
 
 use crate::state::State;
 use axum::http::{HeaderMap, header};
+
+/// Um evento acabou de entrar na tabela — payload do stream do painel.
+#[derive(Clone, Debug)]
+pub struct EventoNovo {
+    pub id: i64,
+    pub level: String,
+    pub scope: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+static CANAL: LazyLock<broadcast::Sender<EventoNovo>> =
+    LazyLock::new(|| broadcast::channel(1024).0);
+
+/// Assina o stream de eventos novos. Assinar ANTES de consultar o banco
+/// (backlog) minimiza janela de corrida; duplicata residual é inofensiva —
+/// o consumidor dedupe por `id`.
+pub(crate) fn assinar() -> broadcast::Receiver<EventoNovo> {
+    CANAL.subscribe()
+}
 
 /// Origem do request (24/10, pedido do Gabriel — todo request de fora 100%
 /// auditável): `xff` e `user_agent` crus em TODO access; `headers` é o dump
@@ -128,14 +157,34 @@ pub fn event(st: &State, level: &str, scope: &str, message: &str) {
 }
 
 pub fn event_com_ip(st: &State, level: &str, scope: &str, message: &str, ip: &str) {
-    let r = st.with(|c| {
+    // INSERT + leitura da linha numa única passagem no mesmo lock: o
+    // `created_at` do broadcast é a VERDADE do banco (default do schema),
+    // não relógio do Rust — e o id volta de graça pro canal.
+    let gravado = st.with(|c| {
         c.execute(
             "INSERT INTO events(level, scope, message, ip) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![level, scope, message, ip],
+        )?;
+        c.query_row(
+            "SELECT id, level, scope, message, created_at FROM events WHERE id = ?1",
+            rusqlite::params![c.last_insert_rowid()],
+            |r| {
+                Ok(EventoNovo {
+                    id: r.get(0)?,
+                    level: r.get(1)?,
+                    scope: r.get(2)?,
+                    message: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            },
         )
     });
-    if let Err(e) = r {
-        tracing::error!("falha ao gravar evento no estado ({scope}): {e}");
+    match gravado {
+        Ok(ev) => {
+            // Sem ouvinte = Err e nada acontece: o canal não tem custo.
+            let _ = CANAL.send(ev);
+        }
+        Err(e) => tracing::error!("falha ao gravar evento no estado ({scope}): {e}"),
     }
 }
 
@@ -228,5 +277,41 @@ mod tests {
         ] {
             assert!(linha.contains(pedaco), "linha sem `{pedaco}`: {linha}");
         }
+    }
+}
+
+#[cfg(test)]
+mod broadcast_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Fatia 2: TODO evento gravado vira broadcast com a VERDADE do banco
+    /// (id do last_insert_rowid + created_at do default do schema).
+    #[tokio::test]
+    async fn evento_gravado_vira_broadcast_com_id_e_verdade_do_banco() {
+        let st = crate::state::State::in_memory().unwrap();
+        let mut rx = assinar();
+        event(&st, "warn", "teste-bc", "mensagem-broadcast-1");
+        let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("evento chega no canal")
+            .expect("canal aberto");
+        assert!(ev.id > 0, "id do INSERT: {:?}", ev);
+        assert_eq!(ev.scope, "teste-bc");
+        assert_eq!(ev.message, "mensagem-broadcast-1");
+        assert_eq!(ev.level, "warn");
+        assert!(!ev.created_at.is_empty(), "created_at vem do banco");
+    }
+
+    /// Sem ouvinte não explode nem custa: send devolve Err e o evento segue
+    /// gravado (o caso de TODO request de access quando ninguém escuta).
+    #[tokio::test]
+    async fn sem_ouvinte_evento_segue_gravado() {
+        let st = crate::state::State::in_memory().unwrap();
+        event(&st, "info", "teste-bc", "ninguem-escuta");
+        let total: i64 = st
+            .with(|c| c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(total, 1);
     }
 }

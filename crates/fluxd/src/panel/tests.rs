@@ -1241,3 +1241,98 @@ async fn token_leitura_auto_gera_so_uma_vez() {
         "boot seguinte não regenera"
     );
 }
+
+/// Lê frames do stream SSE até achar `alvo` (ou esgotar tentativas) — o
+/// stream é infinito, o teste corta quando viu o que precisa.
+async fn ler_ate(body: &mut hyper::body::Incoming, alvo: &str, max_frames: usize) -> String {
+    let mut visto = String::new();
+    for _ in 0..max_frames {
+        if visto.contains(alvo) {
+            break;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            http_body_util::BodyExt::frame(body),
+        )
+        .await
+        {
+            Ok(Some(Ok(frame))) => {
+                if let Some(d) = frame.data_ref() {
+                    visto.push_str(&String::from_utf8_lossy(d));
+                }
+            }
+            _ => break,
+        }
+    }
+    visto
+}
+
+async fn abrir_sse(
+    app: &Arc<AppState>,
+    router: Router,
+    uri: &str,
+) -> (StatusCode, String, hyper::body::Incoming) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url: hyper::Uri = format!("http://{addr}{uri}").parse().unwrap();
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(url)
+        .header(header::HOST, "flux.bitello.xyz")
+        .header(header::COOKIE, "irrelevante: auth é por Bearer aqui")
+        .header("x-forwarded-for", "192.168.140.50")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN_LEITURA}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.http.request(req).await.unwrap();
+    let ctype = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    (resp.status(), ctype, resp.into_body())
+}
+
+/// SSE (fatia 2): backlog (id > desde, MESMO filtro, ordem cronológica)
+/// chega no arranque; evento gravado DEPOIS da abertura chega ao vivo.
+#[tokio::test]
+async fn sse_eventos_follow_backlog_e_ao_vivo() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    crate::events::event(&app.state, "info", "teste", "sse-backlog-9");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, ctype, mut body) = abrir_sse(&app, router, "/api/events/follow?desde=0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ctype.starts_with("text/event-stream"), "{ctype}");
+    let backlog = ler_ate(&mut body, "sse-backlog-9", 10).await;
+    assert!(backlog.contains("sse-backlog-9"), "backlog: {backlog}");
+    assert!(backlog.contains("\"id\":"), "JSON no data: {backlog}");
+    // Ao vivo: gravar depois da abertura chega pelo broadcast.
+    crate::events::event(&app.state, "warn", "teste", "sse-vivo-77");
+    let vivo = ler_ate(&mut body, "sse-vivo-77", 10).await;
+    assert!(vivo.contains("sse-vivo-77"), "ao vivo: {vivo}");
+}
+
+/// Filtro do SSE: ?nivel=warn deixa o info de fora (backlog), o warn entra.
+#[tokio::test]
+async fn sse_eventos_follow_respeita_filtro() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    crate::events::event(&app.state, "info", "teste", "sse-info-fora-1");
+    crate::events::event(&app.state, "warn", "teste", "sse-warn-dentro-2");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, _, mut body) =
+        abrir_sse(&app, router, "/api/events/follow?desde=0&nivel=warn").await;
+    assert_eq!(status, StatusCode::OK);
+    let frames = ler_ate(&mut body, "sse-warn-dentro-2", 10).await;
+    assert!(frames.contains("sse-warn-dentro-2"), "{frames}");
+    assert!(
+        !frames.contains("sse-info-fora-1"),
+        "info NÃO passa no filtro warn: {frames}"
+    );
+}

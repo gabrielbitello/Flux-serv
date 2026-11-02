@@ -286,6 +286,29 @@ pub(super) fn eventos_filtrados(
     Ok((page, rows, total))
 }
 
+/// Eventos com id > `desde` (backlog do SSE `/api/events/follow`), MESMO
+/// filtro, ordem CRONOLÓGICA — o stream corre ASC; a página é DESC porque
+/// mostra o recente primeiro.
+pub(super) fn eventos_desde(
+    app: &AppState,
+    desde: i64,
+    f: &FiltroEventos,
+) -> Result<Vec<EventoRow>, String> {
+    let (onde, vals) = clausula_filtro(f);
+    let mut binds = vals;
+    binds.push(Value::from(desde));
+    app.state
+        .with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {COLUNAS_EVENTO} FROM events WHERE {onde} AND id > ?{} ORDER BY id ASC",
+                binds.len()
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), row_evento)?;
+            rows.collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// Escopos existentes na trilha — os chips do filtro nunca inventam opção.
 pub(super) fn escopos_distintos(app: &AppState) -> Result<Vec<String>, String> {
     app.state

@@ -11,10 +11,15 @@
 //! IP chega externo — máquina da LAN usa hosts file apontando direto pra
 //! VM (padrão zcode-api-d), e é esse o desenho, não um bug.
 
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::{ConnectInfo, RawQuery, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -40,6 +45,7 @@ const TOKEN_KEY: &str = "eventos_token_hash";
 pub(super) fn router(st: &PanelState) -> Router<PanelState> {
     Router::new()
         .route("/api/events", get(eventos))
+        .route("/api/events/follow", get(eventos_follow))
         .route_layer(middleware::from_fn_with_state(st.clone(), auth_publica))
 }
 
@@ -238,6 +244,164 @@ async fn eventos(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Respons
 
 fn erro_json(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+// ------------------------------------------------------------------ sse
+
+/// `: ping` a cada 15 s — CF e navegador não cortam conexão SSE ociosa.
+const PING_CADA: Duration = Duration::from_secs(15);
+
+/// Frame SSE de um evento: JSON na linha `data` (o cliente faz parse e
+/// appenda — o `id` é a chave de dedupe/posição).
+fn frame_de(id: i64, created_at: &str, level: &str, scope: &str, message: &str) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": id,
+            "created_at": created_at,
+            "level": level,
+            "scope": scope,
+            "message": message,
+        })
+    )
+}
+
+/// Espelho EM MEMÓRIA do `clausula_filtro` (SQL) para o que chega AO VIVO
+/// pelo broadcast. O backlog e o re-sync passam pelo SQL real — aqui é só
+/// o espelho: escopo/nível por igualdade, busca por substring insensível a
+/// caixa (≈ o LIKE do SQLite, ASCII-insensitive).
+fn casa_filtro(f: &leitura::FiltroEventos, ev: &crate::events::EventoNovo) -> bool {
+    if let Some(s) = &f.scope
+        && ev.scope != *s
+    {
+        return false;
+    }
+    if let Some(n) = &f.nivel
+        && ev.level != *n
+    {
+        return false;
+    }
+    if let Some(q) = &f.busca
+        && !ev.message.to_lowercase().contains(&q.to_lowercase())
+    {
+        return false;
+    }
+    true
+}
+
+/// `GET /api/events/follow?escopo=&nivel=&q=&desde=<id>` — SSE dos eventos
+/// novos (mesmos filtros da lista). Ordem de arranque: ASSINA o broadcast
+/// e SÓ DEPOIS consulta o backlog (id > `desde`, ordem cronológica) — a
+/// janela de corrida vira no máximo uma duplicata, que o cliente mata por
+/// `id`. `: ping` a cada 15 s. Cliente lento demais (Lagged do broadcast):
+/// re-sync do BANCO pelo último id enviado — buraco no stream é falha
+/// silenciosa, e aqui falha silenciosa é proibido.
+async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Response {
+    let filtro = leitura::filtro_de(q.as_deref());
+    let desde = q
+        .as_deref()
+        .and_then(|s| s.split('&').find_map(|kv| kv.strip_prefix("desde=")))
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    let rx = crate::events::assinar();
+    let backlog = match leitura::eventos_desde(&st.app, desde, &filtro) {
+        Ok(b) => b,
+        Err(e) => {
+            return erro_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("falha no backlog do stream: {e}"),
+            );
+        }
+    };
+    let ultimo = backlog.last().map(|ev| ev.id).unwrap_or(desde);
+    let fila: VecDeque<Result<String, Infallible>> = backlog
+        .iter()
+        .map(|ev| {
+            Ok(frame_de(
+                ev.id,
+                &ev.created_at,
+                &ev.level,
+                &ev.scope,
+                &ev.message,
+            ))
+        })
+        .collect();
+
+    let app = Arc::clone(&st.app);
+    let frames = futures_util::stream::unfold(
+        (
+            rx,
+            tokio::time::interval(PING_CADA),
+            ultimo,
+            filtro,
+            app,
+            fila,
+        ),
+        |(mut rx, mut tick, mut ultimo, filtro, app, mut fila)| async move {
+            loop {
+                if let Some(frame) = fila.pop_front() {
+                    return Some((frame, (rx, tick, ultimo, filtro, app, fila)));
+                }
+                tokio::select! {
+                    _ = tick.tick() => {
+                        return Some((
+                            Ok(": ping\n\n".to_owned()),
+                            (rx, tick, ultimo, filtro, app, fila),
+                        ));
+                    }
+                    ev = rx.recv() => match ev {
+                        Ok(ev) => {
+                            if ev.id <= ultimo {
+                                continue; // duplicata backlog×broadcast
+                            }
+                            if !casa_filtro(&filtro, &ev) {
+                                continue;
+                            }
+                            ultimo = ev.id;
+                            let frame =
+                                Ok(frame_de(ev.id, &ev.created_at, &ev.level, &ev.scope, &ev.message));
+                            return Some((frame, (rx, tick, ultimo, filtro, app, fila)));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("cliente de /api/events/follow ficou atrás ({n}) — re-sync do banco");
+                            match leitura::eventos_desde(&app, ultimo, &filtro) {
+                                Ok(ausentes) => {
+                                    if let Some(m) = ausentes.last() {
+                                        ultimo = m.id;
+                                    }
+                                    fila.extend(ausentes.iter().map(|ev| {
+                                        Ok(frame_de(
+                                            ev.id, &ev.created_at, &ev.level, &ev.scope, &ev.message,
+                                        ))
+                                    }));
+                                    continue;
+                                }
+                                Err(e) => {
+                                    // Visível NO stream (frame de erro) — nunca some.
+                                    let frame = Ok(format!(
+                                        "event: erro\ndata: {}\n\n",
+                                        serde_json::json!({ "error": format!("falha no re-sync: {e}") })
+                                    ));
+                                    return Some((frame, (rx, tick, ultimo, filtro, app, fila)));
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            }
+        },
+    );
+    let mut res = Response::new(Body::from_stream(frames));
+    *res.status_mut() = StatusCode::OK;
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    res
 }
 
 // ------------------------------------------------------- token de leitura

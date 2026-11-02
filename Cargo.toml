@@ -15,7 +15,7 @@ toml = "0.8"
 thiserror = "2"
 sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "signal", "process", "io-std", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "signal", "process", "io-std", "io-util", "sync"] }
 axum = "0.8"
 # server: o doorman (flux-cli) serve http/1.1 local — antes só axum (fluxd)
 # puxava essa feature, e dev-dep não unifica no build do binário.
