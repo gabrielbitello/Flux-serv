@@ -32,6 +32,7 @@ pub(super) fn page_de(query: Option<&str>) -> i64 {
 
 /// Época → "YYYY-MM-DD HH:MM:SS" UTC (algoritmo civil de Howard Hinnant —
 /// std Rust não tem tz database; painel exibe tudo em UTC e DIZ isso).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn fmt_utc(secs: i64) -> String {
     let dias = secs.div_euclid(86_400);
     let sod = secs.rem_euclid(86_400);
@@ -93,6 +94,7 @@ pub(super) fn epoch_de(s: &str) -> Option<i64> {
 /// Epoch opcional → "há 5 min" / "em 12 min" com o absoluto UTC no `title`.
 /// `None` → "—" (nunca hora inventada). Passado conta com "há", futuro com
 /// "em"; abaixo de 1 min, segundos.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn quando(now: i64, v: Option<i64>) -> String {
     let Some(v) = v else {
         return "—".into();
@@ -124,6 +126,7 @@ pub(super) fn quando(now: i64, v: Option<i64>) -> String {
 }
 
 /// Estado → (classe do dot, rótulo pt-BR). Cores espelham a matriz da 03.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn dot(estado: ContainerState) -> (&'static str, &'static str) {
     match estado {
         ContainerState::Awake => ("ok", "acordado"),
@@ -135,6 +138,7 @@ pub(super) fn dot(estado: ContainerState) -> (&'static str, &'static str) {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn badge_level(level: &str) -> String {
     let classe = match level {
         "info" => "muted",

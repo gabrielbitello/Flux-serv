@@ -43,7 +43,6 @@ pub(super) fn verdade_ambiente(
 /// Um ambiente de um projeto pronto para renderizar. Erro de leitura vira
 /// `Err(texto)` — o card mostra a mensagem real, nunca silêncio.
 pub(super) struct PainelEnv {
-    pub(super) env: Env,
     pub(super) estado: ContainerState,
     pub(super) fonte: &'static str,
     pub(super) row: Result<SleepRow, String>,
@@ -52,8 +51,8 @@ pub(super) struct PainelEnv {
 
 pub(super) fn ambiente(app: &AppState, name: &str, env: Env) -> PainelEnv {
     let (estado, fonte) = verdade_ambiente(app, name, env);
+    let _ = env; // rotulado no JSON pelo chamador (detalhe_env/dashboard_env)
     PainelEnv {
-        env,
         estado,
         fonte,
         row: app
@@ -446,6 +445,114 @@ fn dashboard_env(app: &AppState, name: &str, env: Env) -> DashboardEnv {
         estado: format!("{:?}", p.estado).to_lowercase(),
         fonte: p.fonte,
         aplicadas: p.aplicadas.len(),
+        sono_erro,
+        interacao,
+        lease,
+        cooldown,
+    }
+}
+
+// ------------------------------------------------ detalhe JSON (fatia 6a)
+
+/// Snapshot do detalhe de UM projeto — MESMAS consultas do render HTML
+/// antigo (ambientes com a LISTA de migrations, sync, hosts) + eventos que
+/// mencionam o nome. `None` do outer = projeto não registrado (o handler
+/// devolve 404 honesto); erros internos viram campos.
+#[derive(serde::Serialize)]
+pub(super) struct DetalheSnapshot {
+    pub(super) nome: String,
+    pub(super) framework: String,
+    pub(super) framework_erro: Option<String>,
+    pub(super) dev_host: String,
+    pub(super) prod_host: String,
+    pub(super) dev: DetalheEnv,
+    pub(super) prod: DetalheEnv,
+    pub(super) sync: Option<SyncJson>,
+    /// Eventos cuja mensagem menciona o nome (LIKE, 20 mais novos).
+    pub(super) eventos: Vec<EventoRow>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct DetalheEnv {
+    pub(super) env: &'static str,
+    pub(super) estado: String,
+    pub(super) fonte: &'static str,
+    /// Lista COMPLETA (nome, hash) — o detalhe mostra, o dashboard conta.
+    pub(super) migracoes: Vec<[String; 2]>,
+    pub(super) sono_erro: Option<String>,
+    pub(super) interacao: Option<i64>,
+    pub(super) lease: Option<i64>,
+    pub(super) cooldown: Option<i64>,
+}
+
+/// `Ok(Some)` = registrado; `Ok(None)` = não registrado (404 honesto);
+/// `Err` = estado ilegível (503 com a causa).
+pub(super) fn detalhe(app: &AppState, name: &str) -> Result<Option<DetalheSnapshot>, String> {
+    let lista = projetos(app)?;
+    let Some((_, toml_src)) = lista.iter().find(|(n, _)| n == name) else {
+        return Ok(None);
+    };
+    let (framework, framework_erro) = match ProjectToml::parse_str(toml_src) {
+        Ok(t) => (t.framework().to_string(), None),
+        Err(e) => ("?".to_owned(), Some(e.to_string())),
+    };
+    let (ov_prod, ov_dev) = app.state.project_hosts(name).unwrap_or((None, None));
+    let syncs = crate::sync::sync_states(app);
+
+    // Eventos que mencionam o nome (mesma LIKE escapada do render antigo).
+    let padrao = formato::like_esc(name);
+    let eventos = app
+        .state
+        .with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, level, scope, message, created_at FROM events
+                 WHERE message LIKE '%' || ?1 || '%' ESCAPE '\'
+                 ORDER BY id DESC LIMIT 20",
+            )?;
+            let rows = stmt.query_map(params![padrao], row_evento)?;
+            rows.collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Some(DetalheSnapshot {
+        nome: name.to_owned(),
+        framework,
+        framework_erro,
+        dev_host: ov_dev.unwrap_or_else(|| app.domain.dev_host(name)),
+        prod_host: ov_prod.unwrap_or_else(|| app.domain.prod_host(name)),
+        dev: detalhe_env(app, name, Env::Dev),
+        prod: detalhe_env(app, name, Env::Prod),
+        sync: syncs.iter().find(|r| r.project == name).map(|r| SyncJson {
+            status: r.status.clone(),
+            paused: r.paused,
+            rescan_requested: r.rescan_requested,
+            files: r.files,
+            problems: r.problems,
+            last_error: r.last_error.clone(),
+            atualizado: r.updated_at.clone(),
+        }),
+        eventos,
+    }))
+}
+
+fn detalhe_env(app: &AppState, name: &str, env: Env) -> DetalheEnv {
+    let p = ambiente(app, name, env);
+    let (interacao, lease, cooldown, sono_erro) = match &p.row {
+        Ok(r) => (r.0, r.1, r.2, None),
+        Err(e) => (None, None, None, Some(e.clone())),
+    };
+    DetalheEnv {
+        env: match env {
+            Env::Dev => "dev",
+            Env::Prod => "prod",
+        },
+        estado: format!("{:?}", p.estado).to_lowercase(),
+        fonte: p.fonte,
+        migracoes: p
+            .aplicadas
+            .into_iter()
+            .map(|(nome, hash)| [nome, hash])
+            .collect(),
         sono_erro,
         interacao,
         lease,

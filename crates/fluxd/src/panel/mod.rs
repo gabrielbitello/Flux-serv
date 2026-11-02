@@ -40,6 +40,7 @@ mod assets;
 /// Shells estáticas — HTML sem dado, servido por include_str!.
 const SHELL_EVENTOS: &str = include_str!("shells/eventos.html");
 const SHELL_DASHBOARD: &str = include_str!("shells/dashboard.html");
+const SHELL_PROJETO: &str = include_str!("shells/projeto.html");
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
 use crate::ui::{NOINDEX, x_robots_tag};
@@ -335,14 +336,11 @@ async fn dashboard() -> Response {
     resposta(StatusCode::OK, SHELL_DASHBOARD.to_owned())
 }
 
-async fn detalhe_projeto(State(app): State<Arc<AppState>>, params: RawPathParams) -> Response {
-    // RawPathParams não tem `get` nesta versão do axum: varre os pares.
-    let name = params
-        .iter()
-        .find(|(k, _)| *k == "name")
-        .map(|(_, v)| v)
-        .unwrap_or_default();
-    resposta(detalhe_status(&app, name), render_detalhe(&app, name))
+/// GET /projects/{name} — SHELL estática (fatia 6a): snapshot por
+/// /api/projects/{name} (SSE), logs por /api/projects/{name}/logs. O 404
+/// honesto de não-registrado acontece na API (o cliente mostra).
+async fn detalhe_projeto() -> Response {
+    resposta(StatusCode::OK, SHELL_PROJETO.to_owned())
 }
 
 /// GET /events — SHELL estático (fatia 4, style guide 02/11): o HTML não
@@ -409,6 +407,6 @@ mod paginas;
 #[cfg(test)]
 mod tests;
 
-use paginas::{detalhe_status, layout, render_detalhe, render_login};
+use paginas::{layout, render_login};
 
 pub(super) use crate::AppState;

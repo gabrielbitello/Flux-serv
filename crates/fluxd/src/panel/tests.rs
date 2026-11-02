@@ -476,13 +476,27 @@ async fn dashboard_mostra_sono_migrations_e_eventos() {
     );
 }
 
+/// Detalhe (fatia 6a): 404 honesto na API para não-registrado; a SHELL é
+/// sempre 200 (o cliente mostra o erro que a API mandou).
 #[tokio::test]
-async fn detalhe_de_projeto_inexistente_e_404_brandiado() {
+async fn detalhe_de_projeto_inexistente_e_404_na_api() {
     let app = app_sem_docker();
-    let (status, headers, body) = get(&app, "/projects/naoexiste").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body.contains("não registrado"), "body: {body}");
-    assert_eq!(noindex_de(&headers), NOINDEX, "404 do painel também é R22");
+    // Shell servida com sessão (o guard de página não mudou).
+    let (_, _, shell) = get(&app, "/projects/naoexiste").await;
+    assert!(shell.contains("projetoPage"), "shell do detalhe: {shell}");
+    // 404 com a causa, na API.
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s, body) = pedir_api(
+        &app,
+        router,
+        "/api/projects/naoexiste",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(body.contains("não registrado"), "{body}");
 }
 
 #[tokio::test]
@@ -513,33 +527,34 @@ async fn detalhe_mostra_sinais_de_sono_e_migrations() {
     st.record_migration("pedi", Env::Prod, "0001_init.sql", "sha_de_prod_0001")
         .unwrap();
 
-    let (status, _, body) = get(&app, "/projects/pedi").await;
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (status, snap) = pedir_api(
+        &app,
+        router,
+        "/api/projects/pedi",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("pedi"), "body: {body}");
-    assert!(body.contains("node"), "framework do flux.toml: {body}");
+    assert!(snap.contains("\"nome\":\"pedi\""), "{snap}");
+    assert!(snap.contains("node"), "framework do flux.toml: {snap}");
     assert!(
-        body.contains("lease") && body.contains("cooldown"),
-        "sinais do sleep manager na tabela: {body}"
+        snap.contains("\"lease\":") && snap.contains("\"cooldown\":"),
+        "sinais do sleep manager no snapshot: {snap}"
     );
     assert!(
-        body.contains("em "),
-        "lease/cooldown futuros são contagem: {body}"
+        snap.contains("0001_init.sql") && snap.contains("sha_de_dev_0001"),
+        "migrations com hash: {snap}"
     );
     assert!(
-        body.contains("há 10 min"),
-        "interação passada é relativo: {body}"
+        snap.contains("pedi-d.bitello.xyz"),
+        "hosts derivados: {snap}"
     );
     assert!(
-        body.contains("0001_init.sql"),
-        "migrations listadas: {body}"
-    );
-    assert!(
-        body.contains("sem verdade de disco nesta fase"),
-        "pendentes é honesto: {body}"
-    );
-    assert!(
-        body.contains("pedi-d.bitello.xyz"),
-        "URL dev clicável: {body}"
+        snap.contains("sweep"),
+        "sem docker, a FONTE é declarada: {snap}"
     );
 }
 

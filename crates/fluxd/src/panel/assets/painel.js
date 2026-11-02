@@ -420,3 +420,102 @@ document.addEventListener('alpine:init', () => {
     },
   }));
 });
+
+// ------------------------------------------------------------ detalhe projeto
+document.addEventListener('alpine:init', () => {
+  Alpine.data('projetoPage', () => ({
+    snap: null,
+    erro: '',
+    aviso: '',
+    vivo: 'conectando…',
+    es: null,
+    logsLigado: false,
+    logsEs: null,
+    nome: decodeURIComponent(location.pathname.split('/').pop() || ''),
+
+    init() {
+      const q = new URLSearchParams(location.search);
+      if (q.get('rescan') === '1') this.aviso = 'rescan na fila — o flux watch executa';
+      else if (q.get('rescan') === 'falha') {
+        this.aviso = 'rescan recusado — o motivo está nos eventos (escopo painel)';
+      }
+      this.conectar();
+    },
+
+    conectar() {
+      this.es = new EventSource('/api/projects/' + encodeURIComponent(this.nome) + '/follow');
+      this.es.onopen = () => {
+        this.vivo = 'ao vivo';
+      };
+      this.es.onerror = () => {
+        this.vivo = 'reconectando…';
+      };
+      this.es.onmessage = (m) => {
+        try {
+          const d = JSON.parse(m.data);
+          if (d.erro) {
+            this.erro = d.erro;
+            return;
+          }
+          this.erro = '';
+          this.snap = d;
+        } catch (_) {}
+      };
+    },
+
+    dotDe(estado) {
+      return (
+        {
+          awake: { c: 'ok pulse', t: 'acordado' },
+          paused: { c: 'warn', t: 'pausado' },
+          sleeping: { c: 'idle', t: 'dormindo' },
+          starting: { c: 'warn', t: 'subindo' },
+          failed: { c: 'err', t: 'falhou' },
+        }[estado] || { c: 'idle', t: estado || '?' }
+      );
+    },
+
+    quandoRel(v) {
+      if (!v) return '—';
+      const diff = Math.round(v - Date.now() / 1000);
+      const abs = Math.abs(diff);
+      const pre = diff < 0 ? 'há ' : 'em ';
+      if (abs < 60) return pre + abs + ' s';
+      if (abs < 3600) return pre + Math.round(abs / 60) + ' min';
+      return pre + Math.round(abs / 3600) + ' h';
+    },
+
+    // Tail de logs: MESMO endpoint da :7420 montado na API pública (SSE).
+    // Linhas entram como TEXT (textContent) — log nunca vira HTML.
+    ligarLogs() {
+      if (this.logsLigado) return;
+      this.logsLigado = true;
+      const termo = this.$refs.logsterm;
+      termo.textContent = '';
+      const url =
+        '/api/projects/' + encodeURIComponent(this.nome) + '/logs?env=dev&tail=200&follow=true';
+      const es = new EventSource(url);
+      this.logsEs = es;
+      es.onmessage = (m) => {
+        const linha = document.createElement('div');
+        linha.textContent = m.data;
+        termo.appendChild(linha);
+        while (termo.childNodes.length > 500) termo.removeChild(termo.firstChild);
+        termo.scrollTop = termo.scrollHeight;
+      };
+      es.onerror = () => {
+        const aviso = document.createElement('div');
+        aviso.className = 't-dim';
+        aviso.textContent = '— stream caiu; reabrindo…';
+        termo.appendChild(aviso);
+      };
+    },
+
+    desligarLogs() {
+      if (this.logsEs) this.logsEs.close();
+      this.logsEs = null;
+      this.logsLigado = false;
+      this.$refs.logsterm.textContent = '';
+    },
+  }));
+});

@@ -1,0 +1,120 @@
+<!doctype html>
+<!-- Shell do detalhe de projeto (fatia 6a): snapshot por /api/projects/{nome}
+     (SSE push-só-quando-muda) + tail de logs por /api/projects/{nome}/logs
+     (SSE, mesmo handler da :7420). Ações chegam na fatia 6b. -->
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flux — projeto</title>
+<link rel="stylesheet" href="/assets/estilo.css">
+<script defer src="/assets/alpine.min.js"></script>
+<script defer src="/assets/painel.js"></script>
+</head>
+<body>
+<div x-data="projetoPage">
+<header class="top">
+  <span class="mark">flux<span>/painel</span></span>
+  <nav aria-label="Páginas">
+    <a href="/">dashboard</a><a href="/events">eventos</a><a href="/observe">monitor</a>
+  </nav>
+  <div class="topdir">
+    <span class="muted" x-text="vivo"></span>
+    <form method="post" action="/logout" class="inline"><button class="btn ghost" type="submit">sair</button></form>
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="todos" value="1">
+      <button class="btn ghost" type="submit" title="revoga sessões em todos os dispositivos">sair de todos</button>
+    </form>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="aviso" x-cloak x-show="aviso" x-text="aviso"></div>
+
+  <div class="head">
+    <h1 x-text="snap ? snap.nome : '…'"></h1>
+    <span class="tag dev" x-show="snap" x-text="snap ? snap.framework : ''"></span>
+    <span class="err-t" x-show="snap && snap.framework_erro"
+          x-text="snap ? 'flux.toml inválido: ' + snap.framework_erro : ''"></span>
+  </div>
+  <div class="head">
+    <span class="sub">
+      dev <a :href="'https://' + (snap ? snap.dev_host : '')" x-text="snap ? snap.dev_host : ''"></a> ·
+      prod <a :href="'https://' + (snap ? snap.prod_host : '')" x-text="snap ? snap.prod_host : ''"></a>
+    </span>
+  </div>
+
+  <div class="erro" x-cloak x-show="erro" x-text="erro"></div>
+
+  <section class="secao">
+    <h2>Ambientes</h2>
+    <div class="grid">
+      <template x-for="e in (snap ? [snap.dev, snap.prod] : [])" :key="e.env">
+        <div class="card">
+          <h3><span class="tag" :class="e.env" x-text="e.env"></span></h3>
+          <div class="kv">
+            <span class="dot" :class="dotDe(e.estado).c"></span>
+            <span x-text="dotDe(e.estado).t"></span>
+            <span class="muted" x-text="'(' + e.fonte + ') · interação ' + quandoRel(e.interacao)"></span>
+          </div>
+          <div class="kv">
+            <b>migrations</b>
+            <span x-text="e.migracoes.length + ' aplicadas'"></span>
+          </div>
+          <details class="cru" x-show="e.migracoes.length > 0">
+            <summary>ver lista</summary>
+            <pre x-text="e.migracoes.map((m) => m[0] + '\n  ' + m[1]).join('\n')"></pre>
+          </details>
+          <span class="err-t" x-show="e.sono_erro" x-text="e.sono_erro"></span>
+        </div>
+      </template>
+    </div>
+    <div class="kv" style="margin-top:8px">
+      <b>sync</b>
+      <template x-if="snap && snap.sync">
+        <span>
+          <span class="dot" :class="snap.sync.problems > 0 ? 'warn' : (snap.sync.paused ? 'idle' : 'ok')"></span>
+          <span x-text="snap.sync.status"></span>
+          <span class="warn-t" x-show="snap.sync.last_error" x-text="snap.sync.last_error"></span>
+          <span class="warn-t" x-show="snap.sync.rescan_requested">rescan pendente</span>
+        </span>
+      </template>
+      <template x-if="snap && !snap.sync"><span class="muted">sem sessão</span></template>
+    </div>
+  </section>
+
+  <section class="secao">
+    <h2>Logs do container (dev)</h2>
+    <div class="barra">
+      <button class="btn" type="button" @click="ligarLogs()" x-show="!logsLigado">abrir tail</button>
+      <button class="btn danger" type="button" @click="desligarLogs()" x-show="logsLigado">fechar tail</button>
+      <span class="muted" x-show="logsLigado">seguindo — linha nova entra em tempo real (SSE)</span>
+    </div>
+    <div class="term" x-ref="logsterm"><span class="t-dim" x-show="!logsLigado">fechado — abrir tail pra seguir os logs</span></div>
+  </section>
+
+  <section class="secao">
+    <h2>Eventos que mencionam este projeto</h2>
+    <table x-show="snap && snap.eventos.length > 0">
+      <thead><tr><th>quando (UTC)</th><th>nível</th><th>escopo</th><th>mensagem</th></tr></thead>
+      <tbody>
+        <template x-for="ev in (snap ? snap.eventos : [])" :key="ev.id">
+          <tr :class="ev.level === 'warn' ? 'lwarn' : ((ev.level === 'error' || ev.level === 'err') ? 'lerr' : '')">
+            <td class="mono muted" x-text="ev.created_at"></td>
+            <td x-text="ev.level"></td>
+            <td><code x-text="ev.scope"></code></td>
+            <td x-text="ev.message"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="empty" x-cloak x-show="snap && snap.eventos.length === 0">nenhum evento menciona este projeto ainda</div>
+  </section>
+
+  <p><a href="/">← dashboard</a></p>
+</main>
+</div>
+<noscript><p style="padding:1rem">Este painel precisa de JavaScript: os dados chegam por API e SSE.</p></noscript>
+</body>
+</html>

@@ -50,6 +50,11 @@ pub(super) fn router(st: &PanelState) -> Router<PanelState> {
         .route("/api/dashboard", get(dashboard))
         .route("/api/dashboard/follow", get(dashboard_follow))
         .route("/api/saude", get(saude))
+        .route("/api/projects/{name}", get(detalhe))
+        .route("/api/projects/{name}/follow", get(detalhe_follow))
+        // Tail de logs: MESMO handler da :7420 (text/plain ou SSE follow) —
+        // read-only, agora também com auth de sessão/token da API pública.
+        .route("/api/projects/{name}/logs", get(crate::ciclo::logs))
         .route("/api/projects/{name}/acordar", post(acordar))
         .route_layer(middleware::from_fn_with_state(st.clone(), auth_publica))
 }
@@ -635,4 +640,65 @@ async fn acordar(State(st): State<PanelState>, Path(name): Path<String>) -> Resp
         }
         Err(e) => erro_json(StatusCode::CONFLICT, &format!("wake de {name} falhou: {e}")),
     }
+}
+
+// -------------------------------------------------- detalhe (fatia 6a)
+
+/// GET /api/projects/{name} — snapshot do detalhe (mesmas consultas do
+/// render HTML antigo). 404 honesto para não-registrado.
+async fn detalhe(State(st): State<PanelState>, Path(name): Path<String>) -> Response {
+    match leitura::detalhe(&st.app, &name) {
+        Ok(Some(snap)) => Json(snap).into_response(),
+        Ok(None) => erro_json(
+            StatusCode::NOT_FOUND,
+            &format!("{name}: não registrado no fluxd"),
+        ),
+        Err(e) => erro_json(StatusCode::SERVICE_UNAVAILABLE, &e),
+    }
+}
+
+/// GET /api/projects/{name}/follow — SSE do snapshot do detalhe, MESMO
+/// padrão do dashboard: recompute a cada 5 s, push só quando muda.
+async fn detalhe_follow(State(st): State<PanelState>, Path(name): Path<String>) -> Response {
+    let app = Arc::clone(&st.app);
+    let frames = futures_util::stream::unfold(
+        (
+            tokio::time::interval(DASH_CADA),
+            tokio::time::interval(PING_CADA),
+            None::<String>,
+            app,
+            name,
+        ),
+        |(mut snap_t, mut ping_t, mut ultimo, app, name)| async move {
+            loop {
+                tokio::select! {
+                    _ = ping_t.tick() => {
+                        return Some((
+                            Ok(": ping\n\n".to_owned()),
+                            (snap_t, ping_t, ultimo, app, name),
+                        ));
+                    }
+                    _ = snap_t.tick() => {
+                        let json = match leitura::detalhe(&app, &name) {
+                            Ok(Some(snap)) => serde_json::to_string(&snap).unwrap_or_default(),
+                            // Não-registrado: frame de erro no stream, nunca
+                            // buraco silencioso.
+                            Ok(None) => serde_json::json!({"erro": "não registrado"}).to_string(),
+                            Err(e) => serde_json::json!({"erro": e}).to_string(),
+                        };
+                        let hash = sha256_hex(json.as_bytes());
+                        if ultimo.as_deref() == Some(hash.as_str()) {
+                            continue;
+                        }
+                        ultimo = Some(hash);
+                        return Some((
+                            Ok(format!("data: {json}\n\n")),
+                            (snap_t, ping_t, ultimo, app, name),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    resposta_sse(frames)
 }
