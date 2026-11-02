@@ -302,6 +302,10 @@ document.addEventListener('alpine:init', () => {
     saude: null,
     saudeErro: '',
     saudeAberto: false,
+    limiaresAberto: false,
+    limiares: null,
+    novoLimiarProjeto: '',
+    novoLimiarBase: '',
     aviso: '',
     vivo: 'conectando…',
     acordando: {},
@@ -315,6 +319,7 @@ document.addEventListener('alpine:init', () => {
       }
       this.puxaSaude();
       setInterval(() => this.puxaSaude(), 60000);
+      this.puxaLimiares();
       this.conectar();
     },
 
@@ -327,6 +332,48 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         this.saudeErro = String(e.message || e);
       }
+    },
+
+    async puxaLimiares() {
+      try {
+        const r = await fetch('/api/vigia/limiares');
+        if (r.ok) this.limiares = await r.json();
+      } catch (_) {}
+    },
+
+    async salvarLimiar() {
+      const projeto = this.novoLimiarProjeto.trim();
+      const base = parseInt(this.novoLimiarBase, 10);
+      if (!projeto || !base) return;
+      try {
+        const r = await fetch('/api/vigia/limiares', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ projeto, base }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          this.aviso = 'limiar recusado: ' + (d.error || r.status);
+          return;
+        }
+        this.aviso = 'limiar do vigia: ' + d.resultado + ' (vale em ≤ 60 s)';
+        this.novoLimiarProjeto = '';
+        this.novoLimiarBase = '';
+        this.puxaLimiares();
+      } catch (e) {
+        this.aviso = 'limiar falhou: ' + e.message;
+      }
+    },
+
+    async removerLimiar(projeto) {
+      try {
+        await fetch('/api/vigia/limiares', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ projeto, remover: true, base: 0 }),
+        });
+        this.puxaLimiares();
+      } catch (_) {}
     },
 
     conectar() {

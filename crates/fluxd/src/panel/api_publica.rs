@@ -71,6 +71,10 @@ pub(super) fn router(st: &PanelState) -> Router<PanelState> {
         )
         .route("/api/observe", get(observe))
         .route("/api/observe/follow", get(observe_follow))
+        .route(
+            "/api/vigia/limiares",
+            get(vigia_limiares).post(vigia_set_limiar),
+        )
         .route_layer(middleware::from_fn_with_state(st.clone(), auth_publica))
 }
 
@@ -869,4 +873,82 @@ async fn observe_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
         },
     );
     resposta_sse(frames)
+}
+
+// -------------------------------------------------- vigia limiares (fatia 9b)
+
+/// GET /api/vigia/limiares — default global + overrides por projeto com os
+/// derivados efetivos (martelada/ws derivam do base, MESMA fórmula do
+/// vigia.rs). Leitura: token ok.
+async fn vigia_limiares(State(st): State<PanelState>) -> Response {
+    let base_default = crate::vigia::BASE_RECARGA_POR_MIN;
+    let derivados = |base: i64| {
+        serde_json::json!({
+            "recarga_por_min": base,
+            "martelada_3min": (base * 7).max(crate::vigia::PISO_MARTELADA_3MIN),
+            "ws_por_min": (base / 4).max(crate::vigia::PISO_WS_POR_MIN),
+        })
+    };
+    let overrides = crate::vigia::bases(&st.app.state)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(projeto, base)| {
+            serde_json::json!({ "projeto": projeto, "base": base, "efetivo": derivados(base) })
+        })
+        .collect::<Vec<_>>();
+    let ultimo = crate::panel::leitura::vigia_ultimo_ciclo(&st.app).unwrap_or(None);
+    Json(serde_json::json!({
+        "default": { "base": base_default, "efetivo": derivados(base_default) },
+        "overrides": overrides,
+        "ultimo_ciclo": ultimo,
+        "cooldown_s": crate::vigia::COOLDOWN_SECS,
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct CorpoLimiar {
+    pub(super) projeto: String,
+    /// 1..=600 recargas/min (validação do vigia::definir_base).
+    pub(super) base: i64,
+    #[serde(default)]
+    pub(super) remover: bool,
+}
+
+/// POST /api/vigia/limiares — AÇÃO (sessão): grava/remove o override do
+/// projeto; o ciclo lê a cada passada — vale em ≤60 s sem restart (mesma
+/// mecânica do `flux vigia set`).
+pub(super) async fn vigia_set_limiar(
+    State(st): State<PanelState>,
+    Json(corpo): Json<CorpoLimiar>,
+) -> Response {
+    let projeto = corpo.projeto.trim();
+    if !flux_common::nomes::projeto_valido(projeto) {
+        return erro_json(StatusCode::NOT_FOUND, "nome de projeto inválido");
+    }
+    let resultado: Result<String, String> = if corpo.remover {
+        crate::vigia::remover_base(&st.app.state, projeto).map(|existe| {
+            if existe {
+                "override removido"
+            } else {
+                "não havia override"
+            }
+            .to_owned()
+        })
+    } else {
+        crate::vigia::definir_base(&st.app.state, projeto, corpo.base)
+            .map(|_| format!("base {} para {}", corpo.base, projeto))
+    };
+    match resultado {
+        Ok(msg) => {
+            events::event(
+                &st.app.state,
+                "info",
+                "painel",
+                &format!("limiar do vigia pelo painel: {projeto} — {msg}"),
+            );
+            Json(serde_json::json!({ "projeto": projeto, "resultado": msg })).into_response()
+        }
+        Err(e) => erro_json(StatusCode::UNPROCESSABLE_ENTITY, &e),
+    }
 }

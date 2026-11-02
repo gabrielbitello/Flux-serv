@@ -1982,3 +1982,108 @@ async fn api_eventos_filtra_por_ambiente_e_lista_hosts() {
     assert!(body.contains("\"hosts\""), "lista de hosts: {body}");
     assert!(body.contains("\"ambiente\":\"dev\""), "{body}");
 }
+
+// ------------------------------------------- vigia limiares (fatia 9b)
+
+/// GET devolve default + overrides; POST com sessão grava (vale ≤60 s pelo
+/// ciclo) e remover apaga; SEM sessão = 401 (é ação); faixa inválida =
+/// 422 com a causa.
+#[tokio::test]
+async fn vigia_limiares_le_grava_e_remove() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let lan = [("x-forwarded-for", "192.168.140.50".into())];
+
+    // POST grava override.
+    let (router2, _dir2) = painel_com_auth(&app).await;
+    let cookie2 = cookie_de_sessao(&app, &router2).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router2).await.unwrap();
+    });
+    let url: hyper::Uri = format!("http://{addr}/api/vigia/limiares").parse().unwrap();
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(url)
+        .header(header::HOST, "flux.bitello.xyz")
+        .header(header::COOKIE, &cookie2)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", "192.168.140.50")
+        .body(Body::from(r#"{"projeto":"vipers","base":10}"#))
+        .unwrap();
+    let resp = app.http.request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Faixa inválida = 422 com a causa.
+    let url2: hyper::Uri = format!("http://{addr}/api/vigia/limiares").parse().unwrap();
+    let req2 = axum::http::Request::builder()
+        .method("POST")
+        .uri(url2)
+        .header(header::HOST, "flux.bitello.xyz")
+        .header(header::COOKIE, &cookie2)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", "192.168.140.50")
+        .body(Body::from(r#"{"projeto":"vipers","base":9000}"#))
+        .unwrap();
+    let resp2 = app.http.request(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // GET mostra o override com os derivados efetivos.
+    let (s, body) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/vigia/limiares",
+        Some(&cookie),
+        &lan,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(body.contains("\"base\":10"), "{body}");
+    assert!(body.contains("martelada_3min"), "{body}");
+    // remover via POST limpa.
+    let url3: hyper::Uri = format!("http://{addr}/api/vigia/limiares").parse().unwrap();
+    let req3 = axum::http::Request::builder()
+        .method("POST")
+        .uri(url3)
+        .header(header::HOST, "flux.bitello.xyz")
+        .header(header::COOKIE, &cookie2)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", "192.168.140.50")
+        .body(Body::from(
+            r#"{"projeto":"vipers","remover":true,"base":0}"#,
+        ))
+        .unwrap();
+    let resp3 = app.http.request(req3).await.unwrap();
+    assert_eq!(resp3.status(), StatusCode::OK);
+}
+
+/// Limiares são AÇÃO: sem sessão = 401 (o middleware já barra o token em
+/// não-GET — teste fecha a tríade).
+#[tokio::test]
+async fn vigia_limiares_post_exige_sessao() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    let (router, _dir) = painel_com_auth(&app).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url: hyper::Uri = format!("http://{addr}/api/vigia/limiares").parse().unwrap();
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(url)
+        .header(header::HOST, "flux.bitello.xyz")
+        .header("x-forwarded-for", "192.168.140.50")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN_LEITURA}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"projeto":"vipers","base":10}"#))
+        .unwrap();
+    let resp = app.http.request(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "token de leitura não muda limiar"
+    );
+}
