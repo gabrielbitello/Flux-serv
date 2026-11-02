@@ -13,6 +13,14 @@ use axum::response::{IntoResponse, Response};
 
 pub(super) const ESTILO: &str = include_str!("estilo.css");
 
+/// Alpine.js 3.17.5 VENDIDO (MIT, ALPINE-LICENSE-MIT) — build padrão (usa
+/// eval; o painel hoje não emite CSP — se um dia emitir, migrar pro build
+/// CSP e manter tudo em Alpine.data, que já é como painel.js se escreve).
+const ALPINE: &str = include_str!("assets/alpine.min.js");
+/// Cliente do painel novo (componentes Alpine.data; zero innerHTML com dado
+/// do servidor — invariant testado).
+const PAINEL_JS: &str = include_str!("assets/painel.js");
+
 const PLEX_SANS_400: &[u8] = include_bytes!("fontes/IBMPlexSans-Regular.woff2");
 const PLEX_SANS_500: &[u8] = include_bytes!("fontes/IBMPlexSans-Medium.woff2");
 const PLEX_SANS_600: &[u8] = include_bytes!("fontes/IBMPlexSans-SemiBold.woff2");
@@ -22,6 +30,19 @@ const PLEX_MONO_500: &[u8] = include_bytes!("fontes/IBMPlexMono-Medium.woff2");
 /// `GET /assets/estilo.css` — a folha única do painel novo.
 pub(super) async fn estilo() -> Response {
     resposta(ESTILO.as_bytes(), "text/css; charset=utf-8")
+}
+
+/// `GET /assets/alpine.min.js` — framework vendido, sem CDN.
+pub(super) async fn alpine() -> Response {
+    resposta(ALPINE.as_bytes(), "application/javascript; charset=utf-8")
+}
+
+/// `GET /assets/painel.js` — o cliente do painel.
+pub(super) async fn painel_js() -> Response {
+    resposta(
+        PAINEL_JS.as_bytes(),
+        "application/javascript; charset=utf-8",
+    )
 }
 
 /// `GET /assets/fontes/{arquivo}` — woff2 casando por nome exato; nome

@@ -36,6 +36,9 @@ use crate::panel_auth;
 
 pub(crate) mod api_publica;
 mod assets;
+
+/// Shell do /events — HTML sem dado, servido por include_str!.
+const SHELL_EVENTOS: &str = include_str!("shells/eventos.html");
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
 use crate::ui::{NOINDEX, x_robots_tag};
@@ -88,6 +91,8 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
         // Assets estáticos (03): fora do guard — CSS/fonte não têm segredo e
         // a página de login também carrega o estilo.
         .route("/assets/estilo.css", get(assets::estilo))
+        .route("/assets/alpine.min.js", get(assets::alpine))
+        .route("/assets/painel.js", get(assets::painel_js))
         .route("/assets/fontes/{arquivo}", get(assets::fonte))
         // API pública de leitura (escopo 31/10): auth própria (token LAN /
         // sessão+origem), fora do guard de sessão.
@@ -262,10 +267,12 @@ async fn detalhe_projeto(State(app): State<Arc<AppState>>, params: RawPathParams
     resposta(detalhe_status(&app, name), render_detalhe(&app, name))
 }
 
-async fn pagina_eventos(State(app): State<Arc<AppState>>, RawQuery(q): RawQuery) -> Response {
-    // A query crua carrega os filtros (escopo/nível/busca) — quem digere é o
-    // leitura::filtro_de.
-    resposta(StatusCode::OK, render_eventos(&app, q.as_deref()))
+/// GET /events — SHELL estático (fatia 4, style guide 02/11): o HTML não
+/// carrega dado; a lista/paginação vem de /api/events e o ao vivo do SSE
+/// /api/events/follow. O Rust não renderiza mais HTML desta página — os
+/// filtros continuam sendo verdade do SQL (leitura::filtro_de).
+async fn pagina_eventos() -> Response {
+    resposta(StatusCode::OK, SHELL_EVENTOS.to_owned())
 }
 
 /// POST /projects/{name}/rescan: pede re-scan da sessão de sync do projeto
@@ -327,8 +334,6 @@ mod paginas;
 #[cfg(test)]
 mod tests;
 
-use paginas::{
-    detalhe_status, layout, render_dashboard, render_detalhe, render_eventos, render_login,
-};
+use paginas::{detalhe_status, layout, render_dashboard, render_detalhe, render_login};
 
 pub(super) use crate::AppState;

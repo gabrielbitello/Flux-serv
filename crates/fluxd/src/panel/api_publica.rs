@@ -201,6 +201,9 @@ struct ListaEventos {
     pagina: i64,
     paginas: i64,
     total: i64,
+    /// Escopos distintos — os chips do filtro nunca inventam opção (mesma
+    /// leitura da página server-side antiga).
+    escopos: Vec<String>,
     eventos: Vec<EventoJson>,
 }
 
@@ -222,6 +225,7 @@ async fn eventos(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Respons
                 pagina: page,
                 paginas,
                 total,
+                escopos: leitura::escopos_distintos(&st.app).unwrap_or_default(),
                 eventos: rows
                     .into_iter()
                     .map(|ev| EventoJson {

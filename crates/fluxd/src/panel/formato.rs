@@ -173,6 +173,10 @@ pub(super) fn badge_sync(row: Option<&crate::sync::SyncRow>) -> (&'static str, &
 
 /// Uma linha de access digerida — o formato é o canônico de
 /// `events::linha_access` (`{metodo} {caminho} {status} {dur}ms host=…`).
+/// Sem consumidor server-side desde a fatia 4 (o /events novo digere no
+/// cliente, `painel.js::RE_ACCESS` — MESMO formato): fica como REFERÊNCIA
+/// do contrato e os testes fixam a forma.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, PartialEq)]
 pub(super) struct AccessInfo {
     pub(super) metodo: String,
@@ -185,6 +189,7 @@ pub(super) struct AccessInfo {
 /// Digei a linha de access para a tabela estruturada de /events. `None` =
 /// mensagem não é access (escopos waf/anomalia/edge/painel…): a página mostra
 /// o texto CRU — o que não é access nunca é disfarçado de access.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn parse_access(message: &str) -> Option<AccessInfo> {
     let mut t = message.split(' ');
     let metodo = t.next()?.to_owned();
@@ -216,6 +221,9 @@ pub(super) fn parse_access(message: &str) -> Option<AccessInfo> {
 
 /// Classe de cor do status HTTP na tabela: 2xx verde, 3xx neutro, 429/5xx
 /// vermelho (429 é o sinal que o operador caça), demais 4xx âmbar.
+/// Mapeamento status → classe de badge — canônico do formato; o cliente
+/// (`painel.js::stClasse`) espelha EXATAMENTE estas classes.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn classe_status(status: u16) -> &'static str {
     match status {
         200..=299 => "st-ok",
@@ -227,7 +235,9 @@ pub(super) fn classe_status(status: u16) -> &'static str {
 }
 
 /// Percent-encoding mínimo (RFC 3986 unreserved) para montar hrefs de filtro
-/// com a busca do operador dentro.
+/// com a busca do operador dentro. Sem consumidor desde a fatia 4 (o
+/// cliente usa URLSearchParams) — par do `query_decode`, testado junto.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn query_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

@@ -498,46 +498,79 @@ async fn detalhe_mostra_sinais_de_sono_e_migrations() {
     );
 }
 
+/// Paginação (fatia 4): a verdade migrou da página HTML pro /api/events —
+/// mesmo contrato (50/página, mais novo primeiro, clamp além do fim).
 #[tokio::test]
-async fn eventos_sao_paginados_e_navegaveis() {
+async fn eventos_paginam_pela_api_e_clampam() {
     let app = app_sem_docker();
     for i in 0..120 {
         crate::events::event(&app.state, "info", "teste", &format!("evento-{i:03}"));
     }
-    let (_, _, p1) = get(&app, "/events").await;
-    assert!(p1.contains("página 1 de 3"), "120/50 = 3 páginas: {p1}");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    // Sessão + LAN (sem header de origem externa a matriz da fatia 1 exige).
+    let lan = [("x-forwarded-for", "192.168.140.50".into())];
+    let (s1, p1) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/events?escopo=teste&page=1",
+        Some(&cookie),
+        &lan,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+    assert!(p1.contains("\"total\":120"), "{p1}");
+    assert!(p1.contains("\"paginas\":3"), "120/50 = 3: {p1}");
     assert!(p1.contains("evento-119"), "mais novo primeiro: {p1}");
     assert!(!p1.contains("evento-000"), "offset correto: {p1}");
-    assert!(p1.contains("próxima →"), "nav: {p1}");
-
-    let (_, _, p3) = get(&app, "/events?page=3").await;
-    assert!(p3.contains("página 3 de 3"), "body: {p3}");
+    let (_, p3) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/events?escopo=teste&page=3",
+        Some(&cookie),
+        &lan,
+    )
+    .await;
     assert!(
         p3.contains("evento-000"),
         "última página tem o mais antigo: {p3}"
     );
-    assert!(p3.contains("← anterior"), "nav: {p3}");
-
-    let (_, _, fora) = get(&app, "/events?page=99").await;
+    let (_, fora) = pedir_api(
+        &app,
+        router,
+        "/api/events?escopo=teste&page=99",
+        Some(&cookie),
+        &lan,
+    )
+    .await;
     assert!(
-        fora.contains("página 3 de 3"),
+        fora.contains("\"pagina\":3"),
         "página além do fim é clampada, não 500: {fora}"
     );
 }
 
+/// XSS (fatia 4): a shell é ESTÁTICA (nunca carrega mensagem) e o cliente
+/// NÃO injeta HTML — mensagens entram só por x-text/textContent. O
+/// innerHTML que comia o `<details>` aberto não volta em nenhuma forma.
 #[tokio::test]
-async fn html_de_evento_e_escapado() {
+async fn shell_de_eventos_e_cliente_sem_html_injetado() {
     let app = app_sem_docker();
     crate::events::event(&app.state, "warn", "xss", "<script>alert(1)</script> & <b>");
-    let (_, _, body) = get(&app, "/events").await;
+    let (_, _, shell) = get(&app, "/events").await;
     assert!(
-        !body.contains("<script>alert"),
-        "mensagem nunca vira HTML: {body}"
+        !shell.contains("<script>alert"),
+        "shell estática não carrega mensagem: {shell}"
     );
     assert!(
-        body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
-        "escapado mas presente: {body}"
+        shell.contains("eventosPage"),
+        "componente do cliente presente"
     );
+    let (_, _, js) = get(&app, "/assets/painel.js").await;
+    assert!(
+        !js.contains("innerHTML"),
+        "cliente não injeta HTML: innerHTML proibido"
+    );
+    assert!(!js.contains("document.write"), "document.write proibido");
 }
 
 #[tokio::test]
@@ -865,53 +898,29 @@ async fn eventos_filtram_por_escopo_nivel_e_busca() {
     assert_eq!((rows.len(), total), (1, 1));
 }
 
+/// Shell do /events (fatia 4): sessão continua valendo (sem cookie = login)
+/// e o markup fala com API+SSE — os filtros são verdade do SQL
+/// (leitura::eventos_filtrados, testado à parte).
 #[tokio::test]
-async fn pagina_de_eventos_tem_filtros_estrutura_e_js_de_refresh() {
+async fn eventos_shell_tem_sessao_e_fala_com_api() {
     let app = app_sem_docker();
-    crate::events::event(
-        &app.state,
-        "info",
-        "access",
-        "GET /cms 200 120ms host=vipers-d.bitello.xyz ip=1.2.3.4",
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (s, headers, _) = pedir(&app, router.clone(), "GET", "/events", None, None).await;
+    assert_eq!(s, StatusCode::SEE_OTHER, "sem cookie vai pro login");
+    assert_eq!(
+        headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        Some("/login")
     );
-    crate::events::event(
-        &app.state,
-        "warn",
-        "anomalia",
-        "vigia: recarga — caminho `/`",
-    );
-    let (_, _, body) = get(&app, "/events").await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (_, _, shell) = pedir(&app, router, "GET", "/events", Some(&cookie), None).await;
     assert!(
-        body.contains("corpo-eventos"),
-        "tbody com id pro JS: {body}"
+        shell.contains("/api/events/follow"),
+        "SSE no cliente: {shell}"
     );
+    assert!(shell.contains("/api/events"), "lista via API: {shell}");
     assert!(
-        body.contains("cabecalho-eventos"),
-        "contagem com id: {body}"
-    );
-    assert!(body.contains("btn-pausa"), "auto-refresh pausável: {body}");
-    assert!(body.contains("chip"), "chips de filtro: {body}");
-    // Access digerido na célula + o cru à um clique.
-    assert!(
-        body.contains("GET /cms"),
-        "método+caminho estruturados: {body}"
-    );
-    assert!(body.contains("st-ok"), "badge de status 200: {body}");
-    assert!(
-        body.contains("vipers-d.bitello.xyz"),
-        "host na célula: {body}"
-    );
-    assert!(body.contains("<details"), "mensagem cru acessível: {body}");
-    // Warn destacado na linha.
-    assert!(body.contains("lwarn"), "linha de warn destacada: {body}");
-
-    // Filtro aplicado via query (url-encoded de "anomalia" é ele mesmo).
-    let (_, _, filtrado) = get(&app, "/events?escopo=anomalia&nivel=warn&page=1").await;
-    assert!(filtrado.contains("recarga"), "evento filtrado presente");
-    assert!(!filtrado.contains("GET /cms"), "access de fora sai");
-    assert!(
-        filtrado.contains("chip-at"),
-        "chip ativo visível no filtro: {filtrado}"
+        shell.contains("x-data=\"eventosPage\""),
+        "componente Alpine: {shell}"
     );
 }
 

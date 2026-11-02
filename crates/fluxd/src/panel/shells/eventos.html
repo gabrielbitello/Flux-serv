@@ -1,0 +1,110 @@
+<!doctype html>
+<!-- Shell do /events (fatia 4, style guide 02/11): o HTML NÃO carrega dado
+     — tudo chega por /api/events (lista/paginação) e /api/events/follow
+     (SSE ao vivo). Guard de sessão fica no router; o Rust nunca mais
+     renderiza HTML desta página. -->
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flux — eventos</title>
+<link rel="stylesheet" href="/assets/estilo.css">
+<script defer src="/assets/alpine.min.js"></script>
+<script defer src="/assets/painel.js"></script>
+</head>
+<body>
+<div x-data="eventosPage">
+<header class="top">
+  <span class="mark">flux<span>/painel</span></span>
+  <nav aria-label="Páginas">
+    <a href="/">dashboard</a><a class="on" href="/events">eventos</a><a href="/observe">monitor</a>
+  </nav>
+  <div class="topdir">
+    <span class="muted" x-text="vivo"></span>
+    <form method="post" action="/logout" class="inline"><button class="btn ghost" type="submit">sair</button></form>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="head">
+    <h1>Eventos</h1>
+    <span class="sub"><span x-text="total"></span> eventos no total</span>
+    <span class="sub mono" x-cloak x-show="medidor.req > 0 || medidor.err429 > 0 || medidor.err5xx > 0">
+      <span x-text="medidor.req"></span> req/min ·
+      <span class="warn-t" x-text="medidor.err429"></span> 429 ·
+      <span class="err-t" x-text="medidor.err5xx"></span> 5xx
+      <span class="muted">(últimos 5 min)</span>
+    </span>
+  </div>
+
+  <div class="barra">
+    <button class="chip" :class="escopo === '' && nivel === '' && busca === '' ? 'on' : ''"
+            @click="escopo = ''; nivel = ''; busca = ''; filtra()">todos</button>
+    <template x-for="e in escopos" :key="e">
+      <button class="chip" :class="escopo === e ? 'on' : ''"
+              @click="escopo = escopo === e ? '' : e; filtra()" x-text="e"></button>
+    </template>
+    <span class="sep"></span>
+    <template x-for="n in ['info', 'warn', 'error']" :key="n">
+      <button class="chip" :class="nivel === n ? 'on' : ''"
+              @click="nivel = nivel === n ? '' : n; filtra()" x-text="n"></button>
+    </template>
+    <input class="input busca" type="text" x-model="busca" @input="buscaAoVivo()"
+           placeholder="buscar na mensagem…" aria-label="buscar na mensagem">
+    <button class="btn" @click="alternarPausa()" x-text="pausado ? '▶ retomar' : '⏸ pausar'"></button>
+    <span class="warn-t" x-cloak x-show="retidos > 0" x-text="retidos + ' retidos'"></span>
+    <button class="btn ghost" x-cloak x-show="notif === 'default'" @click="pedirAvisos()">
+      avisar fora da aba
+    </button>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>quando (local)</th><th>nível</th><th>escopo</th><th>conteúdo</th></tr>
+    </thead>
+    <tbody x-ref="corpo">
+      <template x-for="g in eventos" :key="g.chave">
+        <tr :class="g.linha">
+          <td class="mono muted" :title="g.ultimo + ' UTC'" x-text="quando(g.ultimo)"></td>
+          <td><span class="dot" :class="g.dot"></span></td>
+          <td class="mono" x-text="g.scope"></td>
+          <td>
+            <template x-if="g.access">
+              <div class="access">
+                <code x-text="g.access.metodo + ' ' + g.access.caminho"></code>
+                <span class="st" :class="g.access.st" x-text="g.access.status"></span>
+                <span class="muted" x-text="g.access.dur + ' ms · ' + g.access.host"></span>
+              </div>
+            </template>
+            <template x-if="!g.access">
+              <span x-text="g.message"></span>
+            </template>
+            <template x-if="g.count > 1">
+              <details class="cru">
+                <summary x-text="'×' + g.count + ' em sequência — ver horários'"></summary>
+                <pre x-text="g.times.join('\n')"></pre>
+              </details>
+            </template>
+            <details class="cru">
+              <summary>cru</summary>
+              <pre x-text="g.ultimo + ' UTC (último)\n' + g.message"></pre>
+            </details>
+          </td>
+        </tr>
+      </template>
+    </tbody>
+  </table>
+
+  <div class="empty" x-cloak x-show="!carregando && eventos.length === 0">nenhum evento com esse filtro</div>
+  <p class="muted" x-cloak x-show="fim && eventos.length > 0">fim da trilha</p>
+  <div x-ref="sentinel" class="sentinel" aria-hidden="true"></div>
+</main>
+
+<footer class="wrap-rodape">
+  fluxd — painel API+SSE · horários no fuso do navegador, UTC no cru · horário do último evento no title
+</footer>
+</div>
+<noscript><p style="padding:1rem">Este painel precisa de JavaScript: os dados chegam por API e SSE, sem recarga de página.</p></noscript>
+</body>
+</html>
