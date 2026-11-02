@@ -1209,3 +1209,35 @@ async fn api_eventos_sessao_na_lan_sem_origem_passa() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// Token de leitura auto-gerado (fatia 3): 1º boot escreve valor claro +
+/// hash casando; boot seguinte NÃO regenera (valor estável — quem já
+/// copiou o token não é derrubado por restart).
+#[tokio::test]
+async fn token_leitura_auto_gera_so_uma_vez() {
+    let app = app_sem_docker();
+    let dir = tempfile::tempdir().unwrap();
+    let arquivo = dir.path().join("eventos.token");
+    super::api_publica::garantir_token_leitura_em(&app.state, &arquivo);
+    assert!(arquivo.exists(), "valor claro escrito no 1º boot");
+    let valor = std::fs::read_to_string(&arquivo).unwrap();
+    assert_eq!(valor.trim().len(), 64, "token = 64 chars hex: {valor:?}");
+    let hash = crate::api::auth::sha256_hex(valor.trim().as_bytes());
+    let no_banco = app
+        .state
+        .with(|c| {
+            c.query_row(
+                "SELECT v FROM settings WHERE k = 'eventos_token_hash'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(no_banco, hash, "hash do settings casa com o valor claro");
+    super::api_publica::garantir_token_leitura_em(&app.state, &arquivo);
+    assert_eq!(
+        std::fs::read_to_string(&arquivo).unwrap(),
+        valor,
+        "boot seguinte não regenera"
+    );
+}

@@ -35,7 +35,7 @@ use comandos::env_cmd::{env_edit, env_pull, env_push};
 use comandos::live::live_toggle;
 use comandos::logs::logs;
 use comandos::sync_cmd::{sync_pause_cmd, sync_reset_cmd, sync_resume_cmd, sync_status_cmd};
-use comandos::tokens::{project_token, token_generate, vm_ssh};
+use comandos::tokens::{project_token, token_eventos, token_generate, vm_ssh};
 use comandos::up::{seed_escolhida, up};
 use comandos::watch::watch;
 
@@ -293,6 +293,15 @@ enum TokenCmd {
     /// Gera token novo (CSPRNG 32 bytes), grava o sha256 no SQLite do fluxd
     /// via SSH e o valor claro no config do usuário — estilo key:generate.
     Generate,
+    /// Token de LEITURA da API pública do painel (painel API+SSE, fatia 3):
+    /// mostra o valor claro que o fluxd gera no boot
+    /// (/srv/flux/secrets/eventos.token). Só vale dentro da LAN.
+    Eventos {
+        /// Gera token NOVO — grava hash + arquivo via SSH; o anterior
+        /// deixa de valer na hora.
+        #[arg(long)]
+        gerar: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -570,6 +579,9 @@ async fn main() {
         Cmd::Token {
             sub: TokenCmd::Generate,
         } => token_generate(),
+        Cmd::Token {
+            sub: TokenCmd::Eventos { gerar },
+        } => token_eventos(gerar),
         Cmd::Project {
             cmd: ProjectCmd::Token { name },
         } => project_token(&name),

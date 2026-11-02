@@ -34,7 +34,7 @@ use axum::routing::{get, post};
 use crate::observe_page;
 use crate::panel_auth;
 
-mod api_publica;
+pub(crate) mod api_publica;
 mod assets;
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).

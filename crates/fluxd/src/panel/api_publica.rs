@@ -239,3 +239,91 @@ async fn eventos(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Respons
 fn erro_json(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
+
+// ------------------------------------------------------- token de leitura
+
+/// Arquivo com o VALOR CLARO do token de leitura na VM (mesmo diretório do
+/// `panel.argon2`). O hash vai pro settings; quem precisa do valor lê o
+/// arquivo — o CLI `flux token eventos` faz o cat por SSH. MESMO caminho
+/// hardcoded no CLI (comandos/tokens.rs): caminho de VM é contrato dos dois
+/// lados, igual ao flux.sqlite3 lá.
+pub(crate) const TOKEN_ARQUIVO: &str = "/srv/flux/secrets/eventos.token";
+
+/// 64 chars hex de 32 bytes do CSPRNG do SO — mesmo contrato do token da
+/// API de controle (`flux token generate`).
+fn token_novo_hex() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf).expect("CSPRNG do SO indisponível — não há token seguro sem isso");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Garante o token de leitura configurado no boot (`serve`): settings sem
+/// hash → gera token, escreve o valor claro em `TOKEN_ARQUIVO` (0600) e
+/// grava o hash. FALHA NUNCA derruba o daemon: vira error no log + evento
+/// warn e a API segue fail-closed (503) até resolver. Hash presente sem
+/// arquivo: NÃO regenera (revogar é `flux token eventos --gerar`) — só
+/// avisa. Arquivo antes do hash: se a gravação do hash falhar, o arquivo
+/// fica órfão e o PRÓXIMO boot regenera por cima — sem token zumbi.
+pub(crate) fn garantir_token_leitura(st: &DbState) {
+    garantir_token_leitura_em(st, std::path::Path::new(TOKEN_ARQUIVO));
+}
+
+/// Mesmo fluxo com o caminho injetado — os testes usam tempdir em vez do
+/// /srv/flux/secrets da VM.
+pub(crate) fn garantir_token_leitura_em(st: &DbState, arquivo: &std::path::Path) {
+    if token_hash(st).is_some() {
+        if !arquivo.exists() {
+            tracing::warn!(
+                "{TOKEN_KEY} existe mas {} não — `flux token eventos --gerar` recria o arquivo",
+                arquivo.display()
+            );
+        }
+        return;
+    }
+    let token = token_novo_hex();
+    if let Err(e) = gravar_arquivo_token(arquivo, &token) {
+        let causa = format!(
+            "falha escrevendo {}: {e} — token de leitura NÃO gerado",
+            arquivo.display()
+        );
+        tracing::error!("{causa}");
+        events::event(st, "warn", "painel", &causa);
+        return;
+    }
+    let hash = sha256_hex(token.as_bytes());
+    let gravado = st.with(|c| {
+        c.execute(
+            "INSERT INTO settings(k, v) VALUES (?1, ?2)
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            params![TOKEN_KEY, hash],
+        )
+    });
+    match gravado {
+        Ok(_) => {
+            tracing::info!(
+                "token de leitura da API pública gerado em {}",
+                arquivo.display()
+            );
+            events::event(
+                st,
+                "info",
+                "painel",
+                "api pública de leitura: token gerado — valor claro em /srv/flux/secrets/eventos.token (`flux token eventos` mostra)",
+            );
+        }
+        Err(e) => {
+            // Arquivo órfão de propósito: o próximo boot regenera o par.
+            tracing::error!("falha gravando {TOKEN_KEY}: {e} — regenero no próximo boot");
+        }
+    }
+}
+
+fn gravar_arquivo_token(arquivo: &std::path::Path, token: &str) -> std::io::Result<()> {
+    std::fs::write(arquivo, token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(arquivo, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}

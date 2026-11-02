@@ -113,6 +113,10 @@ pub async fn serve(
 
     let st = state::State::open(&db).map_err(std::io::Error::other)?;
     tracing::info!(db = %db.display(), "estado aberto");
+    // Token de LEITURA da API pública do painel: auto-gerado no 1º boot
+    // (valor em /srv/flux/secrets/eventos.token, hash no settings). Falha
+    // nunca derruba o daemon — API segue fail-closed (panel/api_publica.rs).
+    panel::api_publica::garantir_token_leitura(&st);
 
     let docker = docker::DockerSource::connect();
     if docker.is_some() {

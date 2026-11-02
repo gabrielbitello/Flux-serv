@@ -70,6 +70,90 @@ pub(crate) fn token_generate() {
     println!("próximo comando `flux` já usa o token novo (config.toml [api] token).");
 }
 
+/// `flux token eventos [--gerar]` (painel API+SSE, fatia 3): token de
+/// LEITURA da API pública do painel — mostra o valor claro que o fluxd
+/// gera no boot. `--gerar` cria token NOVO: grava o hash nos settings e o
+/// valor claro no arquivo via SSH; o anterior deixa de valer na hora.
+/// Esse token SÓ vale dentro da LAN (panel/api_publica.rs recusa de fora).
+pub(crate) fn token_eventos(gerar: bool) {
+    let ssh_alvo = crate::ssh_util::ssh_alvo();
+    if !gerar {
+        let remoto = format!("sudo cat {}", EVENTOS_TOKEN_ARQUIVO);
+        let saida = match crate::ssh_util::ssh_vm(&[&remoto]).output() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("erro: ssh não lançado (OpenSSH no PATH?): {e}");
+                std::process::exit(1);
+            }
+        };
+        if !saida.status.success() {
+            eprintln!(
+                "erro: ler {} na VM falhou (ssh {}): {} — o fluxd ainda não gerou? use --gerar",
+                EVENTOS_TOKEN_ARQUIVO,
+                ssh_alvo,
+                String::from_utf8_lossy(&saida.stderr).trim()
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "token de leitura da API pública (valor de {} na VM):",
+            EVENTOS_TOKEN_ARQUIVO
+        );
+        println!("  {}", String::from_utf8_lossy(&saida.stdout).trim());
+        println!();
+        println!(
+            "uso pelos agentes: Authorization: Bearer <token> em /api/* no host do painel — SÓ dentro da LAN."
+        );
+        return;
+    }
+
+    let token = token_novo();
+    let hash = sha256_hex(token.as_bytes());
+    // token e hash são hex de 64 chars gerados aqui — nenhum injeta no
+    // shell remoto (mesma defesa do token_generate/project_token).
+    let remoto_hash = format!(
+        "sudo sqlite3 /srv/flux/state/flux.sqlite3 \"INSERT OR REPLACE INTO \
+         settings(k, v) VALUES ('eventos_token_hash', '{hash}');\""
+    );
+    let remoto_arquivo = format!(
+        "printf '%s' '{token}' | sudo tee {EVENTOS_TOKEN_ARQUIVO} >/dev/null \
+         && sudo chmod 600 {EVENTOS_TOKEN_ARQUIVO}"
+    );
+    for (etapa, remoto) in [
+        ("hash nos settings", &remoto_hash),
+        ("arquivo do valor", &remoto_arquivo),
+    ] {
+        let saida = match crate::ssh_util::ssh_vm(&[remoto]).output() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("erro: ssh não lançado (OpenSSH no PATH?): {e}");
+                std::process::exit(1);
+            }
+        };
+        if !saida.status.success() {
+            eprintln!(
+                "erro: gravar {etapa} na VM falhou (ssh {}): {}",
+                ssh_alvo,
+                String::from_utf8_lossy(&saida.stderr).trim()
+            );
+            eprintln!("o token NÃO é válido até os dois lados gravarem — rode de novo.");
+            std::process::exit(1);
+        }
+    }
+    println!(
+        "hash gravado na VM ({ssh_alvo}) · {} atualizado · token anterior revogado",
+        EVENTOS_TOKEN_ARQUIVO
+    );
+    println!();
+    println!("token de leitura (MOSTRA UMA VEZ — os agentes guardam no config deles):");
+    println!("  {token}");
+}
+
+/// Caminho do valor claro do token de leitura na VM — MESMO caminho do
+/// fluxd (crates/fluxd/src/panel/api_publica.rs::TOKEN_ARQUIVO): contrato
+/// dos dois lados, igual ao flux.sqlite3.
+const EVENTOS_TOKEN_ARQUIVO: &str = "/srv/flux/secrets/eventos.token";
+
 /// Mesmo contrato de nome do registro (api.rs, POST /projects): [a-z0-9-],
 /// não vazio. Validar ANTES do ssh — o nome entra no comando remoto, nome
 /// com aspas/vírgula viraria injeção no shell da VM.
