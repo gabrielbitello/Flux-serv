@@ -28,18 +28,56 @@ Single user, **fail-closed** on every layer (`crates/fluxd/src/panel_auth.rs`):
 
 | Page | What it shows |
 |---|---|
-| `/` | Dashboard: projects with sleep state, hosts, and the live sync status; confirmations arrive as query flags (`/?rescan=1`). |
-| `/projects/{name}` | Project detail: containers, sleep/lease, migrations applied, and events mentioning the project. The sync state and the **Rescan** button live on the dashboard card, not here. |
-| `/projects/{name}/rescan` (POST) | Queues a full rescan of the project's sync session — `flux watch` consumes the queue and runs `flux sync reset`-style work. Post/redirect/get: success returns with `?rescan=1` ("rescan queued"); an error re-renders the page with the real message and a 503 — the panel never fakes success. Every outcome is written to the event trail. |
-| `/events` | Paginated event trail (auth refusals, deploys, rescan requests, errors) — the "nothing is silent" rule made visible. **26/10**: filters by scope (chips), level (info/warn/error) and free-text search on the message, all server-side; access lines render structured (method+path, colored status badge — 429/5xx red, duration, host) with the raw message one click away in a `<details>`; warn/error rows are highlighted. The page refetches itself every 5 s and swaps only the table body (pausable button; hidden tabs don't refetch; a network failure is shown on the label). While an expanded `<details>` is open the refresh is suspended — fetch and swap are skipped and the label says so — so a detail never closes by itself nor slides with incoming rows; it resumes on the next cycle after closing (`31/10`). |
-| `/observe` | 24-hour resource monitor: CPU/RAM curves (server-rendered SVG, zero JavaScript), filters from global → project → container, per-container mini-curves, and a **peaks table** where `<details>` opens the forensics snapshot — a JSON of the peaked container **and all its sibling containers at the same instant** (image + state), captured when CPU > 80% or memory > 85% of limit, anti-spam capped at one peak per container per 300 s. |
+| `/` | **Static shell** (`31/10–02/11` rewrite): Alpine fetches `/api/dashboard` (projects with sleep state + source, migrations count, sync with `rescan_requested`, hosts, last events, watcher anomalies, 24 h event curve as a client-drawn sparkline) and pushes over SSE `/api/dashboard/follow` — **only when the snapshot hash changes**, `: ping` between changes. Health dot in the header pulls `/api/saude` (the `flux doctor` machine) once a minute. Card button **acordar** → `POST /api/projects/{name}/acordar` (session-only; wake = the same machinery a request uses). Rescan confirmations stay query flags (`/?rescan=1`, failure = generic `/?rescan=falha` — cause lives in the events, never in the URL). |
+| `/projects/{name}` | **Static shell** (fatia 6): `/api/projects/{name}` (environments with state/source and the FULL migration list with hashes, sync, hosts, events mentioning the project, REAL live status = hot file + vite port) + SSE `/follow` (push on change). **Tail de logs ao vivo**: `/api/projects/{name}/logs` (the same handler as the :7420 API — text tail or SSE follow), lines rendered as text. **Ações** (fatia 6b): `POST /api/projects/{name}/acoes` runs migrate / optimize:clear / shield:generate / build / seed / migrate:fresh / fresh+seed / live ON/OFF inside the daemon with a **live terminal** (`/acoes/stream` SSE, line by line). Matrix **prod ⊆ dev**: PROD never runs fresh/seed/build (the safe exception is shield — Filament permissions, non-destructive); one action per project (409); destructive ones are dev-only and need **two clicks**; action state is in-memory on purpose (a daemon restart loses a running action and the page says so). |
+| `/projects/{name}/rescan` (POST) | Queues a full rescan of the project's sync session — `flux watch` consumes it. Post/redirect/get: success returns `?rescan=1`; failure now redirects `?rescan=falha` with the REAL cause in the event trail (the shell doesn't render server-side messages anymore). |
+| `/events` | **Static shell** (fatia 4): data 100% from `/api/events` (same server-side filters, JSON with stable `id`) + live stream `/api/events/follow` (SSE). No more innerHTML swap — new events append at the top **with scroll compensation** (nothing slides while you read; an expanded `<details>` NEVER closes), identical consecutive events collapse into a ×N counter with expandable timestamps, infinite scroll, live search (300 ms debounce), remembered filters (localStorage), LOCAL browser time (UTC in the raw detail), a live traffic meter (req/min · 429 · 5xx over 5 min), pause/resume with a held-events counter, and browser notifications for warn/error while the tab is hidden. |
+| `/observe` | 24-hour resource monitor: CPU/RAM curves, filters from global → project → container, per-container mini-curves, and a **peaks table** where `<details>` opens the forensics snapshot (image + state of the peaked container **and its siblings at the same instant**), anti-spam capped at one peak per container per 300 s. Still server-rendered at this commit — the Chart.js/JSON migration is the next slice (fatia 7). |
 
-Pages are generated server-side; JavaScript is minimal and deliberate
-(authorized by Gabriel on 26/10 — "pode ter js sim"): ONLY `/events` re-fetches
-itself to keep the trail live without a full page reload. Everything else
-stays JavaScript-free: filters are plain GET forms, meta-refresh handles the
-dashboard auto-update, and empty data is stated honestly ("no data yet" /
-"no disk truth in this phase") — inventing a zero is treated as a bug.
+**Architecture (31/10–02/11, scoped with Gabriel in question rounds):** pages are
+STATIC shells (no data in HTML, `include_str!`), styled by the approved style
+guide (`/assets/estilo.css` — semantic color only, IBM Plex vendored, OFL) and
+fed by the panel's own JSON API + SSE. Alpine.js 3.17.5 is vendored (MIT; the
+client registers components via `Alpine.data` — CSP-build-ready) and `painel.js`
+NEVER injects HTML from server data (text/textContent only — a Rust test bans
+the injection API). Push model: each page has ONE SSE stream and events push
+**only when data actually changes** (snapshot sha256), with `: ping` keepalives.
+Empty states stay honest ("sem dados ainda") — inventing a zero is a bug.
+
+## Public panel API (`/api/*` on the panel host)
+
+Read-only JSON + SSE for agents (LAN) and for the panel pages themselves
+(scope closed with Gabriel 31/10–02/11). Auth, in ONE middleware layer:
+
+1. **Bearer read-only token** — `settings.eventos_token_hash`; auto-generated
+   on first boot (clear value in `/srv/flux/secrets/eventos.token`, chmod 600;
+   hash BEFORE/AFTER order makes orphan files self-heal on next boot).
+   `flux token eventos` prints it; `--gerar` rotates (hash + file via SSH).
+   LAN-ONLY (hosts file pointing the VM — via Cloudflare every IP arrives
+   external) and **GET only**: any non-GET with the token = 403.
+2. **Panel session** — anywhere; OUTSIDE the LAN it requires `Origin`/`Referer`
+   pointing at the panel host (the "Here Maps" rule): a bare `curl` with a
+   stolen cookie gets 403.
+3. Otherwise 401. Refusals always log an `auth` event with the real IP.
+
+Read endpoints: `/api/events` (+ `/follow` SSE), `/api/dashboard` (+ `/follow`),
+`/api/saude` (doctor JSON), `/api/projects/{name}` (+ `/follow`, `/logs`,
+`/acoes` POST, `/acoes/atual`, `/acoes/stream`). Write endpoints are
+session-only (token is refused): `/acordar`, `/acoes`.
+
+## Login hardening (fatia 8)
+
+- **Global lockout**: 3 wrong passwords within 90 s from OUTSIDE the LAN lock
+  EVERYONE out for 5 min — except LAN, immune on both sides (its failures
+  don't even count). In-memory on purpose (a daemon restart clears it; the
+  per-IP rate limit stays up).
+- **Cloudflare Turnstile** on the login page whenever configured — the SAME
+  keys/widget as the dev gate (`flux gate turnstile`); fail-closed; a failed
+  captcha counts toward the lockout.
+- **"Manter conectado"**: checkbox → 30-day session cookie; default stays 12 h.
+- **"Sair de todos"**: logout with `todos=1` revokes ALL sessions.
+- Login errors travel as query flags (`?erro=1|captcha|lock`) — no form data
+  ever echoes into the URL.
 
 ## Adminer
 

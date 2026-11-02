@@ -2,6 +2,48 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 31/10–02/11 — PAINEL NOVO: API+SSE+Alpine — 10 fatias commitadas, escopo fechado em 13 rodadas de pergunta (`377fada`…`26570db`)
+
+A dor que abriu: detalhe expandido do /events fechava sozinho (fix `377fada`).
+O Gabriel pediu loop de perguntas até ele parar; 13 rodadas fecharam escopo
+(saved em memória: painel-api-sse-escopo-31-10.md) e a implementação correu
+em fatias, TRIO verde escopado `-p fluxd` por fatia:
+
+- **0** estilo.css (style guide aprovado "sala de controle refinada" + mockup
+  Gen UI) + IBM Plex vendida (OFL) + `/assets` sem auth (`2ea9cd0`).
+- **1** `/api/events` JSON + auth em 1 camada: token read-only (SÓ LAN,
+  fail-closed 503/401, 403 de fora) OU sessão (fora da LAN exige
+  Origin/Referer do painel — regra "Here Maps"); recusa = evento `auth`
+  (`0208984`).
+- **3** token auto-gerado no boot (valor em /srv/flux/secrets/eventos.token;
+  arquivo ANTES do hash = auto-cura) + `flux token eventos [--gerar]`
+  (`6f2cb66`).
+- **2** broadcast no events.rs (INSERT+readback num lock) + SSE
+  /api/events/follow (backlog `desde=`, ping 15 s, Lagged re-sincroniza do
+  BANCO — buraco em stream é falha silenciosa) (`588fd80`).
+- **4** /events novo: shell + Alpine vendido; append no topo com scroll
+  compensado (detalhe NUNCA fecha), agrupa ×N, scroll infinito, busca ao
+  vivo, hora local, medidor 5 min, pausar, Notification em background
+  (`8835af2`).
+- **5** dashboard: snapshot SSE push-só-quando-muda (teste matou o bug do
+  campo `gerado` no hash), /api/saude (doctor) com dot no header, acordar
+  com sessão, rescan-falha por flag genérica + evento (`86d6620`).
+- **8** login: lockout global 3/90 s→5 min (LAN imune dos 2 lados),
+  Turnstile (chaves do gate dev), manter conectado 30 d, sair de todos
+  (`ebf2564`).
+- **6a/6b** detalhe do projeto (API+SSE+logs ao vivo montando o handler da
+  :7420) + AÇÕES com terminal ao vivo: migrate/fresh/seed/build/live/
+  optimize/shield, matriz prod ⊆ dev (PROD NUNCA fresh/seed/build; shield
+  é a exceção segura), uma por projeto, exec streaming linha a linha,
+  live com STATUS REAL (hot+porta, `compose::live_status`) (`9544a35`,
+  `26570db`).
+
+Invariantes novos: painel.js NUNCA injeta HTML de dado do servidor (teste
+garante); 1 SSE por página; contratos espelhados JS↔Rust referenciados
+(linha_access, classe_status, dot); registro de ações é global entre testes
+paralelos (nomes exclusivos). RESTAM: fatia 7 (observe + Chart.js), fatia 9
+(schema v7 host + vigia na UI). DEPLOY SÓ SOB ORDEM DO GABRIEL.
+
 ## 31/10 — Doorman: `flux doorman <host>` imprime a request COMPLETA em tempo real, no terminal, sem gravar nada (`WIP → commit`)
 
 - **Pedido do Gabriel**: o access do painel só mostra metadado (`events.rs:94` — o corpo NUNCA é lido pelo fluxd, o gate repassa em stream); ele queria ver tudo que vai pro zcode-api. Modelo escolhido: TAP NO CAMINHO, não log em disco.

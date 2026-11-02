@@ -65,6 +65,15 @@ See [database.md](database.md).
 | `flux token generate` | **Implemented** | New 32-byte CSPRNG API token; sha256 written to the VM's SQLite via SSH, clear value printed **once** and saved to `%USERPROFILE%\.flux\config.toml`. Generating a new one revokes the old. |
 | `flux project token <name>` | **Implemented** | Per-project deploy token for GitHub Secrets; sha256 in `deploy_tokens`, previous token revoked, shown **once**. |
 
+### `flux token eventos [--gerar]`
+
+Read-only token of the panel's public API (scoping 31/10–02/11). Without the
+flag: prints the clear value the daemon generated on first boot
+(`/srv/flux/secrets/eventos.token`, read via SSH). With `--gerar`: creates a
+NEW token (writes hash into `settings.eventos_token_hash` and the clear value
+into the file via SSH — the previous token dies instantly). LAN-only, GET-only:
+agents read the factory, they don't drive it.
+
 ## VM, tunnel, setup
 
 | Command | Status | Notes |
