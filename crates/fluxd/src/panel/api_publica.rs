@@ -29,6 +29,7 @@ use rusqlite::params;
 use super::PanelState;
 use super::formato::page_de;
 use super::leitura;
+use crate::AppState;
 use crate::api::auth::{bearer_token, hash_confere, sha256_hex};
 use crate::events;
 use crate::state::State as DbState;
@@ -68,6 +69,8 @@ pub(super) fn router(st: &PanelState) -> Router<PanelState> {
             "/api/projects/{name}/acoes/stream",
             get(super::acoes::acao_stream),
         )
+        .route("/api/observe", get(observe))
+        .route("/api/observe/follow", get(observe_follow))
         .route_layer(middleware::from_fn_with_state(st.clone(), auth_publica))
 }
 
@@ -585,7 +588,7 @@ async fn dashboard_follow(State(st): State<PanelState>) -> Response {
                     _ = snap_t.tick() => {
                         let json =
                             serde_json::to_string(&leitura::dashboard(&app)).unwrap_or_default();
-                        let hash = sha256_hex(json.as_bytes());
+                        let hash = sha256_hex(json.to_string().as_bytes());
                         if ultimo.as_deref() == Some(hash.as_str()) {
                             continue; // nada mudou: silêncio É o comportamento
                         }
@@ -701,7 +704,7 @@ async fn detalhe_follow(State(st): State<PanelState>, Path(name): Path<String>) 
                             Ok(None) => serde_json::json!({"erro": "não registrado"}).to_string(),
                             Err(e) => serde_json::json!({"erro": e}).to_string(),
                         };
-                        let hash = sha256_hex(json.as_bytes());
+                        let hash = sha256_hex(json.to_string().as_bytes());
                         if ultimo.as_deref() == Some(hash.as_str()) {
                             continue;
                         }
@@ -709,6 +712,142 @@ async fn detalhe_follow(State(st): State<PanelState>, Path(name): Path<String>) 
                         return Some((
                             Ok(format!("data: {json}\n\n")),
                             (snap_t, ping_t, ultimo, app, name),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    resposta_sse(frames)
+}
+
+// -------------------------------------------------- observe (fatia 7)
+
+/// Ponto da série em formato compacto pro Chart.js: [ts_epoch, valor].
+fn ponto(t: i64, v: f64) -> serde_json::Value {
+    serde_json::json!([t, v])
+}
+
+/// `GET /api/observe?projeto=&container=&metrica=cpu|mem|net_rx|net_tx&minutos=60|360|1440`
+/// — MESMAS consultas do render SVG antigo (`observe::serie`,
+/// `series_por_container`, `peaks`), em JSON. Zoom = minutos whitelist
+/// (60/360/1440 — decisão de escopo: mesmos dados, janelas na tela).
+async fn observe(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Response {
+    Json(observe_json(&st.app, q.as_deref())).into_response()
+}
+
+/// Corpo do /api/observe — compartilhado pelo GET e pelo follow (mesma
+/// leitura, o hash decide o push).
+fn observe_json(app: &AppState, query: Option<&str>) -> serde_json::Value {
+    let param = |chave: &str| {
+        query
+            .and_then(|s| {
+                s.split('&')
+                    .find_map(|kv| kv.strip_prefix(chave)?.split_once('=').map(|(_, v)| v))
+            })
+            .map(|v| v.to_owned())
+            .filter(|v| !v.is_empty())
+    };
+    let metrica = match param("metrica").as_deref() {
+        Some("mem") => crate::observe::Metrica::Mem,
+        Some("net_rx") => crate::observe::Metrica::NetRx,
+        Some("net_tx") => crate::observe::Metrica::NetTx,
+        _ => crate::observe::Metrica::Cpu,
+    };
+    let minutos = match param("minutos").as_deref() {
+        Some("60") => 60,
+        Some("360") => 360,
+        _ => 1440,
+    };
+    let projeto = param("projeto");
+    let container = param("container");
+
+    let serie = crate::observe::serie(
+        &app.state,
+        projeto.as_deref(),
+        container.as_deref(),
+        metrica,
+        minutos,
+    );
+    // Drill por container: mesma regra do render antigo (sem filtro de
+    // container E com projeto escolhido).
+    let por_container = match (&container, &projeto) {
+        (None, Some(p)) => crate::observe::series_por_container(&app.state, p, metrica, minutos)
+            .into_iter()
+            .map(|(c, serie)| {
+                serde_json::json!({
+                    "container": c,
+                    "serie": serie.iter().map(|(t, v)| ponto(*t, *v)).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let picos = crate::observe::peaks(&app.state, minutos, projeto.as_deref())
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id, "ts": p.ts, "container": p.container,
+                "projeto": p.compose_project, "service": p.service,
+                "image": p.image, "metric": p.metric,
+                "valor": p.valor, "threshold": p.threshold,
+            })
+        })
+        .collect::<Vec<_>>();
+    let projetos = app.state.list_projects().unwrap_or_default();
+
+    serde_json::json!({
+        "metrica": param("metrica").unwrap_or_else(|| "cpu".into()),
+        "minutos": minutos,
+        "projeto": projeto,
+        "container": container,
+        "projetos": projetos,
+        "serie": serie.iter().map(|(t, v)| ponto(*t, *v)).collect::<Vec<_>>(),
+        "por_container": por_container,
+        "picos": picos,
+    })
+}
+
+/// GET /api/observe/follow — SSE do observe: push só quando o hash das
+/// séries muda (novo sample do ciclo de 30 s = mudança por definição).
+async fn observe_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Response {
+    let app = Arc::clone(&st.app);
+    let query = q.unwrap_or_default();
+    let frames = futures_util::stream::unfold(
+        (
+            tokio::time::interval(DASH_CADA),
+            tokio::time::interval(PING_CADA),
+            None::<String>,
+            app,
+            query,
+        ),
+        |(mut snap_t, mut ping_t, mut ultimo, app, query): (
+            _,
+            _,
+            Option<String>,
+            Arc<AppState>,
+            String,
+        )| async move {
+            loop {
+                tokio::select! {
+                    _ = ping_t.tick() => {
+                        return Some((
+                            Ok(": ping\n\n".to_owned()),
+                            (snap_t, ping_t, ultimo, app, query),
+                        ));
+                    }
+                    _ = snap_t.tick() => {
+                        // Mesma leitura do handler GET: refetch com os
+                        // filtros da própria query.
+                        let json = observe_json(&app, Some(&query));
+                        let hash = sha256_hex(json.to_string().as_bytes());
+                        if ultimo.as_deref() == Some(hash.as_str()) {
+                            continue;
+                        }
+                        ultimo = Some(hash);
+                        return Some((
+                            Ok(format!("data: {json}\n\n")),
+                            (snap_t, ping_t, ultimo, app, query),
                         ));
                     }
                 }

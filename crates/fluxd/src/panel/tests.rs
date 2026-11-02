@@ -659,13 +659,27 @@ async fn observe_exige_sessao_e_responde_com_link_no_nav() {
         "sem sessão manda pro login como qualquer rota"
     );
 
-    let (status, _, body) = get(&app, "/observe").await;
+    let (status, _, shell) = get(&app, "/observe").await;
     assert_eq!(status, StatusCode::OK, "com sessão o monitor responde");
-    assert!(body.contains("Monitor 24 h"), "página do monitor: {body}");
+    assert!(shell.contains("observePage"), "shell do monitor: {shell}");
     assert!(
-        body.contains("href=\"/observe\""),
-        "nav do layout tem o link do Monitor: {body}"
+        shell.contains("/assets/chart.umd.min.js"),
+        "Chart.js vendido no shell: {shell}"
     );
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s2, api) = pedir_api(
+        &app,
+        router,
+        "/api/observe?metrica=cpu&minutos=60",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK);
+    assert!(api.contains("\"serie\":"), "série no JSON: {api}");
+    assert!(api.contains("\"picos\":"), "picos no JSON: {api}");
+    assert!(api.contains("\"projetos\""), "chips de projeto: {api}");
 }
 
 // --------------------------------------------------------------- auth

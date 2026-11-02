@@ -1,0 +1,102 @@
+<!doctype html>
+<!-- Shell do /observe (fatia 7): séries por /api/observe (mesmas consultas
+     do render SVG antigo), gráficos em Chart.js vendido, zoom 1h/6h/24h,
+     picos marcados na curva e tabela forense. SSE empurra quando muda. -->
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flux — monitor</title>
+<link rel="stylesheet" href="/assets/estilo.css">
+<script defer src="/assets/alpine.min.js"></script>
+<script defer src="/assets/chart.umd.min.js"></script>
+<script defer src="/assets/painel.js"></script>
+</head>
+<body>
+<div x-data="observePage">
+<header class="top">
+  <span class="mark">flux<span>/painel</span></span>
+  <nav aria-label="Páginas">
+    <a href="/">dashboard</a><a href="/events">eventos</a><a class="on" href="/observe">monitor</a>
+  </nav>
+  <div class="topdir">
+    <span class="muted" x-text="vivo"></span>
+    <form method="post" action="/logout" class="inline"><button class="btn ghost" type="submit">sair</button></form>
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="todos" value="1">
+      <button class="btn ghost" type="submit" title="revoga sessões em todos os dispositivos">sair de todos</button>
+    </form>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="head">
+    <h1>Monitor</h1>
+    <span class="sub" x-text="resumo()"></span>
+  </div>
+
+  <div class="barra">
+    <button class="chip" :class="projeto === '' ? 'on' : ''" @click="projeto = ''; recarregar()">global</button>
+    <template x-for="p in projetos" :key="p">
+      <button class="chip" :class="projeto === p ? 'on' : ''" @click="projeto = p; container = ''; recarregar()" x-text="p"></button>
+    </template>
+    <span class="sep"></span>
+    <template x-for="m in ['cpu', 'mem', 'net_rx', 'net_tx']" :key="m">
+      <button class="chip" :class="metrica === m ? 'on' : ''" @click="metrica = m; recarregar()" x-text="rotuloMetrica(m)"></button>
+    </template>
+    <span class="sep"></span>
+    <template x-for="z in [[60, '1 h'], [360, '6 h'], [1440, '24 h']]" :key="z[0]">
+      <button class="chip" :class="minutos === z[0] ? 'on' : ''" @click="minutos = z[0]; recarregar()" x-text="z[1]"></button>
+    </template>
+  </div>
+
+  <section class="secao">
+    <h2 x-text="'Série — ' + rotuloMetrica(metrica) + ' · ' + escopoTexto()"></h2>
+    <div class="card" style="padding:10px"><canvas x-ref="curva" height="110"></canvas></div>
+    <div class="empty" x-cloak x-show="snap && snap.serie.length === 0">
+      sem coleta ainda nesta janela — o sampler sobe com o fluxd e os minutos vão aparecendo aqui
+    </div>
+  </section>
+
+  <section class="secao" x-show="snap && snap.por_container.length > 0">
+    <h2>Por container</h2>
+    <div class="grid">
+      <template x-for="c in (snap ? snap.por_container : [])" :key="c.container">
+        <div class="card">
+          <h3><code x-text="c.container"></code></h3>
+          <canvas :id="'mini-' + c.container" height="70"></canvas>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <section class="secao">
+    <h2 x-text="'Picos — ' + rotuloJanela()"></h2>
+    <table x-show="snap && snap.picos.length > 0">
+      <thead><tr><th>quando (UTC)</th><th>container</th><th>projeto</th><th>imagem</th><th>métrica</th><th>valor</th><th></th></tr></thead>
+      <tbody>
+        <template x-for="p in (snap ? snap.picos : [])" :key="p.id">
+          <tr>
+            <td class="mono muted" x-text="p.ts_fmt"></td>
+            <td class="mono" x-text="p.container"></td>
+            <td x-text="p.projeto"></td>
+            <td class="mono muted" x-text="p.image"></td>
+            <td x-text="p.metric"></td>
+            <td class="err-t mono" x-text="p.valor_fmt"></td>
+            <td>
+              <details class="cru"><summary>forense</summary><pre x-text="p.raw || '(snapshot indisponível nesta janela)'"></pre></details>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="empty" x-cloak x-show="snap && snap.picos.length === 0">
+      nenhum pico registrado nesta janela — picos aparecem quando CPU passa de 80% ou memória de 85% do limite
+    </div>
+  </section>
+</main>
+</div>
+<noscript><p style="padding:1rem">Este painel precisa de JavaScript: os gráficos são Chart.js e os dados chegam por API/SSE.</p></noscript>
+</body>
+</html>

@@ -616,3 +616,216 @@ document.addEventListener('alpine:init', () => {
     },
   }));
 });
+
+// ------------------------------------------------------------------ observe
+document.addEventListener('alpine:init', () => {
+  Alpine.data('observePage', () => ({
+    snap: null,
+    projeto: '',
+    container: '',
+    metrica: 'cpu',
+    minutos: 1440,
+    projetos: [],
+    vivo: 'conectando…',
+    es: null,
+    graficos: {}, // canvas → Chart (destrói antes de recriar)
+
+    ROTULOS: {
+      cpu: 'CPU (%)',
+      mem: 'Memória (%)',
+      net_rx: 'Rede RX',
+      net_tx: 'Rede TX',
+    },
+
+    init() {
+      const q = new URLSearchParams(location.search);
+      const p = q.get('projeto');
+      const c = q.get('container');
+      const m = q.get('metrica');
+      const mm = parseInt(q.get('minutos'), 10);
+      if (p) this.projeto = p;
+      if (c) this.container = c;
+      if (m && this.ROTULOS[m]) this.metrica = m;
+      if ([60, 360, 1440].includes(mm)) this.minutos = mm;
+      this.recarregar();
+      this.conectar();
+      // Tema do SO mudou → gráficos redesenham com as cores novas.
+      window
+        .matchMedia('(prefers-color-scheme: dark)')
+        .addEventListener('change', () => this.desenhar());
+    },
+
+    url() {
+      const qs = new URLSearchParams();
+      if (this.projeto) qs.set('projeto', this.projeto);
+      if (this.container) qs.set('container', this.container);
+      qs.set('metrica', this.metrica);
+      qs.set('minutos', this.minutos);
+      return '/api/observe?' + qs.toString();
+    },
+
+    async recarregar() {
+      try {
+        const r = await fetch(this.url());
+        if (!r.ok) throw new Error('api ' + r.status);
+        const d = await r.json();
+        this.snap = d;
+        this.projetos = d.projetos || [];
+        this.$nextTick(() => this.desenhar());
+      } catch (e) {
+        this.vivo = 'falhou: ' + e.message;
+      }
+    },
+
+    conectar() {
+      this.es = new EventSource('/api/observe/follow?' + this.url().split('?')[1]);
+      this.es.onopen = () => {
+        this.vivo = 'ao vivo';
+      };
+      this.es.onerror = () => {
+        this.vivo = 'reconectando…';
+      };
+      this.es.onmessage = (m) => {
+        try {
+          this.snap = JSON.parse(m.data);
+          this.projetos = this.snap.projetos || [];
+          this.$nextTick(() => this.desenhar());
+        } catch (_) {}
+      };
+    },
+
+    // Cores do style guide lidas do CSS (tema claro/escuro de graça).
+    cor(nome) {
+      return getComputedStyle(document.documentElement).getPropertyValue(nome).trim();
+    },
+
+    destruirGraficos() {
+      for (const k of Object.keys(this.graficos)) {
+        this.graficos[k].destroy();
+        delete this.graficos[k];
+      }
+    },
+
+    desenhar() {
+      if (!this.snap || typeof Chart === 'undefined') return;
+      this.destruirGraficos();
+      const cor = {
+        linha: this.cor('--info') || '#58a6ff',
+        pico: this.cor('--err') || '#f85149',
+        grade: this.cor('--line') || '#262d37',
+        texto: this.cor('--muted') || '#8b98a7',
+      };
+      const fmtValor = (v) => (v >= 100 ? Math.round(v) : v.toFixed(1));
+      const base = {
+        borderColor: cor.linha,
+        backgroundColor: cor.linha,
+        pointRadius: 0,
+        tension: 0.25,
+        borderWidth: 1.5,
+      };
+      const opcoes = (rotuloY) => ({
+        responsive: true,
+        animation: false,
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: (itens) =>
+                itens.length
+                  ? new Date(itens[0].parsed.x).toLocaleTimeString()
+                  : '',
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: 'linear',
+            ticks: { color: cor.texto, maxTicksLimit: 6, callback: (v) => new Date(v).toLocaleTimeString() },
+            grid: { color: cor.grade },
+          },
+          y: {
+            ticks: { color: cor.texto, callback: (v) => fmtValor(v) },
+            grid: { color: cor.grade },
+            title: { display: !!rotuloY, text: rotuloY || '', color: cor.texto },
+          },
+        },
+      });
+      const datasetSerie = {
+        label: 'série',
+        data: this.snap.serie.map(([t, v]) => ({ x: t, y: v })),
+        ...base,
+      };
+      // Picos MARCADOS na curva (decisão de escopo): scatter vermelho nos
+      // instantes em que o vigia capturou pico DA MESMA métrica.
+      const picosDaMetrica = this.snap.picos.filter((p) =>
+        this.metricaComeca(p.metric, this.metrica),
+      );
+      const datasetPicos = {
+        label: 'pico',
+        data: picosDaMetrica.map((p) => ({ x: p.ts * 1000, y: p.valor })),
+        pointRadius: 5,
+        pointBackgroundColor: cor.pico,
+        borderColor: 'transparent',
+        showLine: false,
+      };
+      const ctxCurva = this.$refs.curva.getContext('2d');
+      this.graficos.curva = new Chart(ctxCurva, {
+        type: 'line',
+        data: { datasets: [datasetSerie, datasetPicos] },
+        options: opcoes(''),
+      });
+      // Mini-curvas por container.
+      for (const c of this.snap.por_container) {
+        const el = document.getElementById('mini-' + c.container);
+        if (!el) continue;
+        this.graficos[c.container] = new Chart(el.getContext('2d'), {
+          type: 'line',
+          data: {
+            datasets: [
+              {
+                label: c.container,
+                data: c.serie.map(([t, v]) => ({ x: t, y: v })),
+                ...base,
+              },
+            ],
+          },
+          options: {
+            ...opcoes(''),
+            plugins: { legend: { display: false }, tooltip: { enabled: false } },
+            scales: {
+              x: { display: false, type: 'linear' },
+              y: { display: false },
+            },
+          },
+        });
+      }
+    },
+
+    // Picos guardam a métrica como coluna ('cpu_pct'/'mem_pct'/...): casa
+    // pelo prefixo — MESMO contrato do SQL do observe.
+    metricaComeca(metricaPico, filtro) {
+      return metricaPico.startsWith(filtro.split('_')[0]);
+    },
+
+    rotuloMetrica(m) {
+      return this.ROTULOS[m] || m;
+    },
+    rotuloJanela() {
+      return this.minutos === 60 ? '1 h' : this.minutos === 360 ? '6 h' : '24 h';
+    },
+    escopoTexto() {
+      return this.container
+        ? 'container ' + this.container
+        : this.projeto
+          ? 'projeto ' + this.projeto
+          : 'global';
+    },
+    resumo() {
+      if (!this.snap) return 'carregando…';
+      return (
+        this.rotuloMetrica(this.metrica) + ' · ' + this.escopoTexto() + ' · ' + this.rotuloJanela()
+      );
+    },
+  }));
+});

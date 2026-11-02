@@ -18,7 +18,6 @@ pub mod guard;
 pub mod mcp;
 pub mod migrations;
 pub mod observe;
-pub mod observe_page;
 pub mod pages;
 pub mod panel;
 pub mod panel_auth;

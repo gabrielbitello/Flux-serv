@@ -31,7 +31,6 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
-use crate::observe_page;
 use crate::panel_auth;
 
 pub(crate) mod acoes;
@@ -42,6 +41,7 @@ mod assets;
 const SHELL_EVENTOS: &str = include_str!("shells/eventos.html");
 const SHELL_DASHBOARD: &str = include_str!("shells/dashboard.html");
 const SHELL_PROJETO: &str = include_str!("shells/projeto.html");
+const SHELL_OBSERVE: &str = include_str!("shells/observe.html");
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
 use crate::ui::{NOINDEX, x_robots_tag};
@@ -85,7 +85,7 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
         .route("/events", get(pagina_eventos))
         // Monitor de recursos (13): curvas/picos do observe — o handler extrai
         // `Arc<AppState>` via `FromRef<PanelState>`; auth herdada do guard.
-        .route("/observe", get(observe_page::pagina))
+        .route("/observe", get(observe_shell))
         .fallback(rota_desconhecida)
         .route_layer(middleware::from_fn_with_state(st.clone(), exige_sessao));
     Router::new()
@@ -96,6 +96,7 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
         .route("/assets/estilo.css", get(assets::estilo))
         .route("/assets/alpine.min.js", get(assets::alpine))
         .route("/assets/painel.js", get(assets::painel_js))
+        .route("/assets/chart.umd.min.js", get(assets::chartjs))
         .route("/assets/fontes/{arquivo}", get(assets::fonte))
         // API pública de leitura (escopo 31/10): auth própria (token LAN /
         // sessão+origem), fora do guard de sessão.
@@ -335,6 +336,12 @@ fn resposta(status: StatusCode, page: String) -> Response {
 /// nunca volta na URL — regra do post/redirect/get mantida).
 async fn dashboard() -> Response {
     resposta(StatusCode::OK, SHELL_DASHBOARD.to_owned())
+}
+
+/// GET /observe — SHELL estática (fatia 7): séries por /api/observe
+/// (mesmas consultas do render SVG), gráficos em Chart.js vendido.
+async fn observe_shell() -> Response {
+    resposta(StatusCode::OK, SHELL_OBSERVE.to_owned())
 }
 
 /// GET /projects/{name} — SHELL estática (fatia 6a): snapshot por

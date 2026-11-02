@@ -21,6 +21,9 @@ const ALPINE: &str = include_str!("assets/alpine.min.js");
 /// do servidor — invariant testado).
 const PAINEL_JS: &str = include_str!("assets/painel.js");
 
+/// Chart.js 4.4.7 VENDIDO (MIT, CHARTJS-LICENSE-MIT) — gráficos do /observe.
+const CHARTJS: &str = include_str!("assets/chart.umd.min.js");
+
 const PLEX_SANS_400: &[u8] = include_bytes!("fontes/IBMPlexSans-Regular.woff2");
 const PLEX_SANS_500: &[u8] = include_bytes!("fontes/IBMPlexSans-Medium.woff2");
 const PLEX_SANS_600: &[u8] = include_bytes!("fontes/IBMPlexSans-SemiBold.woff2");
@@ -43,6 +46,11 @@ pub(super) async fn painel_js() -> Response {
         PAINEL_JS.as_bytes(),
         "application/javascript; charset=utf-8",
     )
+}
+
+/// `GET /assets/chart.umd.min.js` — gráficos do /observe, sem CDN.
+pub(super) async fn chartjs() -> Response {
+    resposta(CHARTJS.as_bytes(), "application/javascript; charset=utf-8")
 }
 
 /// `GET /assets/fontes/{arquivo}` — woff2 casando por nome exato; nome
