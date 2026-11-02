@@ -1,0 +1,137 @@
+/*! Painel flux — style guide aprovado pelo Gabriel (02/11/2026, "sala de
+   controle refinada"): denso, cor é SEMPRE um dado (semântica), Plex vendida
+   no repo (OFL.txt), mobile empilha, foco visível, reduced-motion respeitado.
+   Família NOVA do painel — convive com ui.rs::CSS_ADMIN até a última página
+   server-renderada migrar; quando isso acontecer, CSS_ADMIN morre. */
+
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:400;font-display:swap;
+src:url(/assets/fontes/IBMPlexSans-Regular.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:500;font-display:swap;
+src:url(/assets/fontes/IBMPlexSans-Medium.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:600;font-display:swap;
+src:url(/assets/fontes/IBMPlexSans-SemiBold.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;
+src:url(/assets/fontes/IBMPlexMono-Regular.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;
+src:url(/assets/fontes/IBMPlexMono-Medium.woff2) format('woff2')}
+
+:root{
+--bg:#f5f6f7;--card:#ffffff;--surface2:#fafafb;--text:#1a222b;--muted:#66727f;--line:#e2e6ea;
+--ok:#1a7f37;--okbg:#e4f2e9;--warn:#9a6700;--warnbg:#f5ead4;--err:#cf222e;--errbg:#fbe9ea;
+--info:#0550ae;--infobg:#e3edf9;--idle:#66727f;--idlebg:#eceff2}
+@media (prefers-color-scheme:dark){:root{
+--bg:#0e1216;--card:#151a21;--surface2:#1a2029;--text:#e8edf3;--muted:#8b98a7;--line:#262d37;
+--ok:#3fb950;--okbg:#12261a;--warn:#d29922;--warnbg:#2a2210;--err:#f85149;--errbg:#2d1517;
+--info:#58a6ff;--infobg:#12233b;--idle:#8b98a7;--idlebg:#1f2631}}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+font:13px/1.5 'IBM Plex Sans',system-ui,sans-serif;padding-bottom:3rem}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace}
+a{color:var(--info);text-decoration:none}
+a:hover{text-decoration:underline}
+::selection{background:var(--infobg)}
+:focus-visible{outline:2px solid var(--info);outline-offset:1px}
+button{font:inherit}
+
+/* ---------- topo ---------- */
+.top{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:18px;
+height:46px;padding:0 18px;background:var(--card);border-bottom:1px solid var(--line)}
+.mark{font-family:'IBM Plex Mono',monospace;font-weight:500;font-size:14px}
+.mark span{color:var(--muted);font-weight:400}
+.top nav{display:flex;gap:2px}
+.top nav a{color:var(--muted);padding:4px 9px;border-radius:6px;font-weight:500}
+.top nav a:hover{color:var(--text);background:var(--surface2);text-decoration:none}
+.top nav a.on{color:var(--text);background:var(--surface2)}
+.saude{display:inline-flex;align-items:center;gap:7px;padding:3px 10px;
+border:1px solid var(--line);border-radius:99px;color:var(--muted);
+font-size:12px;cursor:pointer;background:none}
+.saude:hover{color:var(--text)}
+.topdir{margin-left:auto;display:flex;align-items:center;gap:10px}
+
+/* ---------- pontos, badges, chips ---------- */
+.dot{width:8px;height:8px;border-radius:99px;display:inline-block;flex:none}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.err{background:var(--err)}
+.dot.idle{background:var(--idle);opacity:.55}
+.dot.pulse{box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 18%,transparent)}
+.tag{font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:500;
+padding:1px 7px;border-radius:5px;letter-spacing:.2px}
+.tag.dev{color:var(--info);background:var(--infobg)}
+.tag.prod{color:var(--warn);background:var(--warnbg)}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 11px;
+border:1px solid var(--line);border-radius:99px;color:var(--muted);
+background:none;cursor:pointer;font-size:12px}
+.chip:hover{color:var(--text)}
+.chip.on{color:var(--text);border-color:var(--muted);background:var(--surface2)}
+
+/* ---------- botões ---------- */
+.btn{display:inline-flex;align-items:center;gap:6px;font-weight:500;font-size:12.5px;
+padding:5px 13px;border-radius:6px;cursor:pointer;
+background:none;border:1px solid var(--line);color:var(--text);text-decoration:none}
+.btn:hover{background:var(--surface2);text-decoration:none}
+.btn.primary{background:var(--text);color:var(--bg);border-color:var(--text)}
+.btn.primary:hover{opacity:.88;background:var(--text)}
+.btn.danger{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,transparent)}
+.btn.danger:hover{background:var(--errbg)}
+.btn.ghost{border-color:transparent;color:var(--muted)}
+.btn.ghost:hover{color:var(--text);background:var(--surface2)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn:disabled:hover{background:none}
+
+/* ---------- entrada ---------- */
+.input{font:inherit;font-size:12.5px;color:var(--text);background:var(--card);
+border:1px solid var(--line);border-radius:6px;padding:5px 10px}
+.input::placeholder{color:var(--muted)}
+
+/* ---------- estrutura ---------- */
+.wrap{max-width:1240px;margin:0 auto;padding:18px}
+.wrap-estreito{max-width:900px}
+.head{display:flex;align-items:baseline;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.head h1{font-size:17px;font-weight:600;margin:0}
+.head .sub{color:var(--muted);font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.duo{display:grid;grid-template-columns:5fr 7fr;gap:10px;margin-top:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:13px 14px}
+.card h3{margin:0 0 9px;font-size:13.5px;font-weight:600;
+display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card h3 svg{width:14px;height:14px;color:var(--muted)}
+.kv{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:2.5px 0}
+.kv b{color:var(--muted);font-weight:400;min-width:58px}
+.rotulo{font-size:12px;font-weight:600;color:var(--muted);
+margin:22px 0 8px;padding-top:14px;border-top:1px solid var(--line)}
+
+/* ---------- tabela densa (linha ~32px) ---------- */
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:11.5px;font-weight:500;color:var(--muted);
+padding:5px 10px;border-bottom:1px solid var(--line)}
+td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);
+font-size:12.5px;vertical-align:top}
+tr:last-child td{border-bottom:none}
+tr.lwarn td{background:var(--warnbg)}
+tr.lerr td{background:var(--errbg)}
+td code{background:var(--idlebg);color:var(--text);border-radius:4px;
+padding:.05rem .3rem;font-family:'IBM Plex Mono',monospace;font-size:.9em}
+
+/* ---------- terminal ---------- */
+.term{font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--surface2);
+border:1px solid var(--line);border-radius:8px;padding:10px 12px;line-height:1.6;
+white-space:pre-wrap;word-break:break-word}
+.term .t-ok{color:var(--ok)}.term .t-err{color:var(--err)}.term .t-dim{color:var(--muted)}
+
+/* ---------- utilitários ---------- */
+.muted{color:var(--muted)}
+.ok-t{color:var(--ok)}.warn-t{color:var(--warn)}.err-t{color:var(--err)}
+.empty{background:var(--card);border:1px dashed var(--line);border-radius:8px;
+padding:1.4rem;text-align:center;color:var(--muted)}
+.pager{display:flex;gap:1rem;margin-top:.8rem}
+footer{margin-top:2rem;color:var(--muted);font-size:11px}
+
+@media (max-width:900px){
+.grid{grid-template-columns:1fr}
+.duo{grid-template-columns:1fr}
+.top{flex-wrap:wrap;height:auto;padding:8px 12px}
+.wrap{padding:12px}
+}
+@media (prefers-reduced-motion:reduce){
+*{transition:none!important;animation:none!important}
+}

@@ -914,3 +914,68 @@ async fn pagina_de_eventos_tem_filtros_estrutura_e_js_de_refresh() {
         "chip ativo visível no filtro: {filtrado}"
     );
 }
+
+/// Assets (03): estilo e fontes são PÚBLICOS (sem sessão — a página de
+/// login também carrega o estilo) e embedded; nome desconhecido = 404 sem
+/// tocar disco.
+#[tokio::test]
+async fn assets_estilo_publico_sem_sessao() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, headers, body) =
+        pedir(&app, router, "GET", "/assets/estilo.css", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/css"),
+        "content-type css: {:?}",
+        headers[header::CONTENT_TYPE]
+    );
+    assert!(body.contains("IBM Plex Sans"), "fonte vendida declarada");
+    assert!(body.contains("--err:"), "tokens semânticos presentes");
+}
+
+#[tokio::test]
+async fn assets_fonte_publica_e_404_para_nome_desconhecido() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url: hyper::Uri = format!("http://{addr}/assets/fontes/IBMPlexSans-Regular.woff2")
+        .parse()
+        .unwrap();
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(url)
+        .header(header::HOST, "flux.bitello.xyz")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.http.request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CONTENT_TYPE], "font/woff2");
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    assert_eq!(&bytes[..4], b"wOF2", "woff2 de verdade, não página de erro");
+    // Nome fora da tabela = 404 (sem listagem, sem disco).
+    let (router2, _dir2) = painel_com_auth(&app).await;
+    let (s2, _, _) = pedir(
+        &app,
+        router2,
+        "GET",
+        "/assets/fontes/hack.woff2",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s2, StatusCode::NOT_FOUND);
+}

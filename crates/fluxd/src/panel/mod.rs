@@ -33,6 +33,8 @@ use axum::routing::{get, post};
 
 use crate::observe_page;
 use crate::panel_auth;
+
+mod assets;
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
 use crate::ui::{NOINDEX, x_robots_tag};
@@ -82,6 +84,10 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
     Router::new()
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", post(logout))
+        // Assets estáticos (03): fora do guard — CSS/fonte não têm segredo e
+        // a página de login também carrega o estilo.
+        .route("/assets/estilo.css", get(assets::estilo))
+        .route("/assets/fontes/{arquivo}", get(assets::fonte))
         .merge(protegido)
         .with_state(st)
 }
