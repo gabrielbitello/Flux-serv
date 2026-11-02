@@ -51,6 +51,9 @@ pub(super) fn fmt_utc(secs: i64) -> String {
 
 /// Dias desde 1970-01-01 a partir do civil — a INVERSA exata do algoritmo
 /// civil de Hinnant usado em `fmt_utc` (mesma época, mesmo deslocamento).
+/// Sem consumidor server-side desde a fatia 5 (epoch vive no JSON) —
+/// contratos com testes fixando a forma.
+#[cfg_attr(not(test), allow(dead_code))]
 fn dias_de_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -65,6 +68,7 @@ fn dias_de_civil(y: i64, m: i64, d: i64) -> i64 {
 /// timestamps do estado) e "YYYY-MM-DDTHH:MM:SSZ" (RFC3339 do `updated_at`
 /// do sync) → epoch UTC. O que não parseia (ou está fora do relógio civil)
 /// vira `None` — o chamador mostra o texto cru em vez de inventar hora.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn epoch_de(s: &str) -> Option<i64> {
     let (dia, hora) = s.trim().split_once([' ', 'T'])?;
     let mut p = dia.split('-');
@@ -149,6 +153,7 @@ pub(super) fn badge_level(level: &str) -> String {
 /// do fluxd SEM sessão local viva) e fica no cinza de "sem sessão" — não é
 /// trabalho. Sem linha no estado = "sem sessão" (cinza): o painel não inventa
 /// sessão.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn badge_sync(row: Option<&crate::sync::SyncRow>) -> (&'static str, &'static str) {
     let Some(r) = row else {
         return ("sb-idle", "sem sessão");

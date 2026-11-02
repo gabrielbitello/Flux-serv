@@ -272,30 +272,46 @@ fn badge_sync_segue_a_regra_do_status_digerido() {
 
 /// Card sem sessão de sync é honesto ("sem sessão", cinza) e traz o form
 /// de rescan apontando para o POST certo.
+/// Dashboard (fatia 5): shell estática + snapshot via API — projeto sem
+/// linha de sync vira `"sync":null` (o cliente mostra "sem sessão"; o
+/// painel não inventa sessão).
 #[tokio::test]
-async fn dashboard_mostra_sem_sessao_e_form_de_rescan() {
+async fn dashboard_shell_e_snapshot_sem_sync() {
     let app = app_sem_docker();
     app.state.register_project("vipers", "", "h").unwrap();
-    let (status, _, body) = get(&app, "/").await;
+    let (status, _, shell) = get(&app, "/").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        body.contains("sem sessão"),
-        "card sem sync não inventa sessão: {body}"
-    );
-    assert!(
-        body.contains("action=\"/projects/vipers/rescan\""),
-        "botão de rescan aponta para o POST: {body}"
-    );
+    assert!(shell.contains("dashboardPage"), "componente: {shell}");
+    let (_, _, js) = get(&app, "/assets/painel.js").await;
+    assert!(js.contains("/api/dashboard/follow"), "SSE no cliente: {js}");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s2, snap) = pedir_api(
+        &app,
+        router,
+        "/api/dashboard",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK, "{snap}");
+    assert!(snap.contains("\"nome\":\"vipers\""), "{snap}");
+    assert!(snap.contains("\"sync\":null"), "sem sync é null: {snap}");
 }
 
-/// Confirmação do rescan chega como aviso no dashboard (`/?rescan=1`).
+/// Aviso do rescan (`/?rescan=1` e `/?rescan=falha`) é TRATADO PELO CLIENTE
+/// (shell estática) — o contrato vive no painel.js.
 #[tokio::test]
-async fn dashboard_com_flag_rescan_mostra_confirmacao() {
+async fn dashboard_aviso_de_rescan_e_do_cliente() {
     let app = app_sem_docker();
-    let (_, _, body) = get(&app, "/?rescan=1").await;
+    let (_, _, js) = get(&app, "/assets/painel.js").await;
     assert!(
-        body.contains("rescan queued — o flux watch executa"),
-        "confirmação na página: {body}"
+        js.contains("'rescan'"),
+        "flag rescan tratada no cliente: {js}"
+    );
+    assert!(
+        js.contains("'falha'"),
+        "falha do rescan tem aviso próprio: {js}"
     );
 }
 
@@ -314,21 +330,34 @@ async fn rescan_exige_sessao_como_toda_rota_protegida() {
     );
 }
 
-/// Rescan de projeto não registrado: recusa com a mensagem REAL na UI
-/// (503) — o painel não finge que o pedido entrou na fila.
+/// Rescan de projeto não registrado (fatia 5): redirect com flag genérica
+/// (nome/causa NÃO vão pra URL) e a causa REAL no evento — o painel de
+/// eventos mostra, nada fingido.
 #[tokio::test]
-async fn rescan_de_projeto_desconhecido_mostra_o_erro_na_ui() {
+async fn rescan_de_projeto_desconhecido_flag_e_evento() {
     let app = app_sem_docker();
-    let (status, _, body) = post_logado(&app, "/projects/fantasma/rescan").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        body.contains("Falha ao pedir rescan de fantasma"),
-        "erro nomeia o projeto na página: {body}"
+    let (status, headers, _) = post_logado(&app, "/projects/fantasma/rescan").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        Some("/?rescan=falha"),
+        "flag genérica na URL"
     );
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (_, evs) = pedir_api(
+        &app,
+        router,
+        "/api/events?escopo=painel",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
     assert!(
-        body.contains("não registrado"),
-        "mensagem real do sync.rs na página: {body}"
+        evs.contains("rescan recusado para fantasma"),
+        "causa real no evento: {evs}"
     );
+    assert!(evs.contains("não registrado"), "{evs}");
 }
 
 /// Rescan de projeto registrado: post/redirect/get de volta ao dashboard
@@ -344,14 +373,21 @@ async fn rescan_de_projeto_registrado_confirma_e_marca_pendente() {
         Some("/?rescan=1"),
         "redirect de volta ao dashboard"
     );
-    let (_, _, body) = get(&app, "/?rescan=1").await;
+    let (_, _, shell) = get(&app, "/?rescan=1").await;
+    assert!(shell.contains("dashboardPage"), "shell servida: {shell}");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (_, snap) = pedir_api(
+        &app,
+        router,
+        "/api/dashboard",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
     assert!(
-        body.contains("rescan queued — o flux watch executa"),
-        "confirmação na página: {body}"
-    );
-    assert!(
-        body.contains("rescan pendente"),
-        "flag do request_rescan vira badge: {body}"
+        snap.contains("\"rescan_requested\":true"),
+        "flag do request_rescan no snapshot: {snap}"
     );
 }
 
@@ -406,28 +442,37 @@ async fn dashboard_mostra_sono_migrations_e_eventos() {
         "GET / 200 3ms host=vipers-d.bitello.xyz",
     );
 
-    let (status, _, body) = get(&app, "/").await;
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (status, snap) = pedir_api(
+        &app,
+        router,
+        "/api/dashboard",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("vipers"), "body: {body}");
+    assert!(snap.contains("\"nome\":\"vipers\""), "{snap}");
     assert!(
-        body.contains("dormindo") && body.contains("pausado"),
-        "estados de ambos ambientes: {body}"
+        snap.contains("\"estado\":\"sleeping\"") && snap.contains("\"estado\":\"paused\""),
+        "estados de ambos ambientes: {snap}"
     );
     assert!(
-        body.contains("estado (sweep 60 s)"),
-        "sem docker, a FONTE é declarada: {body}"
+        snap.contains("sweep"),
+        "sem docker, a FONTE é declarada: {snap}"
     );
     assert!(
-        body.contains("migrations aplicadas: 1"),
-        "contagem de migrations no card: {body}"
+        snap.contains("\"aplicadas\":1"),
+        "contagem de migrations no card: {snap}"
     );
     assert!(
-        body.contains("GET / 200 3ms host=vipers-d.bitello.xyz"),
-        "últimos eventos: {body}"
+        snap.contains("GET / 200 3ms host=vipers-d.bitello.xyz"),
+        "últimos eventos: {snap}"
     );
     assert!(
-        body.contains("<svg") && body.contains("<polyline"),
-        "evento recente dentro da janela desenha a curva: {body}"
+        snap.contains("\"curva\":{"),
+        "evento recente dentro da janela vira curva: {snap}"
     );
 }
 
@@ -1260,7 +1305,7 @@ async fn ler_ate(body: &mut hyper::body::Incoming, alvo: &str, max_frames: usize
             break;
         }
         match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(10),
             http_body_util::BodyExt::frame(body),
         )
         .await
@@ -1343,5 +1388,129 @@ async fn sse_eventos_follow_respeita_filtro() {
     assert!(
         !frames.contains("sse-info-fora-1"),
         "info NÃO passa no filtro warn: {frames}"
+    );
+}
+
+// ------------------------------------------------- dashboard: endpoints novos
+
+/// ACORDAR é AÇÃO: token de leitura = 403 (read-only por contrato), sem
+/// credencial = 401, com sessão na LAN sem Docker = 503 honesto.
+#[tokio::test]
+async fn acordar_e_acao_sessao_obrigatoria() {
+    let app = app_sem_docker();
+    app.state.register_project("vipers", "", "h").unwrap();
+    gravar_token_leitura(&app);
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let post = |token: Option<String>, cookie: Option<String>| {
+        let url: hyper::Uri = format!("http://{addr}/api/projects/vipers/acordar")
+            .parse()
+            .unwrap();
+        let mut b = axum::http::Request::builder()
+            .method("POST")
+            .uri(url)
+            .header(header::HOST, "flux.bitello.xyz")
+            .header("x-forwarded-for", "192.168.140.50");
+        if let Some(t) = token {
+            b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c);
+        }
+        app.http.request(b.body(Body::empty()).unwrap())
+    };
+
+    let r = post(Some(TOKEN_LEITURA.into()), None).await.unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN, "token NÃO executa ação");
+    let r = post(None, None).await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = post(None, Some(cookie)).await.unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "sessão ok, mas sem Docker a recusa é honesta"
+    );
+}
+
+/// Push SÓ QUANDO MUDA: o primeiro frame é o snapshot; snapshot idêntico
+/// NÃO gera frame novo (só ping). Mudou (evento novo muda os "eventos"),
+/// o frame seguinte carrega o snapshot novo.
+#[tokio::test]
+async fn sse_dashboard_pusha_so_quando_muda() {
+    let app = app_sem_docker();
+    app.state
+        .register_project("vipers", "name = \"vipers\"", "hash1")
+        .unwrap();
+    let (router2, _dir2) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router2).await;
+    let (status, ctype, mut body) = {
+        // abre o stream com sessão+LAN
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router2).await.unwrap();
+        });
+        let url: hyper::Uri = format!("http://{addr}/api/dashboard/follow")
+            .parse()
+            .unwrap();
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri(url)
+            .header(header::HOST, "flux.bitello.xyz")
+            .header(header::COOKIE, &cookie)
+            .header("x-forwarded-for", "192.168.140.50")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.http.request(req).await.unwrap();
+        let ctype = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        (resp.status(), ctype, resp.into_body())
+    };
+    assert_eq!(status, StatusCode::OK);
+    assert!(ctype.starts_with("text/event-stream"), "{ctype}");
+    let primeiro = ler_ate(&mut body, "\"projetos\"", 10).await;
+    assert!(
+        primeiro.contains("\"nome\":\"vipers\""),
+        "snapshot 1: {primeiro}"
+    );
+    // Snapshot idêntico: NADA chega em 7 s (o tick de 5 s passa em branco).
+    // Janela de silêncio: NENHUM snapshot novo em 7 s — `: ping` pode (o
+    // primeiro tick do interval dispara imediato e é comentário, não dado).
+    let fim = tokio::time::Instant::now() + std::time::Duration::from_secs(7);
+    loop {
+        let restante = fim.saturating_duration_since(tokio::time::Instant::now());
+        if restante.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(restante, http_body_util::BodyExt::frame(&mut body)).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(d) = frame.data_ref() {
+                    let txt = String::from_utf8_lossy(d);
+                    assert!(
+                        !txt.contains("\"projetos\""),
+                        "push sem mudança de snapshot: {txt}"
+                    );
+                }
+            }
+            _ => break,
+        }
+    }
+    // Mudou: evento novo muda o snapshot → frame novo dentro do tick.
+    crate::events::event(&app.state, "info", "teste", "dash-mudou-51");
+    let segundo = ler_ate(&mut body, "dash-mudou-51", 10).await;
+    assert!(
+        segundo.contains("dash-mudou-51"),
+        "push na mudança: {segundo}"
     );
 }

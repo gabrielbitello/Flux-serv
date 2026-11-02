@@ -1,6 +1,7 @@
 //! Leitura/consulta do painel (L6.3): TODA SQL da interface vive aqui —
 //! sem desenho de HTML (apresentação é paginas.rs).
 
+use flux_common::config::ProjectToml;
 use flux_common::protocol::{ContainerState, Env};
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -78,6 +79,9 @@ pub(super) fn projetos(app: &AppState) -> Result<Vec<(String, String)>, String> 
         .map_err(|e| e.to_string())
 }
 
+/// Serializável: o snapshot do dashboard carrega eventos direto (a página
+/// HTML antiga escapava à mão; o JSON é a via nova).
+#[derive(serde::Serialize)]
 pub(super) struct EventoRow {
     pub(super) id: i64,
     pub(super) level: String,
@@ -318,4 +322,133 @@ pub(super) fn escopos_distintos(app: &AppState) -> Result<Vec<String>, String> {
             rows.collect()
         })
         .map_err(|e| e.to_string())
+}
+
+// ------------------------------------------------------ dashboard JSON (fatia 5)
+
+/// Projecção JSON do dashboard — MESMAS consultas do render HTML antigo
+/// (projetos + dev/prod + sync + sono + últimos eventos + vigia + curva),
+/// sem nada inventado. Saúde NÃO entra aqui: doctor é pesado (DNS/docker
+/// por projeto) e mora em /api/saude, puxado pelo cliente a cada minuto.
+#[derive(serde::Serialize)]
+pub(super) struct Snapshot {
+    pub(super) projetos: Vec<DashboardProjeto>,
+    pub(super) eventos: Vec<EventoRow>,
+    pub(super) vigia_marca: Option<String>,
+    pub(super) anomalias: Vec<EventoRow>,
+    /// Curva de eventos/min 24 h — o cliente desenha a mini-curva; `None` =
+    /// sem dado ainda (a frase exata, sem gráfico mentindo vida).
+    pub(super) curva: Option<CurvaJson>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct CurvaJson {
+    pub(super) conts: Vec<u64>,
+    pub(super) total: u64,
+    pub(super) max: u64,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct DashboardProjeto {
+    pub(super) nome: String,
+    pub(super) framework: String,
+    pub(super) framework_erro: Option<String>,
+    pub(super) dev_host: String,
+    pub(super) prod_host: String,
+    pub(super) dev: DashboardEnv,
+    pub(super) prod: DashboardEnv,
+    pub(super) sync: Option<SyncJson>,
+}
+
+/// Um ambiente de projeto em JSON. `estado` é o nome do
+/// `ContainerState` em minúsculas — o cliente espelha formato::dot (contrato
+/// referenciado; `fonte` é a verdade declarada: "docker" ou "sqlite").
+#[derive(serde::Serialize)]
+pub(super) struct DashboardEnv {
+    pub(super) env: &'static str,
+    pub(super) estado: String,
+    pub(super) fonte: &'static str,
+    pub(super) aplicadas: usize,
+    /// Falha lendo sleep_state — a mensagem REAL vai pro card.
+    pub(super) sono_erro: Option<String>,
+    pub(super) interacao: Option<i64>,
+    pub(super) lease: Option<i64>,
+    pub(super) cooldown: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct SyncJson {
+    pub(super) status: String,
+    pub(super) paused: bool,
+    /// Flag do request_rescan — o card antigo mostrava "rescan pendente".
+    pub(super) rescan_requested: bool,
+    pub(super) files: Option<u64>,
+    pub(super) problems: u64,
+    pub(super) last_error: Option<String>,
+    pub(super) atualizado: String,
+}
+
+/// Snapshot completo do dashboard. INFALÍVEL por design: falha de leitura
+/// vira campo de erro/menos dado — nunca 500 sem contexto (o card mostra a
+/// causa; a promessa do painel é "o que não sei, digo que não sei").
+pub(super) fn dashboard(app: &AppState) -> Snapshot {
+    let mut cards = Vec::new();
+    if let Ok(lista) = projetos(app) {
+        let syncs = crate::sync::sync_states(app);
+        for (name, toml_src) in lista {
+            let (framework, framework_erro) = match ProjectToml::parse_str(&toml_src) {
+                Ok(t) => (t.framework().to_string(), None),
+                Err(e) => ("?".to_owned(), Some(e.to_string())),
+            };
+            let (ov_prod, ov_dev) = app.state.project_hosts(&name).unwrap_or((None, None));
+            cards.push(DashboardProjeto {
+                dev_host: ov_dev.unwrap_or_else(|| app.domain.dev_host(&name)),
+                prod_host: ov_prod.unwrap_or_else(|| app.domain.prod_host(&name)),
+                framework,
+                framework_erro,
+                dev: dashboard_env(app, &name, Env::Dev),
+                prod: dashboard_env(app, &name, Env::Prod),
+                sync: syncs.iter().find(|r| r.project == name).map(|r| SyncJson {
+                    status: r.status.clone(),
+                    paused: r.paused,
+                    rescan_requested: r.rescan_requested,
+                    files: r.files,
+                    problems: r.problems,
+                    last_error: r.last_error.clone(),
+                    atualizado: r.updated_at.clone(),
+                }),
+                nome: name,
+            });
+        }
+    }
+    Snapshot {
+        eventos: eventos_recentes(app, EVENTOS_DASHBOARD).unwrap_or_default(),
+        vigia_marca: vigia_ultimo_ciclo(app).unwrap_or(None),
+        anomalias: anomalias_recentes(app, 5).unwrap_or_default(),
+        curva: curva_contagem(app)
+            .unwrap_or(None)
+            .map(|(conts, total, max)| CurvaJson { conts, total, max }),
+        projetos: cards,
+    }
+}
+
+fn dashboard_env(app: &AppState, name: &str, env: Env) -> DashboardEnv {
+    let p = ambiente(app, name, env);
+    let (interacao, lease, cooldown, sono_erro) = match &p.row {
+        Ok(r) => (r.0, r.1, r.2, None),
+        Err(e) => (None, None, None, Some(e.clone())),
+    };
+    DashboardEnv {
+        env: match env {
+            Env::Dev => "dev",
+            Env::Prod => "prod",
+        },
+        estado: format!("{:?}", p.estado).to_lowercase(),
+        fonte: p.fonte,
+        aplicadas: p.aplicadas.len(),
+        sono_erro,
+        interacao,
+        lease,
+        cooldown,
+    }
 }

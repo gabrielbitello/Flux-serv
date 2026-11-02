@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, RawQuery, Request, State};
+use axum::extract::{ConnectInfo, Path, RawQuery, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -43,9 +43,14 @@ const TOKEN_KEY: &str = "eventos_token_hash";
 /// camada de uma vez. SEM `with_state`: o `with_state(st)` único do
 /// `build_panel` fecha o tipo, igual ao sub-router `protegido`.
 pub(super) fn router(st: &PanelState) -> Router<PanelState> {
+    use axum::routing::post;
     Router::new()
         .route("/api/events", get(eventos))
         .route("/api/events/follow", get(eventos_follow))
+        .route("/api/dashboard", get(dashboard))
+        .route("/api/dashboard/follow", get(dashboard_follow))
+        .route("/api/saude", get(saude))
+        .route("/api/projects/{name}/acordar", post(acordar))
         .route_layer(middleware::from_fn_with_state(st.clone(), auth_publica))
 }
 
@@ -100,6 +105,15 @@ pub(super) async fn auth_publica(
             return erro_json(
                 StatusCode::FORBIDDEN,
                 "token de leitura só vale dentro da LAN",
+            );
+        }
+        // READ-ONLY por contrato: o token existe pros agentes LEREM a
+        // fábrica; ação (POST/acordar) é coisa de sessão do painel.
+        if req.method() != axum::http::Method::GET {
+            recusa(&st, ip, "token de leitura tentou AÇÃO (só GET é leitura)");
+            return erro_json(
+                StatusCode::FORBIDDEN,
+                "token de leitura não executa ações — entre no painel (sessão)",
             );
         }
         return next.run(req).await;
@@ -397,6 +411,14 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
             }
         },
     );
+    resposta_sse(frames)
+}
+
+/// Resposta SSE com os headers de praxe (mesmo par do SSE de logs do
+/// ciclo.rs).
+fn resposta_sse(
+    frames: impl futures_util::Stream<Item = Result<String, Infallible>> + Send + 'static,
+) -> Response {
     let mut res = Response::new(Body::from_stream(frames));
     *res.status_mut() = StatusCode::OK;
     res.headers_mut().insert(
@@ -494,4 +516,123 @@ fn gravar_arquivo_token(arquivo: &std::path::Path, token: &str) -> std::io::Resu
         std::fs::set_permissions(arquivo, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------- dashboard (fatia 5)
+
+/// GET /api/dashboard — snapshot completo (MESMAS consultas do render HTML
+/// antigo; a saúde pesada tem endpoint próprio, /api/saude).
+async fn dashboard(State(st): State<PanelState>) -> Response {
+    Json(leitura::dashboard(&st.app)).into_response()
+}
+
+/// GET /api/saude — o doctor (mesma máquina do `flux doctor`), puxado pelo
+/// dot do header a cada minuto. Sem Docker a resposta é honesta sobre o
+/// que não deu pra checar.
+async fn saude(State(st): State<PanelState>) -> Response {
+    match crate::doctor::checar_todos(&st.app).await {
+        Ok(rel) => Json(rel).into_response(),
+        Err(e) => erro_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("falha no doctor: {e}"),
+        ),
+    }
+}
+
+/// Intervalo entre snapshots do dashboard — push SÓ QUANDO MUDA (decisão
+/// do escopo): hash sha256 do JSON; igual = nada no fio.
+const DASH_CADA: Duration = Duration::from_secs(5);
+
+/// GET /api/dashboard/follow — SSE do snapshot: recomputa a cada 5 s e só
+/// empurra quando muda; `: ping` a cada 15 s entre mudanças (o custo no
+/// servidor é o mesmo do meta refresh de 5 s que o dashboard carregava —
+/// o ganho é o cliente sem recarga e sem estado perdido).
+async fn dashboard_follow(State(st): State<PanelState>) -> Response {
+    let app = Arc::clone(&st.app);
+    let frames = futures_util::stream::unfold(
+        (
+            tokio::time::interval(DASH_CADA),
+            tokio::time::interval(PING_CADA),
+            None::<String>,
+            app,
+        ),
+        |(mut snap_t, mut ping_t, mut ultimo, app)| async move {
+            loop {
+                tokio::select! {
+                    _ = ping_t.tick() => {
+                        return Some((
+                            Ok(": ping\n\n".to_owned()),
+                            (snap_t, ping_t, ultimo, app),
+                        ));
+                    }
+                    _ = snap_t.tick() => {
+                        let json =
+                            serde_json::to_string(&leitura::dashboard(&app)).unwrap_or_default();
+                        let hash = sha256_hex(json.as_bytes());
+                        if ultimo.as_deref() == Some(hash.as_str()) {
+                            continue; // nada mudou: silêncio É o comportamento
+                        }
+                        ultimo = Some(hash);
+                        return Some((
+                            Ok(format!("data: {json}\n\n")),
+                            (snap_t, ping_t, ultimo, app),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    resposta_sse(frames)
+}
+
+/// POST /api/projects/{name}/acordar — AÇÃO (sessão; o middleware barra o
+/// token de leitura). Mesmo `wake` da página de espera: banco próprio
+/// acorda ANTES, containers parados do projeto sobem. 202 com o que
+/// aconteceu; falha vira o status certo com a causa, nunca silêncio.
+async fn acordar(State(st): State<PanelState>, Path(name): Path<String>) -> Response {
+    if !flux_common::nomes::projeto_valido(&name) {
+        return erro_json(StatusCode::NOT_FOUND, "nome de projeto inválido");
+    }
+    match leitura::projetos(&st.app) {
+        Ok(lista) if lista.iter().any(|(n, _)| *n == name) => {}
+        Ok(_) => {
+            return erro_json(
+                StatusCode::NOT_FOUND,
+                &format!("{name}: não registrado no fluxd"),
+            );
+        }
+        Err(e) => {
+            return erro_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("estado ilegível: {e}"),
+            );
+        }
+    }
+    let Some(docker) = st.app.docker.clone() else {
+        return erro_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fluxd sem Docker conectado — acordar só na VM",
+        );
+    };
+    // DockerSource embrulha o cliente bollard + estado (mesma montagem do
+    // router nas páginas de espera).
+    match crate::docker::DockerSource::new(docker, &st.app.state)
+        .wake(&name, flux_common::protocol::Env::Dev)
+        .await
+    {
+        Ok(acordou) => {
+            events::event(
+                &st.app.state,
+                "info",
+                "painel",
+                &format!("acordar {name}/dev pelo painel: containers parados = {acordou}"),
+            );
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "projeto": name, "acordou": acordou })),
+            )
+                .into_response()
+        }
+        Err(e) => erro_json(StatusCode::CONFLICT, &format!("wake de {name} falhou: {e}")),
+    }
 }

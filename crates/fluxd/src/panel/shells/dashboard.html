@@ -1,0 +1,178 @@
+<!doctype html>
+<!-- Shell do dashboard (fatia 5, style guide 02/11): snapshot por
+     /api/dashboard (SSE, push só quando muda), saúde por /api/saude (1/min),
+     acordar por POST /api/projects/{name}/acordar. O HTML não carrega dado. -->
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flux — painel</title>
+<link rel="stylesheet" href="/assets/estilo.css">
+<script defer src="/assets/alpine.min.js"></script>
+<script defer src="/assets/painel.js"></script>
+</head>
+<body>
+<div x-data="dashboardPage">
+<header class="top">
+  <span class="mark">flux<span>/painel</span></span>
+  <nav aria-label="Páginas">
+    <a class="on" href="/">dashboard</a><a href="/events">eventos</a><a href="/observe">monitor</a>
+  </nav>
+  <div class="topdir">
+    <span class="muted" x-text="vivo"></span>
+    <button class="saude" type="button" @click="saudeAberto = !saudeAberto">
+      <span class="dot" :class="saudeDot().c"></span><span x-text="saudeDot().t"></span>
+    </button>
+    <form method="post" action="/logout" class="inline"><button class="btn ghost" type="submit">sair</button></form>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="aviso" x-cloak x-show="aviso" x-text="aviso"></div>
+
+  <div class="saude-itens" x-cloak x-show="saudeAberto">
+    <template x-if="saudeErro">
+      <p class="err-t" x-text="'falha no doctor: ' + saudeErro"></p>
+    </template>
+    <template x-if="saude">
+      <ul>
+        <li>
+          fluxd: <span class="dot" :class="saude.fluxd.ok ? 'ok' : 'err'"></span>
+          <span x-text="saude.fluxd.estado"></span>
+          <span class="muted" x-text="saude.fluxd.detalhe || ''"></span>
+        </li>
+        <template x-for="p in saude.projetos" :key="p.projeto">
+          <li>
+            <span class="mono" x-text="p.projeto"></span>:
+            <span class="dot" :class="projetoOk(p) ? 'ok' : 'err'"></span>
+            containers <span x-text="p.containers.estado"></span> ·
+            sync <span x-text="p.sync.estado"></span> ·
+            banco <span x-text="p.banco.estado"></span> ·
+            assets <span x-text="p.assets.estado"></span>
+            <span class="muted" x-text="p.containers.detalhe || p.sync.detalhe || p.banco.detalhe || ''"></span>
+          </li>
+        </template>
+      </ul>
+    </template>
+  </div>
+
+  <div class="head">
+    <h1>Dashboard</h1>
+    <span class="sub" x-text="resumo()"></span>
+  </div>
+
+  <div class="grid">
+    <template x-for="p in (snap ? snap.projetos : [])" :key="p.nome">
+      <div class="card">
+        <h3>
+          <a :href="'/projects/' + encodeURIComponent(p.nome)" x-text="p.nome"></a>
+          <span class="tag dev" x-text="p.framework"></span>
+        </h3>
+        <template x-if="p.framework_erro">
+          <p class="err-t" x-text="'flux.toml inválido: ' + p.framework_erro"></p>
+        </template>
+        <template x-for="e in [p.dev, p.prod]" :key="e.env">
+          <div class="kv">
+            <span class="tag" :class="e.env" x-text="e.env"></span>
+            <span class="dot" :class="dotDe(e.estado).c"></span>
+            <span x-text="dotDe(e.estado).t"></span>
+            <span class="muted" x-text="'(' + e.fonte + ') · interação ' + quandoRel(e.interacao)"></span>
+            <span class="err-t" x-show="e.sono_erro" x-text="e.sono_erro"></span>
+          </div>
+        </template>
+        <div class="kv">
+          <b>migrations</b>
+          <span x-text="'dev ' + p.dev.aplicadas + ' · prod ' + p.prod.aplicadas"></span>
+        </div>
+        <div class="kv">
+          <b>sync</b>
+          <template x-if="p.sync">
+            <span>
+              <span class="dot" :class="p.sync.problems > 0 ? 'warn' : (p.sync.paused ? 'idle' : 'ok')"></span>
+              <span x-text="p.sync.status"></span>
+              <span class="warn-t" x-show="p.sync.last_error" x-text="p.sync.last_error"></span>
+            </span>
+          </template>
+          <template x-if="!p.sync">
+            <span class="muted">sem sessão</span>
+          </template>
+        </div>
+        <div class="kv">
+          <b>hosts</b>
+          <span>
+            <a :href="'https://' + p.dev_host" x-text="p.dev_host"></a> ·
+            <a :href="'https://' + p.prod_host" x-text="p.prod_host"></a>
+          </span>
+        </div>
+        <div class="acoes">
+          <button class="btn" type="button"
+                  :disabled="acordando[p.nome] || p.dev.estado === 'awake'"
+                  @click="acordar(p.nome)">acordar</button>
+        </div>
+      </div>
+    </template>
+  </div>
+  <div class="empty" x-cloak x-show="snap && snap.projetos.length === 0">
+    Nenhum projeto registrado ainda — projetos aparecem quando o fluxd conhece o flux.toml.
+  </div>
+
+  <section class="secao">
+    <h2>Eventos por minuto — últimas 24 h</h2>
+    <template x-if="snap && snap.curva">
+      <div class="spark" role="img" aria-label="eventos por minuto nas últimas 24 horas">
+        <template x-for="(b, i) in barras()" :key="i">
+          <span :style="'height:' + b + '%'"></span>
+        </template>
+      </div>
+    </template>
+    <template x-if="snap && !snap.curva">
+      <p class="muted">sem dados ainda</p>
+    </template>
+    <p class="muted" x-show="snap && snap.curva"
+       x-text="snap && snap.curva ? ('pico ' + snap.curva.max + '/min · ' + snap.curva.total + ' eventos') : ''"></p>
+  </section>
+
+  <section class="secao">
+    <h2>Vigia</h2>
+    <p class="muted" x-show="snap && snap.vigia_marca"
+       x-text="snap && snap.vigia_marca ? ('último ciclo: ' + snap.vigia_marca + ' UTC — silêncio sem marca = vigia morto') : ''"></p>
+    <p class="muted" x-show="snap && !snap.vigia_marca">vigia ainda não rodou nenhum ciclo</p>
+    <table x-show="snap && snap.anomalias.length > 0">
+      <thead><tr><th>quando (UTC)</th><th>anomalia</th></tr></thead>
+      <tbody>
+        <template x-for="ev in (snap ? snap.anomalias : [])" :key="ev.id">
+          <tr><td class="mono muted" x-text="ev.created_at"></td><td x-text="ev.message"></td></tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="empty" x-cloak x-show="snap && snap.anomalias.length === 0">sem anomalias — silêncio saudável</div>
+  </section>
+
+  <section class="secao">
+    <h2>Últimos eventos</h2>
+    <table x-show="snap && snap.eventos.length > 0">
+      <thead><tr><th>quando (UTC)</th><th>nível</th><th>escopo</th><th>mensagem</th></tr></thead>
+      <tbody>
+        <template x-for="ev in (snap ? snap.eventos : [])" :key="ev.id">
+          <tr :class="ev.level === 'warn' ? 'lwarn' : ((ev.level === 'error' || ev.level === 'err') ? 'lerr' : '')">
+            <td class="mono muted" x-text="ev.created_at"></td>
+            <td x-text="ev.level"></td>
+            <td><code x-text="ev.scope"></code></td>
+            <td x-text="ev.message"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="empty" x-cloak x-show="snap && snap.eventos.length === 0">sem eventos registrados ainda</div>
+    <p><a href="/events">todos os eventos →</a></p>
+  </section>
+</main>
+
+<footer class="wrap-rodape">
+  fluxd — painel API+SSE · snapshot muda → push; saúde recalculada a cada minuto · horários UTC onde marcado
+</footer>
+</div>
+<noscript><p style="padding:1rem">Este painel precisa de JavaScript: os dados chegam por API e SSE, sem recarga de página.</p></noscript>
+</body>
+</html>

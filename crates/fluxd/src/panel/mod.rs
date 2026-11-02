@@ -37,8 +37,9 @@ use crate::panel_auth;
 pub(crate) mod api_publica;
 mod assets;
 
-/// Shell do /events — HTML sem dado, servido por include_str!.
+/// Shells estáticas — HTML sem dado, servido por include_str!.
 const SHELL_EVENTOS: &str = include_str!("shells/eventos.html");
+const SHELL_DASHBOARD: &str = include_str!("shells/dashboard.html");
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
 use crate::ui::{NOINDEX, x_robots_tag};
@@ -243,18 +244,12 @@ fn resposta(status: StatusCode, page: String) -> Response {
         .into_response()
 }
 
-async fn dashboard(State(app): State<Arc<AppState>>, RawQuery(q): RawQuery) -> Response {
-    // Confirmação do rescan (post/redirect/get): flag na query, texto na
-    // página — nome de projeto nunca volta na URL.
-    let aviso = if q
-        .as_deref()
-        .is_some_and(|s| s.split('&').any(|p| p == "rescan=1"))
-    {
-        Some("rescan queued — o flux watch executa")
-    } else {
-        None
-    };
-    resposta(StatusCode::OK, render_dashboard(&app, aviso))
+/// GET / — SHELL estática do dashboard (fatia 5): dados por /api/dashboard,
+/// ao vivo por /api/dashboard/follow (push só quando muda), saúde por
+/// /api/saude. A flag ?rescan=1 vira aviso no cliente (o nome de projeto
+/// nunca volta na URL — regra do post/redirect/get mantida).
+async fn dashboard() -> Response {
+    resposta(StatusCode::OK, SHELL_DASHBOARD.to_owned())
 }
 
 async fn detalhe_projeto(State(app): State<Arc<AppState>>, params: RawPathParams) -> Response {
@@ -298,19 +293,16 @@ async fn rescan_projeto(State(app): State<Arc<AppState>>, params: RawPathParams)
             Redirect::to("/?rescan=1").into_response()
         }
         Err(msg) => {
+            // Shell estática: a causa mora no evento (o painel de eventos
+            // mostra); a URL leva só a flag — nome/causa não vazam pra
+            // histórico de navegação.
             crate::events::event(
                 &app.state,
                 "warn",
                 "painel",
                 &format!("rescan recusado para {name}: {msg}"),
             );
-            resposta(
-                StatusCode::SERVICE_UNAVAILABLE,
-                render_dashboard(
-                    &app,
-                    Some(&format!("Falha ao pedir rescan de {name}: {msg}")),
-                ),
-            )
+            Redirect::to("/?rescan=falha").into_response()
         }
     }
 }
@@ -334,6 +326,6 @@ mod paginas;
 #[cfg(test)]
 mod tests;
 
-use paginas::{detalhe_status, layout, render_dashboard, render_detalhe, render_login};
+use paginas::{detalhe_status, layout, render_detalhe, render_login};
 
 pub(super) use crate::AppState;

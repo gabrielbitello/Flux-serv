@@ -280,3 +280,143 @@ document.addEventListener('alpine:init', () => {
     },
   }));
 });
+
+// ------------------------------------------------------------------ dashboard
+document.addEventListener('alpine:init', () => {
+  Alpine.data('dashboardPage', () => ({
+    snap: null,
+    saude: null,
+    saudeErro: '',
+    saudeAberto: false,
+    aviso: '',
+    vivo: 'conectando…',
+    acordando: {},
+    es: null,
+
+    init() {
+      const q = new URLSearchParams(location.search);
+      if (q.get('rescan') === '1') this.aviso = 'rescan na fila — o flux watch executa';
+      else if (q.get('rescan') === 'falha') {
+        this.aviso = 'rescan recusado — o motivo está nos eventos (escopo painel)';
+      }
+      this.puxaSaude();
+      setInterval(() => this.puxaSaude(), 60000);
+      this.conectar();
+    },
+
+    async puxaSaude() {
+      try {
+        const r = await fetch('/api/saude');
+        if (!r.ok) throw new Error('api ' + r.status);
+        this.saude = await r.json();
+        this.saudeErro = '';
+      } catch (e) {
+        this.saudeErro = String(e.message || e);
+      }
+    },
+
+    conectar() {
+      this.es = new EventSource('/api/dashboard/follow');
+      this.es.onopen = () => {
+        this.vivo = 'ao vivo';
+      };
+      this.es.onerror = () => {
+        this.vivo = 'reconectando…';
+      };
+      this.es.onmessage = (m) => {
+        try {
+          this.snap = JSON.parse(m.data);
+        } catch (_) {
+          /* frame não-JSON (ping é comentário) */
+        }
+      };
+    },
+
+    // Verde do dot: MESMA regra de doctor::Veredito::ok (contrato) + o
+    // fluxd são. Erro de rede no doctor = vermelho honesto.
+    saudeDot() {
+      if (this.saudeErro) return { c: 'err', t: 'doctor falhou' };
+      if (!this.saude) return { c: 'idle', t: 'saúde…' };
+      const tudo = this.saude.fluxd.ok && this.saude.projetos.every((p) => this.projetoOk(p));
+      const n = this.saude.projetos.length;
+      return tudo
+        ? { c: 'ok pulse', t: 'fábrica ok · ' + n + '/' + n }
+        : { c: 'err', t: 'atenção · veja os itens' };
+    },
+
+    projetoOk(p) {
+      return p.containers.ok && p.sync.ok && p.banco.ok && p.assets.ok;
+    },
+
+    // ContainerState → (cor, rótulo) — espelho de formato::dot (contrato).
+    dotDe(estado) {
+      return (
+        {
+          awake: { c: 'ok pulse', t: 'acordado' },
+          paused: { c: 'warn', t: 'pausado' },
+          sleeping: { c: 'idle', t: 'dormindo' },
+          starting: { c: 'warn', t: 'subindo' },
+          failed: { c: 'err', t: 'falhou' },
+        }[estado] || { c: 'idle', t: estado || '?' }
+      );
+    },
+
+    // Epoch s → "há X"/"em X" — espelho de formato::quando.
+    quandoRel(v) {
+      if (!v) return '—';
+      const diff = Math.round(v - Date.now() / 1000);
+      const abs = Math.abs(diff);
+      const pre = diff < 0 ? 'há ' : 'em ';
+      if (abs < 60) return pre + abs + ' s';
+      if (abs < 3600) return pre + Math.round(abs / 60) + ' min';
+      return pre + Math.round(abs / 3600) + ' h';
+    },
+
+    resumo() {
+      if (!this.snap) return 'carregando…';
+      const n = this.snap.projetos.length;
+      const acordados = this.snap.projetos.filter((p) => p.dev.estado === 'awake').length;
+      const syncOk = this.snap.projetos.filter(
+        (p) => p.sync && p.sync.problems === 0 && !p.sync.paused,
+      ).length;
+      return (
+        n + ' projetos · ' + acordados + ' acordados · sync ' + syncOk + '/' + n +
+        ' · vigia: ' + (this.snap.vigia_marca ? 'ativo' : 'sem ciclo ainda')
+      );
+    },
+
+    // Curva 24h → barras (teto de DOM: reduz pra ≤96 buckets). Número puro,
+    // nenhum dado do servidor vira HTML.
+    barras() {
+      const c = this.snap && this.snap.curva ? this.snap.curva.conts : [];
+      if (!c.length) return [];
+      const alvo = 96;
+      const passo = Math.max(1, Math.ceil(c.length / alvo));
+      const b = [];
+      for (let i = 0; i < c.length; i += passo) {
+        let soma = 0;
+        for (let j = i; j < Math.min(i + passo, c.length); j++) soma += c[j];
+        b.push(soma);
+      }
+      const max = Math.max(...b, 1);
+      return b.map((v) => Math.max(2, Math.round((v / max) * 100)));
+    },
+
+    async acordar(nome) {
+      this.acordando = { ...this.acordando, [nome]: true };
+      try {
+        const r = await fetch(
+          '/api/projects/' + encodeURIComponent(nome) + '/acordar',
+          { method: 'POST' },
+        );
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          this.aviso = 'acordar ' + nome + ' falhou: ' + (d.error || r.status);
+        }
+      } catch (e) {
+        this.aviso = 'acordar ' + nome + ' falhou: ' + e.message;
+      }
+      this.acordando = { ...this.acordando, [nome]: false };
+    },
+  }));
+});
