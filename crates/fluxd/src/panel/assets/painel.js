@@ -432,6 +432,18 @@ document.addEventListener('alpine:init', () => {
     logsLigado: false,
     logsEs: null,
     nome: decodeURIComponent(location.pathname.split('/').pop() || ''),
+    acoes: [
+      { id: 'migrate', rotulo: 'migrate', destrutiva: false, prod: true },
+      { id: 'optimize', rotulo: 'optimize:clear', destrutiva: false, prod: true },
+      { id: 'shield', rotulo: 'shield:generate', destrutiva: false, prod: true },
+      { id: 'build', rotulo: 'build (dev)', destrutiva: false, prod: false },
+      { id: 'seed', rotulo: 'seed (DEV)', destrutiva: true, prod: false },
+      { id: 'fresh', rotulo: 'migrate:fresh (DEV)', destrutiva: true, prod: false },
+      { id: 'fresh_seed', rotulo: 'fresh+seed (DEV)', destrutiva: true, prod: false },
+    ],
+    acaoAtual: null,
+    streamOn: false,
+    acaoEs: null,
 
     init() {
       const q = new URLSearchParams(location.search);
@@ -440,6 +452,91 @@ document.addEventListener('alpine:init', () => {
         this.aviso = 'rescan recusado — o motivo está nos eventos (escopo painel)';
       }
       this.conectar();
+      this.puxarAcao();
+    },
+
+    // ---------- ações (fatia 6b)
+    async puxarAcao() {
+      try {
+        const r = await fetch('/api/projects/' + encodeURIComponent(this.nome) + '/acoes/atual');
+        if (r.ok) {
+          this.acaoAtual = await r.json();
+          if (this.acaoAtual.estado === 'rodando') this.seguirAcao();
+        }
+      } catch (_) {}
+    },
+
+    clicarAcao(a) {
+      if (a.destrutiva && !a.confirmando) {
+        // DOIS CLIQUES: arma a confirmação; desarma em 5 s.
+        a.confirmando = true;
+        setTimeout(() => { a.confirmando = false; }, 5000);
+        return;
+      }
+      a.confirmando = false;
+      this.acao(a.id);
+    },
+
+    async acao(id) {
+      try {
+        const r = await fetch('/api/projects/' + encodeURIComponent(this.nome) + '/acoes', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ acao: id, ambiente: 'dev' }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          this.aviso = id + ' recusado: ' + (d.error || r.status);
+          return;
+        }
+        this.acaoAtual = d;
+        this.seguirAcao();
+      } catch (e) {
+        this.aviso = id + ' falhou: ' + e.message;
+      }
+    },
+
+    seguirAcao() {
+      if (this.streamOn) return;
+      this.streamOn = true;
+      const termo = this.$refs.termo;
+      termo.textContent = '';
+      const es = new EventSource(
+        '/api/projects/' + encodeURIComponent(this.nome) + '/acoes/stream',
+      );
+      this.acaoEs = es;
+      es.addEventListener('fim', () => {
+        es.close();
+        this.streamOn = false;
+        this.puxarAcao();
+      });
+      es.onmessage = (m) => {
+        const linha = document.createElement('div');
+        linha.textContent = m.data;
+        termo.appendChild(linha);
+        while (termo.childNodes.length > 400) termo.removeChild(termo.firstChild);
+        termo.scrollTop = termo.scrollHeight;
+        this.acaoAtual && (this.acaoAtual.saida = this.acaoAtual.saida || []);
+      };
+      es.onerror = () => {
+        es.close();
+        this.streamOn = false;
+      };
+    },
+
+    liveDot() {
+      const l = this.snap && this.snap.live;
+      if (!l) return { c: 'idle', t: 'sem como medir' };
+      return l.hot && l.porta
+        ? { c: 'ok pulse', t: 'live ON' }
+        : l.hot
+          ? { c: 'warn', t: 'hot órfão (porta morta)' }
+          : { c: 'idle', t: 'live OFF' };
+    },
+
+    liveTexto() {
+      const l = this.snap && this.snap.live;
+      return l ? 'hot=' + l.hot + ' · porta 5173=' + l.porta : '(sem engine ou sem IP no state)';
     },
 
     conectar() {

@@ -470,6 +470,15 @@ pub(super) struct DetalheSnapshot {
     pub(super) sync: Option<SyncJson>,
     /// Eventos cuja mensagem menciona o nome (LIKE, 20 mais novos).
     pub(super) eventos: Vec<EventoRow>,
+    /// Status REAL do live dev (decisão do escopo: toggle com status
+    /// verdade) — `None` = sem como medir (sem engine/IP).
+    pub(super) live: Option<LiveJson>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct LiveJson {
+    pub(super) hot: bool,
+    pub(super) porta: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -487,7 +496,11 @@ pub(super) struct DetalheEnv {
 
 /// `Ok(Some)` = registrado; `Ok(None)` = não registrado (404 honesto);
 /// `Err` = estado ilegível (503 com a causa).
-pub(super) fn detalhe(app: &AppState, name: &str) -> Result<Option<DetalheSnapshot>, String> {
+pub(super) fn detalhe(
+    app: &AppState,
+    name: &str,
+    live: Option<(bool, bool)>,
+) -> Result<Option<DetalheSnapshot>, String> {
     let lista = projetos(app)?;
     let Some((_, toml_src)) = lista.iter().find(|(n, _)| n == name) else {
         return Ok(None);
@@ -532,6 +545,7 @@ pub(super) fn detalhe(app: &AppState, name: &str) -> Result<Option<DetalheSnapsh
             atualizado: r.updated_at.clone(),
         }),
         eventos,
+        live: live.map(|(hot, porta)| LiveJson { hot, porta }),
     }))
 }
 

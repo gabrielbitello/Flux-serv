@@ -85,6 +85,37 @@
   </section>
 
   <section class="secao">
+    <h2>Live (dev)</h2>
+    <div class="kv">
+      <span class="dot" :class="liveDot().c"></span>
+      <span x-text="liveDot().t"></span>
+      <span class="muted" x-text="liveTexto()"></span>
+    </div>
+    <div class="acoes">
+      <button class="btn" type="button" @click="acao('live_on')">live ON</button>
+      <button class="btn" type="button" @click="acao('live_off')">live OFF</button>
+    </div>
+  </section>
+
+  <section class="secao">
+    <h2>Ações</h2>
+    <p class="muted">PROD nunca roda fresh/seed/build (regra prod ⊆ dev). Destrutivas pedem dois cliques.</p>
+    <div class="barra">
+      <template x-for="a in acoes" :key="a.id">
+        <button class="chip" :class="a.confirmando ? 'on' : ''" type="button"
+                @click="clicarAcao(a)"
+                x-text="a.confirmando ? a.rotulo + ' — confirma?' : a.rotulo"></button>
+      </template>
+    </div>
+    <div class="barra">
+      <span class="muted" x-show="acaoAtual"
+            x-text="acaoAtual ? (acaoAtual.acao + ' ' + acaoAtual.ambiente + ' — ' + acaoAtual.estado) : ''"></span>
+      <button class="btn ghost" type="button" @click="seguirAcao()" x-show="acaoAtual && acaoAtual.estado === 'rodando' && !streamOn">seguir saída</button>
+    </div>
+    <div class="term" x-ref="termo" x-cloak x-show="acaoAtual"><span class="t-dim" x-show="!acaoAtual.saida.length">sem saída ainda</span></div>
+  </section>
+
+  <section class="secao">
     <h2>Logs do container (dev)</h2>
     <div class="barra">
       <button class="btn" type="button" @click="ligarLogs()" x-show="!logsLigado">abrir tail</button>

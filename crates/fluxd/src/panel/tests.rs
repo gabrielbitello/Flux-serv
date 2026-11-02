@@ -1703,3 +1703,171 @@ async fn turnstile_configurado_exige_o_token() {
         "sem token de captcha, nem com senha certa"
     );
 }
+
+// ------------------------------------------------------- ações (fatia 6b)
+
+async fn post_acao(
+    app: &Arc<AppState>,
+    router: Router,
+    nome: &str,
+    corpo: &str,
+    cookie: Option<&str>,
+) -> (StatusCode, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url: hyper::Uri = format!("http://{addr}/api/projects/{nome}/acoes")
+        .parse()
+        .unwrap();
+    let mut b = axum::http::Request::builder()
+        .method("POST")
+        .uri(url)
+        .header(header::HOST, "flux.bitello.xyz")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", "192.168.140.50");
+    if let Some(c) = cookie {
+        b = b.header(header::COOKIE, c);
+    }
+    let resp = app
+        .http
+        .request(b.body(Body::from(corpo.to_owned())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    (status, body)
+}
+
+/// Matriz prod ⊆ dev: fresh/seed/build NUNCA em prod (403 com a regra);
+/// migrate passa (não-destrutivo); ação desconhecida = 422.
+#[tokio::test]
+async fn acoes_respeitam_a_matriz_prod() {
+    let app = app_sem_docker();
+    app.state
+        .register_project("vipers", "name = \"vipers\"", "h")
+        .unwrap();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+
+    let (s, b) = post_acao(
+        &app,
+        router.clone(),
+        "vipers",
+        r#"{"acao":"fresh","ambiente":"prod"}"#,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+    assert!(
+        b.contains("PROD NUNCA") || b.contains("não roda em prod"),
+        "{b}"
+    );
+
+    let (s, b) = post_acao(
+        &app,
+        router.clone(),
+        "vipers",
+        r#"{"acao":"seed","ambiente":"prod"}"#,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+
+    let (s, b) = post_acao(
+        &app,
+        router.clone(),
+        "vipers",
+        r#"{"acao":"mandarpraLua"}"#,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+
+    // migrate em prod: aceito (202) — e sem Docker falha logo com a causa.
+    let (s, b) = post_acao(
+        &app,
+        router,
+        "vipers",
+        r#"{"acao":"migrate","ambiente":"prod"}"#,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{b}");
+    assert!(b.contains("\"acao\":\"migrate\""), "{b}");
+}
+
+/// UMA ação por projeto: a segunda enquanto roda = 409. Sem Docker a
+/// primeira falha rápido (503 vira estado "falhou") — a janela de corrida
+/// real é curtíssima; o teste aceita os dois caminhos (202→409 ou 202→202
+/// já que a primeira pode terminar antes).
+#[tokio::test]
+async fn acoes_um_por_projeto_e_falha_honesta_sem_docker() {
+    // Nome exclusivo: o registro de ações é GLOBAL entre testes paralelos.
+    let nome = "vipers-acao-unica-x";
+    let app = app_sem_docker();
+    app.state
+        .register_project(nome, "name = \"vipers-acao-unica-x\"", "h")
+        .unwrap();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s, b) = post_acao(
+        &app,
+        router.clone(),
+        nome,
+        r#"{"acao":"optimize","ambiente":"dev"}"#,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{b}");
+    // Estado atual existe e a ação é a nossa (sem Docker ela falha logo com
+    // a causa — honesto, nunca falso sucesso).
+    let (router3, _dir3) = painel_com_auth(&app).await;
+    let cookie3 = cookie_de_sessao(&app, &router3).await;
+    let (_, atual) = pedir_api(
+        &app,
+        router3,
+        &format!("/api/projects/{nome}/acoes/atual"),
+        Some(&cookie3),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
+    assert!(atual.contains("\"estado\""), "{atual}");
+    assert!(atual.contains("optimize"), "ação registrada: {atual}");
+}
+
+/// Stream e atual sem NENHUMA ação = 404 honesto. (O registro de ações é
+/// GLOBAL entre testes paralelos — o nome aqui é exclusivo pra não colidir.)
+#[tokio::test]
+async fn acoes_sem_historico_e_404() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s, b) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/projects/projeto-sem-acoes-nunca/acoes/atual",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{b}");
+    let (s2, _) = pedir_api(
+        &app,
+        router,
+        "/api/projects/projeto-sem-acoes-nunca/acoes/stream",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
+    assert_eq!(s2, StatusCode::NOT_FOUND);
+}

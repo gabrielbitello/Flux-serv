@@ -34,6 +34,7 @@ use axum::routing::{get, post};
 use crate::observe_page;
 use crate::panel_auth;
 
+pub(crate) mod acoes;
 pub(crate) mod api_publica;
 mod assets;
 

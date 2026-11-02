@@ -888,6 +888,31 @@ pub fn decidir_live(hot: bool, porta_viva: bool) -> AcaoLive {
 /// A porta do dev server responde no IP do container? TCP connect rápido —
 /// não importa O QUE escuta na porta para o "já está de pé" do up; o
 /// roteamento same-origin do router valida o tráfego por cima.
+/// Status REAL do live (decisão do escopo: toggle com status verdade): hot
+/// na árvore + porta do vite respondendo. `None` = sem como medir (sem
+/// engine/sem IP no state).
+pub(crate) async fn live_status(
+    app: &crate::AppState,
+    docker: Option<&bollard::Docker>,
+    name: &str,
+) -> Option<(bool, bool)> {
+    let hot = raiz_arvore(app, name)
+        .as_ref()
+        .is_some_and(|r| r.join("public/hot").is_file());
+    let d = docker?;
+    let projeto = crate::docker::compose_project(name, flux_common::protocol::Env::Dev);
+    let c = crate::docker::find_app_container(d, &projeto).await?;
+    // Mesmo caminho do proxy_target: NetworkSettings.Networks.<rede>.IPAddress.
+    let ip = c
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.networks.as_ref())
+        .and_then(|nets| nets.values().filter_map(|n| n.ip_address.clone()).next());
+    let ip = ip?;
+    let porta = porta_tcp_viva(&ip, crate::decision::VITE_PORT).await;
+    Some((hot, porta))
+}
+
 pub(crate) async fn porta_tcp_viva(ip: &str, porta: u16) -> bool {
     let Ok(addr) = format!("{ip}:{porta}").parse::<std::net::SocketAddr>() else {
         return false;

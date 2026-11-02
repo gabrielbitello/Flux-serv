@@ -56,6 +56,18 @@ pub(super) fn router(st: &PanelState) -> Router<PanelState> {
         // read-only, agora também com auth de sessão/token da API pública.
         .route("/api/projects/{name}/logs", get(crate::ciclo::logs))
         .route("/api/projects/{name}/acordar", post(acordar))
+        .route(
+            "/api/projects/{name}/acoes",
+            post(super::acoes::disparar_acao),
+        )
+        .route(
+            "/api/projects/{name}/acoes/atual",
+            get(super::acoes::acao_atual),
+        )
+        .route(
+            "/api/projects/{name}/acoes/stream",
+            get(super::acoes::acao_stream),
+        )
         .route_layer(middleware::from_fn_with_state(st.clone(), auth_publica))
 }
 
@@ -265,7 +277,7 @@ async fn eventos(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Respons
     }
 }
 
-fn erro_json(status: StatusCode, msg: &str) -> Response {
+pub(super) fn erro_json(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
@@ -421,7 +433,7 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
 
 /// Resposta SSE com os headers de praxe (mesmo par do SSE de logs do
 /// ciclo.rs).
-fn resposta_sse(
+pub(super) fn resposta_sse(
     frames: impl futures_util::Stream<Item = Result<String, Infallible>> + Send + 'static,
 ) -> Response {
     let mut res = Response::new(Body::from_stream(frames));
@@ -647,7 +659,8 @@ async fn acordar(State(st): State<PanelState>, Path(name): Path<String>) -> Resp
 /// GET /api/projects/{name} — snapshot do detalhe (mesmas consultas do
 /// render HTML antigo). 404 honesto para não-registrado.
 async fn detalhe(State(st): State<PanelState>, Path(name): Path<String>) -> Response {
-    match leitura::detalhe(&st.app, &name) {
+    let live = crate::compose::live_status(&st.app, st.app.docker.as_ref(), &name).await;
+    match leitura::detalhe(&st.app, &name, live) {
         Ok(Some(snap)) => Json(snap).into_response(),
         Ok(None) => erro_json(
             StatusCode::NOT_FOUND,
@@ -679,7 +692,9 @@ async fn detalhe_follow(State(st): State<PanelState>, Path(name): Path<String>) 
                         ));
                     }
                     _ = snap_t.tick() => {
-                        let json = match leitura::detalhe(&app, &name) {
+                        let live = crate::compose::live_status(&app, app.docker.as_ref(), &name)
+                            .await;
+                        let json = match leitura::detalhe(&app, &name, live) {
                             Ok(Some(snap)) => serde_json::to_string(&snap).unwrap_or_default(),
                             // Não-registrado: frame de erro no stream, nunca
                             // buraco silencioso.
