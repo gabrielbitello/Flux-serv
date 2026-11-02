@@ -54,6 +54,17 @@
       <button class="chip" :class="nivel === n ? 'on' : ''"
               @click="nivel = nivel === n ? '' : n; filtra()" x-text="n"></button>
     </template>
+    <template x-for="a in ['dev', 'prod']" :key="a">
+      <button class="chip" :class="ambiente === a ? 'on' : ''"
+              @click="ambiente = ambiente === a ? '' : a; filtra()"
+              x-text="a === 'dev' ? 'dev (-d)' : 'prod'"></button>
+    </template>
+    <select class="input" x-model="host" @change="filtra()" aria-label="filtrar por host">
+      <option value="">todo host</option>
+      <template x-for="h in hosts" :key="h.host">
+        <option :value="h.host" x-text="h.host + ' (' + h.ambiente + ')'"></option>
+      </template>
+    </select>
     <input class="input busca" type="text" x-model="busca" @input="buscaAoVivo()"
            placeholder="buscar na mensagem…" aria-label="buscar na mensagem">
     <button class="btn" @click="alternarPausa()" x-text="pausado ? '▶ retomar' : '⏸ pausar'"></button>

@@ -15,6 +15,9 @@ document.addEventListener('alpine:init', () => {
     escopo: '',
     nivel: '',
     busca: '',
+    host: '',
+    ambiente: '',
+    hosts: [],
     eventos: [], // grupos, mais novo primeiro
     total: 0,
     pagina: 1,
@@ -41,6 +44,8 @@ document.addEventListener('alpine:init', () => {
       this.escopo = salvo.escopo || '';
       this.nivel = salvo.nivel || '';
       this.busca = salvo.busca || '';
+      this.host = salvo.host || '';
+      this.ambiente = salvo.ambiente || '';
       await this.recarregar();
       this.conectar();
       this.observer = new IntersectionObserver((entradas) => {
@@ -55,6 +60,8 @@ document.addEventListener('alpine:init', () => {
       if (this.escopo) qs.set('escopo', this.escopo);
       if (this.nivel) qs.set('nivel', this.nivel);
       if (this.busca) qs.set('q', this.busca);
+      if (this.host) qs.set('host', this.host);
+      if (this.ambiente) qs.set('ambiente', this.ambiente);
       if (extra) for (const [k, v] of Object.entries(extra)) qs.set(k, v);
       return qs.toString();
     },
@@ -66,6 +73,7 @@ document.addEventListener('alpine:init', () => {
         if (!r.ok) throw new Error('api ' + r.status);
         const d = await r.json();
         this.escopos = d.escopos || [];
+        this.hosts = d.hosts || [];
         this.total = d.total;
         this.pagina = d.pagina;
         this.paginas = d.paginas;
@@ -85,7 +93,13 @@ document.addEventListener('alpine:init', () => {
     filtra() {
       localStorage.setItem(
         'flux.eventos.filtros',
-        JSON.stringify({ escopo: this.escopo, nivel: this.nivel, busca: this.busca }),
+        JSON.stringify({
+          escopo: this.escopo,
+          nivel: this.nivel,
+          busca: this.busca,
+          host: this.host,
+          ambiente: this.ambiente,
+        }),
       );
       this.eventos = [];
       this.ultimoId = 0;

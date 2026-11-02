@@ -1885,3 +1885,100 @@ async fn acoes_sem_historico_e_404() {
     .await;
     assert_eq!(s2, StatusCode::NOT_FOUND);
 }
+
+// --------------------------------------- filtro host/ambiente (fatia 9a)
+
+/// Schema v7: access grava o HOST da request; filtro host= e ambiente=
+/// (dev/prod derivado do sufixo) isolam de verdade; hosts_distintos lista
+/// com a classificação e internos (sem host) saem de ambos.
+#[tokio::test]
+async fn eventos_filtram_por_host_e_ambiente() {
+    let app = app_sem_docker();
+    // access COM host de dev e de prod + evento interno (sem host).
+    crate::events::access(
+        &app.state,
+        "vipers-d.bitello.xyz",
+        "GET",
+        "/",
+        200,
+        3,
+        &crate::events::Origem::local(),
+    );
+    crate::events::access(
+        &app.state,
+        "vippers.bitello.xyz",
+        "GET",
+        "/",
+        200,
+        3,
+        &crate::events::Origem::local(),
+    );
+    crate::events::event(&app.state, "info", "painel", "interno sem host");
+
+    let dev = leitura::FiltroEventos {
+        ambiente: Some("dev".into()),
+        ..Default::default()
+    };
+    let (_, rows, total) = leitura::eventos_filtrados(&app, 1, 50, &dev).unwrap();
+    assert_eq!((rows.len(), total), (1, 1), "só o access de dev: {rows:?}");
+    assert!(rows[0].message.contains("vipers-d"), "{rows:?}");
+
+    let prod = leitura::FiltroEventos {
+        ambiente: Some("prod".into()),
+        ..Default::default()
+    };
+    let (_, rows, total) = leitura::eventos_filtrados(&app, 1, 50, &prod).unwrap();
+    assert_eq!((rows.len(), total), (1, 1), "só o access de prod");
+    assert!(rows[0].message.contains("vippers.bitello"), "{rows:?}");
+
+    let por_host = leitura::FiltroEventos {
+        host: Some("vipers-d.bitello.xyz".into()),
+        ..Default::default()
+    };
+    let (_, _, total) = leitura::eventos_filtrados(&app, 1, 50, &por_host).unwrap();
+    assert_eq!(total, 1, "host isola");
+
+    // Internos (host vazio) saem dos DOIS ambientes.
+    let amb = leitura::FiltroEventos {
+        ambiente: Some("dev".into()),
+        scope: Some("painel".into()),
+        ..Default::default()
+    };
+    let (_, _, total) = leitura::eventos_filtrados(&app, 1, 50, &amb).unwrap();
+    assert_eq!(total, 0, "evento interno não é dev nem prod");
+
+    let hosts = leitura::hosts_distintos(&app).unwrap();
+    assert_eq!(hosts.len(), 2, "internos fora da lista: {hosts:?}");
+    assert!(hosts.contains(&("vipers-d.bitello.xyz".into(), "dev".into())));
+    assert!(hosts.contains(&("vippers.bitello.xyz".into(), "prod".into())));
+}
+
+/// A API aceita host= e ambiente= e devolve a lista de hosts (chips nunca
+/// inventam opção).
+#[tokio::test]
+async fn api_eventos_filtra_por_ambiente_e_lista_hosts() {
+    let app = app_sem_docker();
+    crate::events::access(
+        &app.state,
+        "djm-d.bitello.xyz",
+        "GET",
+        "/cms",
+        200,
+        3,
+        &crate::events::Origem::local(),
+    );
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s, body) = pedir_api(
+        &app,
+        router,
+        "/api/events?ambiente=dev",
+        Some(&cookie),
+        &[("x-forwarded-for", "192.168.140.50".into())],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(body.contains("djm-d.bitello.xyz"), "{body}");
+    assert!(body.contains("\"hosts\""), "lista de hosts: {body}");
+    assert!(body.contains("\"ambiente\":\"dev\""), "{body}");
+}

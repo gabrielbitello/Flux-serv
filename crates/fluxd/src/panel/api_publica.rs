@@ -238,7 +238,16 @@ struct ListaEventos {
     /// Escopos distintos — os chips do filtro nunca inventam opção (mesma
     /// leitura da página server-side antiga).
     escopos: Vec<String>,
+    /// Hosts distintos (access, schema v7) com a classificação dev/prod —
+    /// filtro de "projeto de origem".
+    hosts: Vec<HostJson>,
     eventos: Vec<EventoJson>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct HostJson {
+    pub(super) host: String,
+    pub(super) ambiente: String,
 }
 
 /// `GET /api/events?escopo=&nivel=&q=&page=` — MESMA leitura (e MESMOS
@@ -260,6 +269,11 @@ async fn eventos(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Respons
                 paginas,
                 total,
                 escopos: leitura::escopos_distintos(&st.app).unwrap_or_default(),
+                hosts: leitura::hosts_distintos(&st.app)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(host, ambiente)| HostJson { host, ambiente })
+                    .collect(),
                 eventos: rows
                     .into_iter()
                     .map(|ev| EventoJson {

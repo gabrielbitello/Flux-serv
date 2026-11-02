@@ -79,8 +79,8 @@ pub(super) fn projetos(app: &AppState) -> Result<Vec<(String, String)>, String> 
 }
 
 /// Serializável: o snapshot do dashboard carrega eventos direto (a página
-/// HTML antiga escapava à mão; o JSON é a via nova).
-#[derive(serde::Serialize)]
+/// HTML antiga escapava à mão; o JSON é a via nova). Debug pros testes.
+#[derive(serde::Serialize, std::fmt::Debug)]
 pub(super) struct EventoRow {
     pub(super) id: i64,
     pub(super) level: String,
@@ -202,6 +202,11 @@ pub(super) struct FiltroEventos {
     pub(super) scope: Option<String>,
     pub(super) nivel: Option<String>,
     pub(super) busca: Option<String>,
+    /// Host da request (access, schema v7) — "projeto de origem".
+    pub(super) host: Option<String>,
+    /// "dev" | "prod": derivado do host (`-d.`/`vite-` = dev; vazio = sem
+    /// classificação e FORA dos dois filtros).
+    pub(super) ambiente: Option<String>,
 }
 
 /// Parse da query string (`?escopo=access&nivel=warn&q=...`) com valores
@@ -219,6 +224,8 @@ pub(super) fn filtro_de(query: Option<&str>) -> FiltroEventos {
         let v = (!v.trim().is_empty()).then_some(v);
         match k {
             "escopo" => f.scope = v,
+            "host" => f.host = v,
+            "ambiente" => f.ambiente = v,
             "nivel" => f.nivel = v,
             "q" => f.busca = v,
             _ => {}
@@ -244,7 +251,46 @@ fn clausula_filtro(f: &FiltroEventos) -> (String, Vec<Value>) {
         vals.push(Value::from(format!("%{}%", formato::like_esc(q))));
         onde.push_str(&format!(" AND message LIKE ?{} ESCAPE '\\'", vals.len()));
     }
+    if let Some(h) = &f.host {
+        vals.push(Value::from(h.clone()));
+        onde.push_str(&format!(" AND host = ?{}", vals.len()));
+    }
+    if let Some(a) = &f.ambiente {
+        // dev = host de dev (`-d.` custom/derivado ou `vite-*`); prod = com
+        // host e não-dev; vazio = interno (sai dos dois). Ambiente inválido
+        // = filtro que NUNCA casa (nunca filtro mentindo).
+        let cond = match a.as_str() {
+            "dev" => "(host LIKE '%-d.%' OR host LIKE 'vite-%')",
+            "prod" => "(host != '' AND host NOT LIKE '%-d.%' AND host NOT LIKE 'vite-%')",
+            _ => return (String::from("1=0"), Vec::new()),
+        };
+        onde.push_str(&format!(" AND {cond}"));
+    }
     (onde, vals)
+}
+
+/// Hosts distintos COM classificação (dev/prod) — os chips de projeto de
+/// origem nunca inventam opção. Vazio (internos) sai da lista.
+pub(super) fn hosts_distintos(app: &AppState) -> Result<Vec<(String, String)>, String> {
+    app.state
+        .with(|c| {
+            let mut stmt =
+                c.prepare("SELECT DISTINCT host FROM events WHERE host != '' ORDER BY host")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let hosts: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
+            Ok(hosts
+                .into_iter()
+                .map(|h| {
+                    let ambiente = if h.contains("-d.") || h.starts_with("vite-") {
+                        "dev"
+                    } else {
+                        "prod"
+                    };
+                    (h, ambiente.to_owned())
+                })
+                .collect())
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Página de eventos COM filtro — a página é clampada ao total filtrado

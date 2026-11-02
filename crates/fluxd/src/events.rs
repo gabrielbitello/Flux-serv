@@ -22,6 +22,8 @@ pub struct EventoNovo {
     pub scope: String,
     pub message: String,
     pub created_at: String,
+    /// Host da request (access) — vazio nos eventos internos (schema v7).
+    pub host: String,
 }
 
 static CANAL: LazyLock<broadcast::Sender<EventoNovo>> =
@@ -143,12 +145,13 @@ pub fn access(
     dur_ms: u128,
     origem: &Origem,
 ) {
-    event_com_ip(
+    gravar(
         st,
         "info",
         "access",
         &linha_access(host, method, path, status, dur_ms, origem),
         &origem.ip,
+        host,
     );
 }
 
@@ -157,16 +160,22 @@ pub fn event(st: &State, level: &str, scope: &str, message: &str) {
 }
 
 pub fn event_com_ip(st: &State, level: &str, scope: &str, message: &str, ip: &str) {
-    // INSERT + leitura da linha numa única passagem no mesmo lock: o
-    // `created_at` do broadcast é a VERDADE do banco (default do schema),
-    // não relógio do Rust — e o id volta de graça pro canal.
+    gravar(st, level, scope, message, ip, "");
+}
+
+/// INSERT de verdade (fatia 9a): `host` da request nos access (vazio nos
+/// internos) — é a coluna do filtro projeto-origem/dev-prod do painel.
+/// INSERT + leitura da linha numa única passagem no mesmo lock: o
+/// `created_at` do broadcast é a VERDADE do banco (default do schema),
+/// não relógio do Rust — e o id volta de graça pro canal.
+fn gravar(st: &State, level: &str, scope: &str, message: &str, ip: &str, host: &str) {
     let gravado = st.with(|c| {
         c.execute(
-            "INSERT INTO events(level, scope, message, ip) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![level, scope, message, ip],
+            "INSERT INTO events(level, scope, message, ip, host) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![level, scope, message, ip, host],
         )?;
         c.query_row(
-            "SELECT id, level, scope, message, created_at FROM events WHERE id = ?1",
+            "SELECT id, level, scope, message, created_at, host FROM events WHERE id = ?1",
             rusqlite::params![c.last_insert_rowid()],
             |r| {
                 Ok(EventoNovo {
@@ -175,6 +184,7 @@ pub fn event_com_ip(st: &State, level: &str, scope: &str, message: &str, ip: &st
                     scope: r.get(2)?,
                     message: r.get(3)?,
                     created_at: r.get(4)?,
+                    host: r.get(5)?,
                 })
             },
         )

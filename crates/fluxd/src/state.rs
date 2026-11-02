@@ -11,7 +11,7 @@ use flux_common::protocol::{ContainerState, Env};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Versão do schema guardada em `settings.schema_version`.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
 pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -150,6 +150,13 @@ CREATE TABLE IF NOT EXISTS vigia_alerta(
     chave TEXT PRIMARY KEY,
     ultima_em INTEGER NOT NULL
 );
+"#;
+
+/// v7 (fatia 9a do painel API+SSE, 02/11): `events.host` — o host da
+/// request nos access (filtro por projeto de origem e dev/prod no painel).
+/// Vazio = evento interno (sem host).
+const SCHEMA_V7: &str = r#"
+ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT '';
 "#;
 
 #[derive(Debug, thiserror::Error)]
@@ -663,6 +670,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
+            conn.execute_batch(SCHEMA_V7)?;
             conn.execute(
                 "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION],
@@ -677,6 +685,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
+            conn.execute_batch(SCHEMA_V7)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -689,6 +698,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
+            conn.execute_batch(SCHEMA_V7)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -699,6 +709,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V4)?;
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
+            conn.execute_batch(SCHEMA_V7)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -708,6 +719,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         Some(4) => {
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
+            conn.execute_batch(SCHEMA_V7)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -716,6 +728,15 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         // v5 → atual (vigia, 24/10): `events.ip` + cooldown do vigia.
         Some(5) => {
             conn.execute_batch(SCHEMA_V6)?;
+            conn.execute_batch(SCHEMA_V7)?;
+            conn.execute(
+                "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        // v6 → atual (painel API+SSE, fatia 9a): `events.host`.
+        Some(6) => {
+            conn.execute_batch(SCHEMA_V7)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
