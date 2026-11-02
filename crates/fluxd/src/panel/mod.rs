@@ -118,19 +118,33 @@ async fn exige_sessao(State(st): State<PanelState>, req: Request, next: Next) ->
 #[derive(serde::Deserialize)]
 struct CredenciaisLogin {
     password: String,
+    /// "manter conectado": presente = sessão de 30 dias.
+    #[serde(default)]
+    manter: Option<String>,
+    /// Token do widget Turnstile (quando o captcha está configurado).
+    #[serde(rename = "cf-turnstile-response", default)]
+    turnstile: Option<String>,
 }
 
-async fn login_form(RawQuery(q): RawQuery) -> Response {
-    let com_erro = q
+/// Textos do login por flag na query — o redirect não leva NENHUM dado do
+/// formulário (regra anti-echo da 08, mantida).
+fn texto_do_erro(flag: Option<&str>) -> Option<&'static str> {
+    match flag {
+        Some("1") => Some("Senha incorreta."),
+        Some("captcha") => Some("Captcha inválido — tenta de novo."),
+        Some("lock") => Some("Muitas tentativas — o login reabre em até 5 minutos."),
+        _ => None,
+    }
+}
+
+async fn login_form(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Response {
+    let flag = q
         .as_deref()
-        .is_some_and(|s| s.split('&').any(|p| p == "erro=1"));
+        .and_then(|s| s.split('&').find_map(|p| p.strip_prefix("erro=")));
+    let site = crate::gate::turnstile_config(&st.app.state).site;
     resposta(
         StatusCode::OK,
-        render_login(if com_erro {
-            Some("Senha incorreta.")
-        } else {
-            None
-        }),
+        render_login(texto_do_erro(flag), site.as_deref()),
     )
 }
 
@@ -165,6 +179,7 @@ where
 async fn login_submit(
     State(st): State<PanelState>,
     IpDoCliente(ip): IpDoCliente,
+    headers: axum::http::HeaderMap,
     corpo: Result<Form<CredenciaisLogin>, axum::extract::rejection::FormRejection>,
 ) -> Response {
     let creds = match corpo {
@@ -172,10 +187,20 @@ async fn login_submit(
         Err(e) => {
             return resposta(
                 StatusCode::BAD_REQUEST,
-                render_login(Some(&format!("Corpo do login inválido: {e}"))),
+                render_login(Some(&format!("Corpo do login inválido: {e}")), None),
             );
         }
     };
+    let lan = !crate::waf::fonte_externa(&headers, Some(ip));
+    if st.auth.lockout.bloqueado(lan) {
+        crate::events::event(
+            &st.app.state,
+            "warn",
+            "painel",
+            &format!("login recusado: lockout global ativo ip={ip}"),
+        );
+        return redirecao_erro_login("lock");
+    }
     if !st.auth.limiter.permitir(ip) {
         crate::events::event(
             &st.app.state,
@@ -183,42 +208,100 @@ async fn login_submit(
             "painel",
             &format!("login recusado: rate limit excedido ip={ip}"),
         );
-        return resposta(
-            StatusCode::TOO_MANY_REQUESTS,
-            render_login(Some("Muitas tentativas — aguarde 1 minuto.")),
-        );
+        return redirecao_erro_login("lock");
+    }
+    // Turnstile: SEMPRE que configurado (rodada 12 do escopo) — fail-closed:
+    // erro de rede = Invalido = recusa. Errar o captcha CONTA como tentativa.
+    if let Some(secret) = crate::gate::turnstile_config(&st.app.state).secret {
+        let token = creds.turnstile.as_deref().unwrap_or("");
+        match crate::gate::turnstile_verificar(&st.app.http, &secret, token, &ip.to_string()).await
+        {
+            crate::gate::VereditoTurnstile::Valido => {}
+            crate::gate::VereditoTurnstile::Invalido(motivo) => {
+                st.auth.lockout.registrar_falha(lan);
+                crate::events::event(
+                    &st.app.state,
+                    "warn",
+                    "painel",
+                    &format!("login recusado: turnstile ({motivo}) ip={ip}"),
+                );
+                return redirecao_erro_login("captcha");
+            }
+            crate::gate::VereditoTurnstile::Desativado => {}
+        }
     }
     match st.auth.verificar(&creds.password) {
         Err(msg) => {
+            // Problema de PLATAFORMA: não é tentativa de senha, não conta
+            // pro lockout (e mostra a instrução real — fail-closed).
             tracing::error!("painel: hash indisponível: {msg}");
-            resposta(StatusCode::SERVICE_UNAVAILABLE, render_login(Some(&msg)))
+            resposta(
+                StatusCode::SERVICE_UNAVAILABLE,
+                render_login(Some(&msg), None),
+            )
         }
         Ok(true) => {
-            let token = st.auth.sessions.create();
-            crate::events::event(&st.app.state, "info", "painel", "login ok");
+            st.auth.lockout.limpar();
+            let (token, ttl) = if creds.manter.is_some() {
+                (
+                    st.auth.sessions.create_longa(),
+                    panel_auth::SESSION_TTL_LONGA,
+                )
+            } else {
+                (st.auth.sessions.create(), panel_auth::SESSION_TTL)
+            };
+            crate::events::event(
+                &st.app.state,
+                "info",
+                "painel",
+                &format!("login ok manter={}", creds.manter.is_some()),
+            );
             let mut resp = Redirect::to("/").into_response();
-            if let Ok(v) = panel_auth::set_cookie_sessao(&token).parse() {
+            if let Ok(v) = panel_auth::set_cookie_sessao_com(&token, ttl).parse() {
                 resp.headers_mut().insert(header::SET_COOKIE, v);
             }
             resp
         }
         Ok(false) => {
+            st.auth.lockout.registrar_falha(lan);
             crate::events::event(
                 &st.app.state,
                 "warn",
                 "painel",
                 &format!("login recusado: senha incorreta ip={ip}"),
             );
-            let mut resp = Redirect::to("/login?erro=1").into_response();
-            resp.headers_mut()
-                .insert(x_robots_tag(), HeaderValue::from_static(NOINDEX));
-            resp
+            redirecao_erro_login("1")
         }
     }
 }
 
+/// Redirect de erro do login: flag na query, NENHUM dado do form na URL.
+fn redirecao_erro_login(flag: &'static str) -> Response {
+    let mut resp = Redirect::to(&format!("/login?erro={flag}")).into_response();
+    resp.headers_mut()
+        .insert(x_robots_tag(), HeaderValue::from_static(NOINDEX));
+    resp
+}
+
 async fn logout(State(st): State<PanelState>, req: Request) -> Response {
-    if let Some(t) = panel_auth::token_do_header(req.headers()) {
+    // "sair de todos os dispositivos" (fatia 8): corpo com todos=1 revoga
+    // TODAS as sessões — essencial com sessões de 30 dias. Leitura CRUA do
+    // corpo (o extractor Form exige campos; aqui é um checkbox opcional) e
+    // token capturado ANTES de consumir o corpo.
+    let token = panel_auth::token_do_header(req.headers());
+    let global = match axum::body::to_bytes(req.into_body(), 1024).await {
+        Ok(corpo) => corpo.windows(7).any(|w| w == b"todos=1"),
+        Err(_) => false,
+    };
+    if global {
+        st.auth.sessions.revogar_todas();
+        crate::events::event(
+            &st.app.state,
+            "info",
+            "painel",
+            "logout GLOBAL (todas as sessões)",
+        );
+    } else if let Some(t) = token {
         st.auth.sessions.revoke(&t);
         crate::events::event(&st.app.state, "info", "painel", "logout");
     }

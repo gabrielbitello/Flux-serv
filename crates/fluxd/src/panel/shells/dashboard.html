@@ -25,6 +25,10 @@
       <span class="dot" :class="saudeDot().c"></span><span x-text="saudeDot().t"></span>
     </button>
     <form method="post" action="/logout" class="inline"><button class="btn ghost" type="submit">sair</button></form>
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="todos" value="1">
+      <button class="btn ghost" type="submit" title="revoga sessões em todos os dispositivos">sair de todos</button>
+    </form>
   </div>
 </header>
 

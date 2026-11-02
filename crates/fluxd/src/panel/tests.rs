@@ -768,7 +768,9 @@ async fn sexto_login_no_minuto_come_429() {
             "tentativa {i} passa do limite"
         );
     }
-    let (status, _, body) = pedir(
+    // Limite estourado = redirect com flag (anti-echo) e a mensagem na
+    // página de login (o texto do lock cobre rate limit e lockout).
+    let (status, headers, _) = pedir(
         &app,
         router,
         "POST",
@@ -777,10 +779,16 @@ async fn sexto_login_no_minuto_come_429() {
         Some(format!("password={SENHA_DE_TESTE}")),
     )
     .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        Some("/login?erro=lock"),
+        "recusa de limite leva à flag lock"
+    );
+    let (_, _, pagina) = get(&app, "/login?erro=lock").await;
     assert!(
-        body.contains("Muitas tentativas"),
-        "429 do painel é página brandiada: {body}"
+        pagina.contains("Muitas tentativas — o login reabre em até 5 minutos."),
+        "mensagem do lock na página: {pagina}"
     );
 }
 
@@ -1512,5 +1520,171 @@ async fn sse_dashboard_pusha_so_quando_muda() {
     assert!(
         segundo.contains("dash-mudou-51"),
         "push na mudança: {segundo}"
+    );
+}
+
+// -------------------------------------------------- login endurecido (fatia 8)
+
+/// POST /login com headers extras (cf-connecting-ip p/ simular externo).
+async fn login_com(
+    app: &Arc<AppState>,
+    router: Router,
+    corpo: String,
+    extra: &[(&str, String)],
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url: hyper::Uri = format!("http://{addr}/login").parse().unwrap();
+    let mut b = axum::http::Request::builder()
+        .method("POST")
+        .uri(url)
+        .header(header::HOST, "flux.bitello.xyz")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    for (k, v) in extra {
+        b = b.header(*k, v.clone());
+    }
+    let resp = app
+        .http
+        .request(b.body(Body::from(corpo)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    (status, headers, body)
+}
+
+fn flag_de(h: &axum::http::HeaderMap) -> Option<String> {
+    h.get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|l| l.strip_prefix("/login?erro="))
+        .map(|f| f.to_owned())
+}
+
+/// 3 erros de FORA da LAN em <= 90 s = lock GLOBAL: a senha CERTA de fora
+/// cai na flag `lock`, MAS a mesma senha da LAN passa (LAN imune, decisão
+/// do Gabriel — em casa você nunca fica preso).
+#[tokio::test]
+async fn lockout_global_trava_fora_e_lan_passa() {
+    let app = app_sem_docker();
+    let externo = [("cf-connecting-ip", "203.0.113.77".into())];
+    // UM auth só: lockout/limiter/sessões vivem no PanelAuth compartilhado —
+    // painel_com_auth novo por login zeraria o lockout entre tentativas.
+    let (router, _dir) = painel_com_auth(&app).await;
+    for i in 0..3 {
+        let (s, h, _) = login_com(&app, router.clone(), "password=errada".into(), &externo).await;
+        assert_eq!(s, StatusCode::SEE_OTHER, "tentativa {i}");
+        assert_eq!(flag_de(&h).as_deref(), Some("1"), "erro de senha é flag 1");
+    }
+    // Senha CERTA de fora: travada.
+    let (s, h, _) = login_com(
+        &app,
+        router.clone(),
+        format!("password={SENHA_DE_TESTE}"),
+        &externo,
+    )
+    .await;
+    assert_eq!(s, StatusCode::SEE_OTHER);
+    assert_eq!(
+        flag_de(&h).as_deref(),
+        Some("lock"),
+        "fora da LAN pega o lock"
+    );
+    // A MESMA senha da LAN (sem header externo): passa — login ok volta pra /.
+    let (s, h, _) = login_com(&app, router, format!("password={SENHA_DE_TESTE}"), &[]).await;
+    assert_eq!(s, StatusCode::SEE_OTHER, "LAN loga");
+    assert_eq!(
+        h.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        Some("/")
+    );
+}
+
+/// "manter conectado": checkbox no form → cookie com Max-Age de 30 dias;
+/// sem o checkbox → 12 h como sempre.
+#[tokio::test]
+async fn manter_conectado_estende_o_cookie() {
+    let app = app_sem_docker();
+    async fn max_age(app: &Arc<AppState>, corpo: String) -> u64 {
+        let (router, _dir) = painel_com_auth(app).await;
+        let (_, h, _) = login_com(app, router, corpo, &[]).await;
+        h.get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|c| c.split(';').find(|p| p.trim().starts_with("Max-Age=")))
+            .and_then(|p| p.trim().strip_prefix("Max-Age="))
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    assert_eq!(
+        max_age(&app, format!("password={SENHA_DE_TESTE}&manter=1")).await,
+        30 * 24 * 60 * 60,
+        "manter=1 → 30 dias"
+    );
+    assert_eq!(
+        max_age(&app, format!("password={SENHA_DE_TESTE}")).await,
+        12 * 60 * 60,
+        "sem manter → 12 h"
+    );
+}
+
+/// "sair de TODOS os dispositivos": logout com todos=1 revoga TODAS as
+/// sessões (a sessão B, de outro login, deixa de valer).
+#[tokio::test]
+async fn logout_global_revoga_todas_as_sessoes() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie_a = cookie_de_sessao(&app, &router).await;
+    let cookie_b = cookie_de_sessao(&app, &router).await;
+    let (status, _, _) = pedir(
+        &app,
+        router.clone(),
+        "POST",
+        "/logout",
+        Some(&cookie_a),
+        Some("todos=1".into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    // As DUAS sessões morrem: GET / com qualquer uma volta pro login.
+    for c in [cookie_a, cookie_b] {
+        let (s, h, _) = pedir(&app, router.clone(), "GET", "/", Some(&c), None).await;
+        assert_eq!(s, StatusCode::SEE_OTHER, "sessão morta");
+        assert_eq!(
+            h.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+            Some("/login")
+        );
+    }
+}
+
+/// Turnstile configurado = login SEM token de captcha é recusado (fail-
+/// closed: a ponte nem existe no teste — erro de rede é Invalido) e a
+/// página de login rende o widget com a sitekey.
+#[tokio::test]
+async fn turnstile_configurado_exige_o_token() {
+    let app = app_sem_docker();
+    crate::gate::definir_turnstile(&app.state, "sitekey-de-teste", "secret-de-teste").unwrap();
+    let (router, _dir) = painel_com_auth(&app).await;
+    // /login é público: GET CRU (o get() logaria — e o login agora exige captcha)
+    let (_, _, pagina) = pedir(&app, router.clone(), "GET", "/login", None, None).await;
+    assert!(
+        pagina.contains("cf-turnstile") && pagina.contains("sitekey-de-teste"),
+        "widget rendido com a sitekey: {pagina}"
+    );
+    let (s, h, _) = login_com(&app, router, format!("password={SENHA_DE_TESTE}"), &[]).await;
+    assert_eq!(s, StatusCode::SEE_OTHER);
+    assert_eq!(
+        flag_de(&h).as_deref(),
+        Some("captcha"),
+        "sem token de captcha, nem com senha certa"
     );
 }

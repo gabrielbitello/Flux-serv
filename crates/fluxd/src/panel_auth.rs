@@ -21,6 +21,8 @@ use argon2::{Argon2, PasswordHash, PasswordVerifier};
 pub const COOKIE_NAME: &str = "flux_panel_session";
 /// Sessão expira em 12 h (08).
 pub const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// "Manter conectado" (escopo 31/10, fatia 8): 30 dias.
+pub const SESSION_TTL_LONGA: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// Janela e teto do rate limit de login (08): 5 tentativas por minuto por IP.
 pub const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 pub const LOGIN_MAX_TENTATIVAS: u32 = 5;
@@ -42,10 +44,19 @@ impl SessionStore {
         }
     }
 
-    /// Cria sessão nova, podando as vencidas de quebra.
+    /// Cria sessão nova (12 h), podando as vencidas de quebra.
     pub fn create(&self) -> String {
+        self.create_com_ttl(SESSION_TTL)
+    }
+
+    /// Sessão "manter conectado" (30 dias).
+    pub fn create_longa(&self) -> String {
+        self.create_com_ttl(SESSION_TTL_LONGA)
+    }
+
+    fn create_com_ttl(&self, ttl: Duration) -> String {
         let token = token_novo();
-        let expira = Instant::now() + SESSION_TTL;
+        let expira = Instant::now() + ttl;
         let mut inner = self.inner.lock().expect("mutex de sessões");
         inner.retain(|_, exp| *exp > Instant::now());
         inner.insert(token.clone(), expira);
@@ -60,6 +71,11 @@ impl SessionStore {
 
     pub fn revoke(&self, token: &str) {
         self.inner.lock().expect("mutex de sessões").remove(token);
+    }
+
+    /// "Sair de TODOS os dispositivos" (fatia 8): zera tudo.
+    pub fn revogar_todas(&self) {
+        self.inner.lock().expect("mutex de sessões").clear();
     }
 
     #[cfg(test)]
@@ -117,12 +133,81 @@ impl Default for LoginLimiter {
     }
 }
 
+// ------------------------------------------------------------------ lockout
+
+/// Erros que, dentro da janela, armar o lock global.
+pub const LOCKOUT_ERROS: usize = 3;
+/// Janela deslizante de erros: 3 em ≤ 90 s (espec do Gabriel).
+pub const LOCKOUT_JANELA: Duration = Duration::from_secs(90);
+/// Quem erra espera: 5 min GLOBAL (menos origem LAN, que é imune).
+pub const LOCKOUT_DURACAO: Duration = Duration::from_secs(5 * 60);
+
+/// Lockout GLOBAL do login (fatia 8): 3 erros em ≤ 90 s — de QUALQUER IP
+/// fora da LAN, pois erros vindos da LAN nem contam — fecha o login pra
+/// TODO MUNDO exceto LAN por 5 min. Estado em memória de propósito: um
+/// reinício do fluxd limpa o lock (o rate limit por IP segue em pé) — o
+/// atacante tem que reiniciar o daemon dele... que não é o nosso.
+pub struct Lockout {
+    falhas: Mutex<Vec<Instant>>,
+    ate: Mutex<Option<Instant>>,
+}
+
+impl Lockout {
+    pub fn new() -> Self {
+        Self {
+            falhas: Mutex::new(Vec::new()),
+            ate: Mutex::new(None),
+        }
+    }
+
+    /// Login fechado? LAN nunca.
+    pub fn bloqueado(&self, lan: bool) -> bool {
+        if lan {
+            return false;
+        }
+        let ate = self.ate.lock().expect("mutex do lockout");
+        matches!(*ate, Some(t) if t > Instant::now())
+    }
+
+    /// Falha de senha vinda de fora da LAN. LAN não conta (imune, decisão
+    /// do Gabriel — em casa você nunca fica preso).
+    pub fn registrar_falha(&self, lan: bool) {
+        if lan {
+            return;
+        }
+        self.registrar_falha_em(Instant::now());
+    }
+
+    fn registrar_falha_em(&self, agora: Instant) {
+        let mut f = self.falhas.lock().expect("mutex do lockout");
+        f.retain(|t| agora.duration_since(*t) <= LOCKOUT_JANELA);
+        f.push(agora);
+        if f.len() >= LOCKOUT_ERROS {
+            *f = Vec::new(); // o lock fala por si; contador zera
+            *self.ate.lock().expect("mutex do lockout") = Some(agora + LOCKOUT_DURACAO);
+        }
+    }
+
+    /// Sucesso autêntico limpa as falhas em aberto (2 erros antigos não
+    /// contaminam o próximo ciclo).
+    pub fn limpar(&self) {
+        self.falhas.lock().expect("mutex do lockout").clear();
+    }
+}
+
+impl Default for Lockout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ------------------------------------------------------------------ senha
 
 /// Estado de auth compartilhado entre login, logout e o middleware de guarda.
 pub struct PanelAuth {
     pub sessions: SessionStore,
     pub limiter: LoginLimiter,
+    pub lockout: Lockout,
     hash_path: PathBuf,
 }
 
@@ -135,6 +220,7 @@ impl PanelAuth {
         Self {
             sessions: SessionStore::new(),
             limiter: LoginLimiter::new(),
+            lockout: Lockout::new(),
             hash_path: path,
         }
     }
@@ -179,9 +265,14 @@ impl Default for PanelAuth {
 /// responde por HTTP na rede interna (192.168.140.x) — o tráfego público
 /// sempre passa pelo TLS do Caddy/tunnel (03).
 pub fn set_cookie_sessao(token: &str) -> String {
+    set_cookie_sessao_com(token, SESSION_TTL)
+}
+
+/// Cookie com o TTL escolhido no login ("manter conectado" = 30 dias).
+pub fn set_cookie_sessao_com(token: &str, ttl: Duration) -> String {
     format!(
         "{COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
-        SESSION_TTL.as_secs()
+        ttl.as_secs()
     )
 }
 
@@ -301,5 +392,64 @@ mod testes {
         assert!(c.contains("Path=/"));
         assert!(c.contains("Max-Age=43200"), "12 h: {c}");
         assert!(set_cookie_limpo().contains("Max-Age=0"));
+    }
+}
+
+#[cfg(test)]
+mod lockout_tests {
+    use super::*;
+
+    /// Regra do Gabriel: 3 erros em ≤ 90 s = lock global de 5 min; 2 erros
+    /// não travam; sucesso limpa o contador.
+    #[test]
+    fn tres_erros_na_janela_travam_e_sucesso_limpa() {
+        let l = Lockout::new();
+        let t = Instant::now();
+        l.registrar_falha_em(t);
+        l.registrar_falha_em(t + Duration::from_secs(30));
+        assert!(!l.bloqueado(false), "2 erros não travam");
+        l.registrar_falha_em(t + Duration::from_secs(60));
+        assert!(l.bloqueado(false), "3 erros em 60 s travam");
+        assert!(l.bloqueado(false), "lock dura 5 min");
+        l.limpar();
+        assert!(l.bloqueado(false), "limpar não levanta o lock já armado");
+    }
+
+    /// Erros FORA da janela de 90 s não se acumulam.
+    #[test]
+    fn erros_fora_da_janela_nao_somam() {
+        let l = Lockout::new();
+        let t = Instant::now();
+        l.registrar_falha_em(t - Duration::from_secs(200));
+        l.registrar_falha_em(t - Duration::from_secs(100));
+        l.registrar_falha_em(t);
+        assert!(!l.bloqueado(false), "só 1 erro dentro da janela de 90 s");
+    }
+
+    /// LAN é imune dos dois lados: erros não contam e lock não pega.
+    #[test]
+    fn lan_imune() {
+        let l = Lockout::new();
+        l.registrar_falha(true);
+        l.registrar_falha(true);
+        l.registrar_falha(true);
+        assert!(!l.bloqueado(true), "LAN passa mesmo com erros dela");
+        // lock armado por OUTRA origem: LAN passa, fora não.
+        let t = Instant::now();
+        l.registrar_falha_em(t);
+        l.registrar_falha_em(t);
+        l.registrar_falha_em(t);
+        assert!(l.bloqueado(false));
+        assert!(!l.bloqueado(true), "LAN imune ao lock global");
+    }
+
+    /// Sessão longa: create_longa vai pro store (valida como qualquer uma).
+    #[test]
+    fn sessao_longa_valida() {
+        let st = SessionStore::new();
+        let t = st.create_longa();
+        assert!(st.validate(&t));
+        st.revogar_todas();
+        assert!(!st.validate(&t), "logout global mata a longa também");
     }
 }

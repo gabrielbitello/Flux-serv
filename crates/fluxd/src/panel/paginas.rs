@@ -92,7 +92,10 @@ border:1px solid var(--line);border-radius:6px;padding:.2rem .7rem;cursor:pointe
 /// Tela de login (08): campo de senha só — usuário único (Gabriel), o nome
 /// não participa da autenticação. Mensagem opcional em cima (senha errada,
 /// rate limit, hash ausente). Sem nav — quem não logou não navega.
-pub(super) fn render_login(mensagem: Option<&str>) -> String {
+/// Login (fatia 8): `turnstile_site` = widget do Cloudflare quando
+/// configurado (`flux gate turnstile` — MESMAS chaves do gate de dev);
+/// "manter conectado" = sessão de 30 dias.
+pub(super) fn render_login(mensagem: Option<&str>, turnstile_site: Option<&str>) -> String {
     let msg = mensagem
         .map(|m| format!("<div class=\"aviso\">{}</div>", esc(m)))
         .unwrap_or_default();
@@ -105,7 +108,19 @@ display:flex;flex-direction:column;gap:.7rem;margin-top:.8rem">
 <input type="password" id="password" name="password" required autofocus
 style="background:var(--bg);color:var(--text);border:1px solid var(--line);
 border-radius:6px;padding:.45rem .6rem">
-<button type="submit" style="background:var(--accentbg);color:var(--accent);
+<label style="display:flex;gap:.45rem;align-items:center;font-size:.85rem">
+<input type="checkbox" name="manter" value="1" style="width:auto">
+manter conectado (30 dias)
+</label>"#,
+    );
+    if let Some(site) = turnstile_site {
+        body.push_str(&format!(
+            r#"<div class="cf-turnstile" data-sitekey="{site}" data-theme="auto"></div>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>"#
+        ));
+    }
+    body.push_str(
+        r#"<button type="submit" style="background:var(--accentbg);color:var(--accent);
 border:1px solid var(--accent);border-radius:6px;padding:.45rem .6rem;
 font-weight:600;cursor:pointer">Entrar</button>
 </form>"#,
