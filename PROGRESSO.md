@@ -2246,3 +2246,32 @@ domínio próprio do cliente (Cloudflare for SaaS), redirects na borda,
 edge cache, e-mail transacional, domínio do cliente, analytics/heatmap
 próprios (factíveis — analytics server-side é fácil, heatmap pede JS injetado),
 kit LGPD, domínio de e-mail do cliente (fronteira: nunca).
+
+## 2026-11-03 — Rework do dashboard (branch `agente/03-11`, worktree `.worktree/`)
+
+Lista do Gabriel para a primeira página (dashboard) + extras, escopo fechado em
+1 rodada de perguntas (o que é "comphania" virou: projetos registrados que
+nunca subiram). Fatias com TRIO verde escopado `-p fluxd`:
+
+- `a77afca` **doctor neutro**: projeto que nunca subiu (`nunca-subiu`) não é
+  vermelho — `Item.neutro` (ok=true não conta no CLI; neutro=true pinta cinza
+  no painel), banco ausente e assets sem build neutros SÓ quando containers
+  dizem nunca-subiu.
+- `71f568d` **vigia**: régua de recarga ignora `/api/*` (5 painéis + 2
+  realtime reconectando não é reload de página; martelada de 3 min segue
+  contando tudo).
+- `79d34b6` **contratos da API**: `ip`/`host` nas linhas de evento (broadcast
+  + JSON + frame SSE), `meu_ip` pela mesma régua `waf::ip_real`, curva com
+  `?minutos=` (1..=1440), `ultimos15` (warns da janela + total), dashboard
+  SSE acordando por evento com push coalescido ≥300 ms. **BUG**: lista de
+  eventos do detalhe de projeto voltava vazia SEMPRE — `'\'` no Rust escapava
+  a aspa, SQL quebrava, `unwrap_or_default` engolia (consertado + teste).
+- `5d392d2` **cliente**: dashboard com curva Chart.js (24h..15m + realtime
+  10m, min/média/pico, clique fixa valor), card "últimos 15 min", vigia
+  legível com anomalias clicáveis, últimos eventos no formato do /events com
+  badges você/host e toggle "ocultar meus eventos", projetos 6/página;
+  `/projetos` nova na nav de TODAS as shells (paridade dos cards travada por
+  teste); `/events` agrupa ×N só dentro de 30 min.
+- docs commit: `docs/panel.md`, `docs/status.md`, este arquivo.
+
+334 testes no fluxd. NÃO deployado — espera ordem do Gabriel.
