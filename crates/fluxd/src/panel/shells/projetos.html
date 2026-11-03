@@ -8,12 +8,12 @@
 <meta name="robots" content="noindex, nofollow, noarchive">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flux — projetos</title>
-<link rel="stylesheet" href="/assets/estilo.css">
+<link rel="stylesheet" href="/assets/estilo.css?v=__ASSETS_V__">
 <!-- painel.js ANTES do alpine: o build CDN do Alpine auto-inicia via
      queueMicrotask no fim do PRÓPRIO script — alpine:init dispara antes
      do próximo defer executar; registrado depois = componente nunca existe -->
-<script defer src="/assets/painel.js" data-cfasync="false"></script>
-<script defer src="/assets/alpine.min.js" data-cfasync="false"></script>
+<script defer src="/assets/painel.js?v=__ASSETS_V__" data-cfasync="false"></script>
+<script defer src="/assets/alpine.min.js?v=__ASSETS_V__" data-cfasync="false"></script>
 </head>
 <body>
 <div x-data="projetosPage">

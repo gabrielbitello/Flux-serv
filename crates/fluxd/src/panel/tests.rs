@@ -1819,6 +1819,37 @@ async fn cards_de_projeto_espelhados_nas_duas_shells() {
     }
 }
 
+/// Cache-busting (03/11): TODAS as shells apontam os assets com `?v=<hash>`
+/// REAL (o placeholder sai na hora do serve) e os assets saem com cache
+/// longo + immutable — conteúdo novo vira URL nova, e a borda (CF) nunca
+/// mais serve JS velho com shell nova. O deploy de 03/11 ficou horas assim:
+/// shell usando `visiveis`, painel.js cached sem o getter — erro direto no
+/// console do celular do Gabriel.
+#[tokio::test]
+async fn assets_com_versao_e_cache_imutavel() {
+    let app = app_sem_docker();
+    for uri in ["/", "/projetos", "/events", "/projects/vipers", "/observe"] {
+        let (_, _, shell) = get(&app, uri).await;
+        assert!(
+            shell.contains("/assets/painel.js?v="),
+            "{uri} sem versão nos assets"
+        );
+        assert!(
+            !shell.contains("__ASSETS_V__"),
+            "{uri} serviu o placeholder CRU — handler não substituiu"
+        );
+    }
+    let (_, headers, _) = get(&app, "/assets/painel.js").await;
+    let cc = headers
+        .get(header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cc.contains("immutable") && cc.contains("max-age=31536000"),
+        "cache-control dos assets: {cc}"
+    );
+}
+
 // -------------------------------------------------- login endurecido (fatia 8)
 
 /// POST /login com headers extras (cf-connecting-ip p/ simular externo).

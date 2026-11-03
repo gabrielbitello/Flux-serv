@@ -341,27 +341,37 @@ fn resposta(status: StatusCode, page: String) -> Response {
 /// ao vivo por /api/dashboard/follow (push só quando muda), saúde por
 /// /api/saude. A flag ?rescan=1 vira aviso no cliente (o nome de projeto
 /// nunca volta na URL — regra do post/redirect/get mantida).
+/// Shell estática com o placeholder de versão dos assets substituído
+/// (cache-busting 03/11 — doc em assets::versao): `painel.js?v=<hash>`.
+/// Binário novo com asset novo = URL nova = borda nunca serve JS velho.
+fn shell(page: &'static str) -> Response {
+    resposta(
+        StatusCode::OK,
+        page.replace(assets::V_PLACEHOLDER, assets::versao()),
+    )
+}
+
 async fn dashboard() -> Response {
-    resposta(StatusCode::OK, SHELL_DASHBOARD.to_owned())
+    shell(SHELL_DASHBOARD)
 }
 
 /// GET /projetos — SHELL estática da listagem (nova, 03/11): MESMO snapshot
 /// do dashboard (SSE /api/dashboard/follow), cards 6 por página.
 async fn pagina_projetos() -> Response {
-    resposta(StatusCode::OK, SHELL_PROJETOS.to_owned())
+    shell(SHELL_PROJETOS)
 }
 
 /// GET /observe — SHELL estática (fatia 7): séries por /api/observe
 /// (mesmas consultas do render SVG), gráficos em Chart.js vendido.
 async fn observe_shell() -> Response {
-    resposta(StatusCode::OK, SHELL_OBSERVE.to_owned())
+    shell(SHELL_OBSERVE)
 }
 
 /// GET /projects/{name} — SHELL estática (fatia 6a): snapshot por
 /// /api/projects/{name} (SSE), logs por /api/projects/{name}/logs. O 404
 /// honesto de não-registrado acontece na API (o cliente mostra).
 async fn detalhe_projeto() -> Response {
-    resposta(StatusCode::OK, SHELL_PROJETO.to_owned())
+    shell(SHELL_PROJETO)
 }
 
 /// GET /events — SHELL estático (fatia 4, style guide 02/11): o HTML não
@@ -369,7 +379,7 @@ async fn detalhe_projeto() -> Response {
 /// /api/events/follow. O Rust não renderiza mais HTML desta página — os
 /// filtros continuam sendo verdade do SQL (leitura::filtro_de).
 async fn pagina_eventos() -> Response {
-    resposta(StatusCode::OK, SHELL_EVENTOS.to_owned())
+    shell(SHELL_EVENTOS)
 }
 
 /// POST /projects/{name}/rescan: pede re-scan da sessão de sync do projeto
