@@ -9,8 +9,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flux — painel</title>
 <link rel="stylesheet" href="/assets/estilo.css">
-<script defer src="/assets/alpine.min.js" data-cfasync="false"></script>
+<!-- painel.js ANTES do alpine: o build CDN do Alpine auto-inicia via
+     queueMicrotask no fim do PRÓPRIO script — alpine:init dispara antes
+     do próximo defer executar; registrado depois = componente nunca existe -->
 <script defer src="/assets/painel.js" data-cfasync="false"></script>
+<script defer src="/assets/alpine.min.js" data-cfasync="false"></script>
 </head>
 <body>
 <div x-data="dashboardPage">
