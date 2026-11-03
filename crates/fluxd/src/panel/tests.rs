@@ -1739,6 +1739,86 @@ async fn dashboard_minutos_na_query() {
     }
 }
 
+// ------------------------------------------ página /projetos + rework (03/11)
+
+/// A página nova de listagem segue o padrão das outras: sessão obrigatória
+/// (herdada do guard) e shell estática com o componente próprio.
+#[tokio::test]
+async fn pagina_projetos_exige_sessao_e_serve_shell() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, headers, _) = pedir(&app, router.clone(), "GET", "/projetos", None, None).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "auth herdada do guard");
+    assert_eq!(
+        headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        Some("/login"),
+        "sem sessão manda pro login como qualquer rota"
+    );
+    let (status, _, shell) = get(&app, "/projetos").await;
+    assert_eq!(status, StatusCode::OK, "com sessão a listagem responde");
+    assert!(shell.contains("projetosPage"), "componente: {shell}");
+}
+
+/// Nav nova + cliente do rework: TODAS as shells apontam pra /projetos e o
+/// painel.js traz os contratos da fatia (toggle compartilhado, gap do
+/// agrupamento, janela da curva no SSE, anomalia com pista, doctor neutro).
+#[tokio::test]
+async fn nav_e_cliente_do_rework_do_dashboard() {
+    let app = app_sem_docker();
+    for uri in ["/", "/projetos", "/events", "/projects/vipers", "/observe"] {
+        let (_, _, shell) = get(&app, uri).await;
+        assert!(
+            shell.contains("href=\"/projetos\""),
+            "nav de {uri} sem link /projetos"
+        );
+    }
+    let (_, _, js) = get(&app, "/assets/painel.js").await;
+    for pedaco in [
+        "projetosPage",
+        "flux.ocultar_meus",              // toggle compartilhado dash×events
+        "GAP_GRUPO_MS",                   // agrupar ×N só dentro de 30 min
+        "/api/dashboard/follow?minutos=", // janela da curva no SSE
+        "linkAnomalia",                   // anomalia clicável com pista
+        "nunca-subiu",                    // doctor neutro pintado de cinza
+        "porPagina: 6",                   // 6 projetos por página
+    ] {
+        assert!(js.contains(pedaco), "painel.js sem `{pedaco}`");
+    }
+    assert!(!js.contains("innerHTML"), "innerHTML continua proibido");
+    // Toggle presente nas duas páginas que filtram por "meu IP".
+    let (_, _, dash) = get(&app, "/").await;
+    let (_, _, eventos) = get(&app, "/events").await;
+    assert!(dash.contains("ocultarMeus"), "toggle no dashboard");
+    assert!(eventos.contains("ocultarMeus"), "toggle no /events");
+    // Curva nova é Chart.js (o sparkline de barras não volta).
+    assert!(
+        dash.contains("/assets/chart.umd.min.js"),
+        "Chart.js na shell do dashboard"
+    );
+}
+
+/// Cards de projeto são o MESMO bloco no dashboard e na listagem — a shell
+/// duplica o markup de propósito (estática, sem build); o teste trava a
+/// PARIDADE das bindings pra duplicação não virar drift de contrato.
+#[tokio::test]
+async fn cards_de_projeto_espelhados_nas_duas_shells() {
+    let app = app_sem_docker();
+    let (_, _, dash) = get(&app, "/").await;
+    let (_, _, lista) = get(&app, "/projetos").await;
+    for binding in [
+        "acordar(p.nome)",
+        "p.dev_host",
+        "p.prod_host",
+        "e.sono_erro",
+        "p.sync.last_error",
+        "dotDe(e.estado)",
+        "'/projects/' + encodeURIComponent(p.nome)",
+    ] {
+        assert!(dash.contains(binding), "dashboard sem `{binding}`");
+        assert!(lista.contains(binding), "projetos sem `{binding}`");
+    }
+}
+
 // -------------------------------------------------- login endurecido (fatia 8)
 
 /// POST /login com headers extras (cf-connecting-ip p/ simular externo).

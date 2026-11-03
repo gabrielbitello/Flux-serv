@@ -42,6 +42,7 @@ const SHELL_EVENTOS: &str = include_str!("shells/eventos.html");
 const SHELL_DASHBOARD: &str = include_str!("shells/dashboard.html");
 const SHELL_PROJETO: &str = include_str!("shells/projeto.html");
 const SHELL_OBSERVE: &str = include_str!("shells/observe.html");
+const SHELL_PROJETOS: &str = include_str!("shells/projetos.html");
 // `State` aqui é o extractor do axum; o estado do daemon é sempre acessado
 // pelo campo `app.state` — o tipo fica qualificado onde precisar (testes).
 use crate::ui::{NOINDEX, x_robots_tag};
@@ -79,6 +80,7 @@ pub fn build_panel(app: Arc<AppState>, auth: Arc<panel_auth::PanelAuth>) -> Rout
     // para as rotas deste sub-router — /login e /logout ficam de fora.
     let protegido = Router::new()
         .route("/", get(dashboard))
+        .route("/projetos", get(pagina_projetos))
         .route("/projects/{name}", get(detalhe_projeto))
         // Rescan da sessão de sync (flux watch executa): POST → redirect.
         .route("/projects/{name}/rescan", post(rescan_projeto))
@@ -341,6 +343,12 @@ fn resposta(status: StatusCode, page: String) -> Response {
 /// nunca volta na URL — regra do post/redirect/get mantida).
 async fn dashboard() -> Response {
     resposta(StatusCode::OK, SHELL_DASHBOARD.to_owned())
+}
+
+/// GET /projetos — SHELL estática da listagem (nova, 03/11): MESMO snapshot
+/// do dashboard (SSE /api/dashboard/follow), cards 6 por página.
+async fn pagina_projetos() -> Response {
+    resposta(StatusCode::OK, SHELL_PROJETOS.to_owned())
 }
 
 /// GET /observe — SHELL estática (fatia 7): séries por /api/observe

@@ -21,7 +21,7 @@
 <header class="top">
   <span class="mark">flux<span>/painel</span></span>
   <nav aria-label="Páginas">
-    <a href="/">dashboard</a><a class="on" href="/events">eventos</a><a href="/observe">monitor</a>
+    <a href="/">dashboard</a><a href="/projetos">projetos</a><a class="on" href="/events">eventos</a><a href="/observe">monitor</a>
   </nav>
   <div class="topdir">
     <span class="muted" x-text="vivo"></span>
@@ -70,6 +70,9 @@
     </select>
     <input class="input busca" type="text" x-model="busca" @input="buscaAoVivo()"
            placeholder="buscar na mensagem…" aria-label="buscar na mensagem">
+    <label class="muted" title="esconde os eventos de info vindos do IP deste navegador (warn/error continuam)">
+      <input type="checkbox" :checked="ocultarMeus" @change="alternarMeus()"> ocultar meus
+    </label>
     <button class="btn" @click="alternarPausa()" x-text="pausado ? '▶ retomar' : '⏸ pausar'"></button>
     <span class="warn-t" x-cloak x-show="retidos > 0" x-text="retidos + ' retidos'"></span>
     <button class="btn ghost" x-cloak x-show="notif === 'default'" @click="pedirAvisos()">
@@ -82,7 +85,7 @@
       <tr><th>quando (local)</th><th>nível</th><th>escopo</th><th>conteúdo</th></tr>
     </thead>
     <tbody x-ref="corpo">
-      <template x-for="g in eventos" :key="g.chave">
+      <template x-for="g in visiveis" :key="g.chave">
         <tr :class="g.linha">
           <td class="mono muted" :title="g.ultimo + ' UTC'" x-text="quando(g.ultimo)"></td>
           <td><span class="dot" :class="g.dot"></span></td>
@@ -98,15 +101,21 @@
             <template x-if="!g.access">
               <span x-text="g.message"></span>
             </template>
+            <!-- Origem do evento (03/11): "você" = ip deste navegador;
+                 "host" = ip da infra. Meu-ip sem marca = internet comum. -->
+            <template x-if="formato.marcaDe(g, meuIp)">
+              <span class="tag" :class="formato.marcaDe(g, meuIp).classe"
+                    x-text="formato.marcaDe(g, meuIp).rotulo"></span>
+            </template>
             <template x-if="g.count > 1">
-              <details class="cru">
+              <details class="cru" @click.stop>
                 <summary x-text="'×' + g.count + ' em sequência — ver horários'"></summary>
                 <pre x-text="g.times.join('\n')"></pre>
               </details>
             </template>
-            <details class="cru">
+            <details class="cru" @click.stop>
               <summary>cru</summary>
-              <pre x-text="g.ultimo + ' UTC (último)\n' + g.message"></pre>
+              <pre x-text="g.ultimo + ' UTC (último)' + (g.ip ? '\nip real: ' + g.ip : '') + '\n' + g.message"></pre>
             </details>
           </td>
         </tr>
