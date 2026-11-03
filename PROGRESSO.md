@@ -54,10 +54,17 @@ paralelos (nomes exclusivos). - **7** /observe em Chart.js 4.4.7 vendido: série
   login endurecido, ações), cli.md (token eventos), STATUS + PROGRESSO
   (`b3c381c`).
 
-FORNADA COMPLETA (13 fatias + docs). Pendências dela: deploy (SÓ SOB
-ORDEM DO GABRIEL), testar no browser pós-deploy, '/observe' pinado como
-"FICA ÚNICO" no plano — DELETADO por escopo explícito (todas as páginas
-viram API+SSE); anotar no execution-plan se ele ainda for referência.
+FORNADA COMPLETA (13 fatias + docs). **DEPLOYADO 03/11 por ordem do
+Gabriel**: git archive master → ~/flux-src na VM → build release (2 min,
+frio) → backups `fluxd.bak-20261103-pre-painel` +
+`flux.sqlite3.bak-20261103-pre-v7` → swap + restart → schema v7 aplicado
+no arranque, eventos.token auto-gerado (0600). Regressão provada ao vivo:
+login 200 com "manter conectado", /api/events 401 sem credencial / 200
+com token na LAN (71.964 eventos), /events 303→login sem sessão, assets
+vendidos 200, MCP :7430 no ar. Restou: passeio do Gabriel no browser;
+'/observe' pinado como "FICA ÚNICO" no plano — DELETADO por escopo
+explícito (todas as páginas viram API+SSE); anotar no execution-plan se
+ele ainda for referência.
 
 ## 31/10 — Doorman: `flux doorman <host>` imprime a request COMPLETA em tempo real, no terminal, sem gravar nada (`WIP → commit`)
 
