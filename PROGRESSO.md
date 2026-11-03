@@ -2274,4 +2274,13 @@ nunca subiram). Fatias com TRIO verde escopado `-p fluxd`:
   teste); `/events` agrupa ×N só dentro de 30 min.
 - docs commit: `docs/panel.md`, `docs/status.md`, este arquivo.
 
-334 testes no fluxd. NÃO deployado — espera ordem do Gabriel.
+334 testes no fluxd. **DEPLOYADO 03/11** por ordem do Gabriel ("deploya mas não
+dá merge na main"): archive da branch `agente/03-11` (LF) → `~/flux-src` →
+`cargo build --release -p fluxd` 1m50s → backup
+`/usr/local/bin/fluxd.bak-20261103b-rework` → stop/mv/start → `active`.
+Regressão ao vivo: `/api/dashboard?minutos=10` 200 com `meu_ip` (XFF honrado),
+curva com 10 buckets, `ultimos15_total` contando, eventos com `ip`; `/projetos`
+303→login (guard); painel.js/chart vendidos 200 (painel.js com `projetosPage`);
+via CF login 200 e `/projetos` 303; frames de `/api/dashboard/follow` e
+`/api/events/follow` entregando (backlog com ip/host). Branch NÃO mergeada na
+master (ordem dele).
