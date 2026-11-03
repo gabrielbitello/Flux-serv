@@ -2087,3 +2087,82 @@ async fn vigia_limiares_post_exige_sessao() {
         "token de leitura não muda limiar"
     );
 }
+
+// --------------------------------- origem fora da LAN (achado do 4G, 03/11)
+
+/// `Sec-Fetch-Site: same-origin` (fetch-metadata do navegador, não-forjável)
+/// prova origem SEM Referer — é o caso real do celular: o painel manda
+/// `Referrer-Policy` e o navegador pode não mandar Referer nenhum.
+#[tokio::test]
+async fn api_eventos_sessao_de_fora_com_sec_fetch_site_passa() {
+    let app = app_sem_docker();
+    crate::events::event(&app.state, "info", "teste", "sec-fetch-9");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s, body) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        Some(&cookie),
+        &[
+            ("cf-connecting-ip", "203.0.113.9".into()),
+            ("sec-fetch-site", "same-origin".into()),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(body.contains("sec-fetch-9"), "{body}");
+}
+
+/// `same-site` NÃO vale (outro site do mesmo dono não é o painel) e curl
+/// com cookie roubado segue bloqueado (sem Sec-Fetch-Site, sem Origin).
+#[tokio::test]
+async fn api_eventos_sessao_de_fora_recusa_same_site_e_ausente() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let cookie = cookie_de_sessao(&app, &router).await;
+    let (s1, _) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/events",
+        Some(&cookie),
+        &[
+            ("cf-connecting-ip", "203.0.113.9".into()),
+            ("sec-fetch-site", "same-site".into()),
+        ],
+    )
+    .await;
+    assert_eq!(s1, StatusCode::FORBIDDEN, "same-site não é same-origin");
+    let (s2, _) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        Some(&cookie),
+        &[
+            ("cf-connecting-ip", "203.0.113.9".into()),
+            ("sec-fetch-site", "none".into()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        s2,
+        StatusCode::FORBIDDEN,
+        "none = sem origem (cara de curl)"
+    );
+}
+
+/// O painel NÃO manda mais `no-referrer` (quebrava a prova de origem pelo
+/// Referer — achado ao vivo no 4G): política vira o default do navegador.
+#[tokio::test]
+async fn painel_nao_manda_mais_no_referrer() {
+    let app = app_sem_docker();
+    let (_, headers, _) = get(&app, "/events").await;
+    let pol = headers
+        .get(header::REFERRER_POLICY)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        pol, "strict-origin-when-cross-origin",
+        "referrer-policy do painel: {pol}"
+    );
+}

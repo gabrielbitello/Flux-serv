@@ -201,6 +201,16 @@ fn token_hash(st: &DbState) -> Option<String> {
 /// Regra Here Maps: fora da LAN, a chamada precisa vir da página do painel
 /// (Origin do fetch/SSE ou Referer do navegador apontando pro painel).
 fn origem_do_painel(headers: &HeaderMap, painel_host: &str) -> bool {
+    // `Sec-Fetch-Site: same-origin` — header de fetch-metadata que o
+    // NAVEGADOR escreve e o JS/curl não pode forjar: prova de origem mais
+    // forte que Referer (que política de referrer pode esconder).
+    if headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "same-origin")
+    {
+        return true;
+    }
     ["origin", "referer"].iter().any(|k| {
         headers
             .get(*k)

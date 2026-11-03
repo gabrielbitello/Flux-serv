@@ -316,14 +316,19 @@ async fn logout(State(st): State<PanelState>, req: Request) -> Response {
 }
 
 /// Toda resposta do painel passa por aqui: no-store (estado vivo), noindex no
-/// header E no HTML (R22 — vale para 404 do painel também) + no-referrer.
+/// header E no HTML (R22 — vale para 404 do painel também).
+/// Referrer `strict-origin-when-cross-origin` (default do navegador): o
+/// painel FORA da LAN prova origem pelo Referer da própria página — o
+/// `no-referrer` antigo quebrava a regra "Here Maps" da API pública
+/// (navegador não mandava Referer nenhum → 403 em tudo, achado ao vivo no
+/// 4G do Gabriel, 03/11). Cross-origin continua sem URL completa.
 fn resposta(status: StatusCode, page: String) -> Response {
     (
         status,
         [
             (header::CACHE_CONTROL, "no-store"),
             (x_robots_tag(), NOINDEX),
-            (header::REFERRER_POLICY, "no-referrer"),
+            (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
         ],
         Html(page),
     )
