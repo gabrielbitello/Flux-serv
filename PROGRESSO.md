@@ -2297,3 +2297,15 @@ immutable` (seguro agora que conteúdo novo = URL nova). Sem purge da CF: a
 shell (no-store) traz a URL nova, a borda busca fresca. Provas: painel.js
 versionado via CF com `visiveis`, `immutable` na origem, teste novo trava
 placeholder cru.
+
+**+1 deploy no mesmo dia (`4e96c8b`, backup
+`fluxd.bak-20261103d-crashes`)**: dois crashes do rework no console dele —
+(1) `snap.ultimos15_total` em x-text cru: x-show esconde mas x-text AVALIA,
+snap=null na 1ª renderização estourava (guard movido pra dentro da
+expressão); (2) `too much recursion` no Chart: instância guardada em
+propriedade do componente → Alpine proxy-wraps o Chart → o SET `chart.data`
+do update recursava com o getter interno; instância agora vive em
+`curvaChart`, variável de MÓDULO (o /observe escapa porque faz
+destroy+recreate, sem SET de .data no proxy — documentado no código e
+travado por teste). Gabriel respondeu "Não" à pergunta sobre reverter
+toggle/badges do /events: FICAM.
