@@ -24,6 +24,9 @@ pub struct EventoNovo {
     pub created_at: String,
     /// Host da request (access) — vazio nos eventos internos (schema v7).
     pub host: String,
+    /// IP real do cliente (coluna `ip`, schema v6) — vazio nos internos. O
+    /// painel usa pra marcar "é meu" (mesma origem do navegador aberto).
+    pub ip: String,
 }
 
 static CANAL: LazyLock<broadcast::Sender<EventoNovo>> =
@@ -175,7 +178,7 @@ fn gravar(st: &State, level: &str, scope: &str, message: &str, ip: &str, host: &
             rusqlite::params![level, scope, message, ip, host],
         )?;
         c.query_row(
-            "SELECT id, level, scope, message, created_at, host FROM events WHERE id = ?1",
+            "SELECT id, level, scope, message, created_at, host, ip FROM events WHERE id = ?1",
             rusqlite::params![c.last_insert_rowid()],
             |r| {
                 Ok(EventoNovo {
@@ -185,6 +188,7 @@ fn gravar(st: &State, level: &str, scope: &str, message: &str, ip: &str, host: &
                     message: r.get(3)?,
                     created_at: r.get(4)?,
                     host: r.get(5)?,
+                    ip: r.get(6)?,
                 })
             },
         )

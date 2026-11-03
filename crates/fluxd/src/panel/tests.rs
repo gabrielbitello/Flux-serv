@@ -1486,6 +1486,22 @@ async fn sse_dashboard_pusha_so_quando_muda() {
         .unwrap();
     let (router2, _dir2) = painel_com_auth(&app).await;
     let cookie = cookie_de_sessao(&app, &router2).await;
+    // Alinha FORA do risco de virada de minuto: a curva tem buckets de 1 min
+    // e a virada muda o snapshot DE VERDADE (o bucket desloca de índice) —
+    // push nesse caso é comportamento correto, não violação do
+    // push-só-quando-muda. Abrindo o stream no segundo ≤45, o 1º push e os
+    // 7 s de silêncio ficam TODOS dentro do mesmo minuto (45+7 < 60).
+    loop {
+        let s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            % 60;
+        if s <= 45 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
     let (status, ctype, mut body) = {
         // abre o stream com sessão+LAN
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1550,6 +1566,177 @@ async fn sse_dashboard_pusha_so_quando_muda() {
         segundo.contains("dash-mudou-51"),
         "push na mudança: {segundo}"
     );
+}
+
+// -------------------------------------------- contratos ip/host/meu_ip (03/11)
+
+/// Access sintético com IP e HOST de verdade (via events::access — MESMO
+/// caminho do router), pra testar os contratos novos do JSON.
+fn inserir_access(app: &Arc<AppState>, ip: &str, host: &str, path: &str) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_str(ip).unwrap(),
+    );
+    crate::events::access(
+        &app.state,
+        host,
+        "GET",
+        path,
+        200,
+        3,
+        &crate::events::origem_de(&h, false, ip),
+    );
+}
+
+/// A lista de eventos carrega `ip`+`host` de cada linha e o `meu_ip` da
+/// request — os badges "é você"/"infra" do painel dependem dos três.
+#[tokio::test]
+async fn api_eventos_carrega_ip_host_e_meu_ip() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    inserir_access(&app, "192.168.140.9", "teste-d.bitello.xyz", "/pedidos");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, body) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        None,
+        &[
+            ("x-forwarded-for", "192.168.140.50".into()),
+            ("authorization", format!("Bearer {TOKEN_LEITURA}")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ev = &d["eventos"][0];
+    assert_eq!(ev["ip"], "192.168.140.9", "ip da linha no JSON: {body}");
+    assert_eq!(ev["host"], "teste-d.bitello.xyz", "host no JSON: {body}");
+    assert_eq!(
+        d["meu_ip"], "192.168.140.50",
+        "meu_ip = o IP da REQUEST (XFF), não do evento: {body}"
+    );
+}
+
+/// O frame do SSE carrega ip+host — o append AO VIVO usa pros mesmos badges.
+#[tokio::test]
+async fn sse_eventos_follow_frame_carrega_ip_host() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    inserir_access(&app, "203.0.113.77", "loja.bitello.xyz", "/carrinho");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (_, _, mut body) = abrir_sse(&app, router, "/api/events/follow?desde=0").await;
+    let frame = ler_ate(&mut body, "/carrinho", 10).await;
+    assert!(
+        frame.contains("\"ip\":\"203.0.113.77\"")
+            && frame.contains("\"host\":\"loja.bitello.xyz\""),
+        "frame sem ip/host: {frame}"
+    );
+}
+
+/// BUG achado (03/11): o SELECT do detalhe tinha `'\'` no Rust = aspa
+/// ESCAPADA — o SQL saía com aspa aberta, o prepare falhava e o
+/// unwrap_or_default engolia: a lista de eventos do detalhe voltava vazia
+/// SEMPRE. Agora a lista menciona o projeto.
+#[tokio::test]
+async fn detalhe_lista_eventos_do_projeto() {
+    let app = app_sem_docker();
+    app.state
+        .register_project("vipa", "name = \"vipa\"", "h")
+        .unwrap();
+    crate::events::event(&app.state, "info", "up", "flux-vipa-dev acordou (wake)");
+    crate::events::event(&app.state, "info", "sync", "flux-outro: sem relação");
+    let snap = super::leitura::detalhe(&app, "vipa", None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !snap.eventos.is_empty(),
+        "detalhe SEM os eventos do projeto = bug do escape, de novo"
+    );
+    assert!(snap.eventos.iter().all(|e| e.message.contains("vipa")));
+}
+
+/// Card "últimos 15 min": warn da janela entra, warn velho e info ficam fora;
+/// o total é a verdade da janela (não do teto da lista).
+#[tokio::test]
+async fn ultimos15_janela_e_nivel() {
+    let app = app_sem_docker();
+    crate::events::event(&app.state, "warn", "teste", "warn-15min-dentro");
+    crate::events::event(&app.state, "info", "teste", "info-15min-fora");
+    app.state
+        .with(|c| {
+            c.execute(
+                "INSERT INTO events(level, scope, message, created_at) \
+                 VALUES ('warn', 'teste', 'warn-velho-fora', datetime('now', '-20 minutes'))",
+                [],
+            )
+        })
+        .unwrap();
+    let (lista, total) = super::leitura::ultimos15(&app).unwrap();
+    assert_eq!(total, 1, "total da janela de 15 min: {total}");
+    assert_eq!(lista.len(), 1);
+    assert_eq!(lista[0].message, "warn-15min-dentro");
+}
+
+/// A curva obedece a janela pedida (buckets = minutos) e o teto de 24 h.
+#[tokio::test]
+async fn curva_janela_por_minutos() {
+    let app = app_sem_docker();
+    crate::events::event(&app.state, "info", "teste", "curva-janela-1");
+    let (conts10, _, _) = super::leitura::curva_contagem(&app, 10).unwrap().unwrap();
+    assert_eq!(conts10.len(), 10);
+    let (conts_teto, _, _) = super::leitura::curva_contagem(&app, 999_999)
+        .unwrap()
+        .unwrap();
+    assert_eq!(conts_teto.len(), 24 * 60, "clamp no teto de 24 h");
+}
+
+/// `?minutos=` da API: 10 vira 10 buckets; lixo e absurdo caem no default
+/// (1440) — a curva nunca quebra a página por query malformada.
+#[tokio::test]
+async fn dashboard_minutos_na_query() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    crate::events::event(&app.state, "info", "teste", "dash-minutos-1");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let headers = |token: &str| {
+        vec![
+            ("x-forwarded-for", "192.168.140.50".to_owned()),
+            ("authorization", format!("Bearer {token}")),
+        ]
+    };
+    let (_, b1) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/dashboard?minutos=10",
+        None,
+        &headers(TOKEN_LEITURA),
+    )
+    .await;
+    let d1: serde_json::Value = serde_json::from_str(&b1).unwrap();
+    assert_eq!(
+        d1["curva"]["conts"].as_array().map(|a| a.len()),
+        Some(10),
+        "?minutos=10 → 10 buckets: {b1}"
+    );
+    for q in ["?minutos=lixo", "?minutos=999999", ""] {
+        let (_, b) = pedir_api(
+            &app,
+            router.clone(),
+            &format!("/api/dashboard{q}"),
+            None,
+            &headers(TOKEN_LEITURA),
+        )
+        .await;
+        let d: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(
+            d["curva"]["conts"].as_array().map(|a| a.len()),
+            Some(1440),
+            "{q} → default 1440"
+        );
+        assert_eq!(d["meu_ip"], "192.168.140.50", "meu_ip no snapshot ({q})");
+    }
 }
 
 // -------------------------------------------------- login endurecido (fatia 8)

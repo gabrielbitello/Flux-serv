@@ -16,7 +16,12 @@ use crate::state::SleepRow;
 
 pub(super) const EVENTOS_DASHBOARD: i64 = 15;
 pub(super) const EVENTOS_POR_PAGINA: i64 = 50;
-const CURVA_MINUTOS: usize = 24 * 60;
+/// Teto da janela da curva (buckets de 1 min) — o cliente pede menos
+/// (`?minutos=15|30|60|360|720|1440`, realtime = 10); teto = 24 h.
+pub(super) const CURVA_TETO_MINUTOS: usize = 24 * 60;
+/// Card "últimos 15 min": quantos warns a lista mostra (o total vai à parte).
+pub(super) const ULTIMOS15_LIMITE: i64 = 10;
+pub(super) const ULTIMOS15_JANELA: &str = "-15 minutes";
 
 // ------------------------------------------------------------------ leitura
 
@@ -80,6 +85,8 @@ pub(super) fn projetos(app: &AppState) -> Result<Vec<(String, String)>, String> 
 
 /// Serializável: o snapshot do dashboard carrega eventos direto (a página
 /// HTML antiga escapava à mão; o JSON é a via nova). Debug pros testes.
+/// `ip`+`host` (03/11): o painel marca "é meu" (ip = origem do navegador) e
+/// "veio da infra" (ip do host/VM) sem parsear a mensagem.
 #[derive(serde::Serialize, std::fmt::Debug)]
 pub(super) struct EventoRow {
     pub(super) id: i64,
@@ -87,11 +94,13 @@ pub(super) struct EventoRow {
     pub(super) scope: String,
     pub(super) message: String,
     pub(super) created_at: String,
+    pub(super) ip: String,
+    pub(super) host: String,
 }
 
 /// O `id` é a chave estável do evento: a API pública e o append do /events
 /// novo usam pra preservar posição/dedupe entre fetches.
-pub(super) const COLUNAS_EVENTO: &str = "id, level, scope, message, created_at";
+pub(super) const COLUNAS_EVENTO: &str = "id, level, scope, message, created_at, ip, host";
 
 pub(super) fn row_evento(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventoRow> {
     Ok(EventoRow {
@@ -100,6 +109,8 @@ pub(super) fn row_evento(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventoRow> {
         scope: r.get(2)?,
         message: r.get(3)?,
         created_at: r.get(4)?,
+        ip: r.get(5)?,
+        host: r.get(6)?,
     })
 }
 
@@ -155,33 +166,41 @@ pub(super) fn agora_epoch(app: &AppState) -> Result<i64, String> {
         .map_err(|e| e.to_string())
 }
 
-pub(super) fn curva_contagem(app: &AppState) -> Result<Option<(Vec<u64>, u64, u64)>, String> {
+/// Curva de eventos/min na janela pedida (`minutos`, 1..=1440): buckets de
+/// 1 min, `None` = sem dado nenhum (a frase "sem dados", não gráfico vazio).
+pub(super) fn curva_contagem(
+    app: &AppState,
+    minutos: usize,
+) -> Result<Option<(Vec<u64>, u64, u64)>, String> {
     let agora = agora_epoch(app)?;
+    let janela = minutos.clamp(1, CURVA_TETO_MINUTOS);
     let buckets: Vec<(i64, i64)> = app
         .state
         .with(|c| {
             let mut stmt = c.prepare(
                 "SELECT CAST(strftime('%s', created_at) AS INTEGER) / 60 AS minuto, COUNT(*)
                  FROM events
-                 WHERE created_at >= datetime('now', '-24 hours')
+                 WHERE created_at >= datetime('now', ?1)
                  GROUP BY minuto",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+            let rows = stmt.query_map(params![format!("-{janela} minutes")], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?;
             rows.collect()
         })
         .map_err(|e| e.to_string())?;
 
-    // 1440 buckets (um por minuto). Timestamps no futuro (relógio adiantado)
-    // não entram — dado inventado não.
+    // Um bucket por minuto. Timestamps no futuro (relógio adiantado) não
+    // entram — dado inventado não.
     let minuto_atual = agora / 60;
-    let mut conts = vec![0u64; CURVA_MINUTOS];
+    let mut conts = vec![0u64; janela];
     for (minuto, n) in buckets {
         if minuto > minuto_atual {
             continue;
         }
-        let base = minuto_atual - (CURVA_MINUTOS as i64 - 1);
+        let base = minuto_atual - (janela as i64 - 1);
         if let Ok(idx) = usize::try_from(minuto - base)
-            && idx < CURVA_MINUTOS
+            && idx < janela
         {
             conts[idx] += n as u64;
         }
@@ -192,6 +211,37 @@ pub(super) fn curva_contagem(app: &AppState) -> Result<Option<(Vec<u64>, u64, u6
     }
     let max = *conts.iter().max().unwrap_or(&1);
     Ok(Some((conts, total, max)))
+}
+
+/// Card "últimos 15 min" (03/11): o que é IMPORTANTE agora — nível warn da
+/// janela. Lista (mais novo primeiro, teto curto de DOM) + total real.
+pub(super) fn ultimos15(app: &AppState) -> Result<(Vec<EventoRow>, i64), String> {
+    let total: i64 = app
+        .state
+        .with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM events WHERE level='warn' \
+                     AND created_at >= datetime('now', '{ULTIMOS15_JANELA}')"
+                ),
+                [],
+                |r| r.get(0),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    let rows = app
+        .state
+        .with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {COLUNAS_EVENTO} FROM events WHERE level='warn' \
+                 AND created_at >= datetime('now', '{ULTIMOS15_JANELA}') \
+                 ORDER BY id DESC LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map(params![ULTIMOS15_LIMITE], row_evento)?;
+            rows.collect()
+        })
+        .map_err(|e| e.to_string())?;
+    Ok((rows, total))
 }
 
 // --------------------------------------------------- eventos com filtro 26/10
@@ -381,8 +431,15 @@ pub(super) struct Snapshot {
     pub(super) eventos: Vec<EventoRow>,
     pub(super) vigia_marca: Option<String>,
     pub(super) anomalias: Vec<EventoRow>,
-    /// Curva de eventos/min 24 h — o cliente desenha a mini-curva; `None` =
-    /// sem dado ainda (a frase exata, sem gráfico mentindo vida).
+    /// IP real do cliente da request (mesma régua `waf::ip_real` do access):
+    /// o painel marca os eventos "é você" (toggle ocultar meus eventos).
+    pub(super) meu_ip: String,
+    /// Card "últimos 15 min": warns da janela (lista curta + total real).
+    pub(super) ultimos15: Vec<EventoRow>,
+    pub(super) ultimos15_total: i64,
+    /// Curva de eventos/min na janela pedida (`?minutos=`, default 24 h) — o
+    /// cliente desenha; `None` = sem dado ainda (a frase exata, sem gráfico
+    /// mentindo vida).
     pub(super) curva: Option<CurvaJson>,
 }
 
@@ -436,7 +493,7 @@ pub(super) struct SyncJson {
 /// Snapshot completo do dashboard. INFALÍVEL por design: falha de leitura
 /// vira campo de erro/menos dado — nunca 500 sem contexto (o card mostra a
 /// causa; a promessa do painel é "o que não sei, digo que não sei").
-pub(super) fn dashboard(app: &AppState) -> Snapshot {
+pub(super) fn dashboard(app: &AppState, minutos: usize, meu_ip: String) -> Snapshot {
     let mut cards = Vec::new();
     if let Ok(lista) = projetos(app) {
         let syncs = crate::sync::sync_states(app);
@@ -466,11 +523,15 @@ pub(super) fn dashboard(app: &AppState) -> Snapshot {
             });
         }
     }
+    let (ultimos15, ultimos15_total) = ultimos15(app).unwrap_or_default();
     Snapshot {
         eventos: eventos_recentes(app, EVENTOS_DASHBOARD).unwrap_or_default(),
         vigia_marca: vigia_ultimo_ciclo(app).unwrap_or(None),
         anomalias: anomalias_recentes(app, 5).unwrap_or_default(),
-        curva: curva_contagem(app)
+        meu_ip,
+        ultimos15,
+        ultimos15_total,
+        curva: curva_contagem(app, minutos)
             .unwrap_or(None)
             .map(|(conts, total, max)| CurvaJson { conts, total, max }),
         projetos: cards,
@@ -563,15 +624,23 @@ pub(super) fn detalhe(
     let eventos = app
         .state
         .with(|c| {
-            let mut stmt = c.prepare(
-                "SELECT id, level, scope, message, created_at FROM events
-                 WHERE message LIKE '%' || ?1 || '%' ESCAPE '\'
-                 ORDER BY id DESC LIMIT 20",
-            )?;
+            // ESCAPE '\\' em Rust = `'` do SQL espera a BARRA (mesmo contrato
+            // do clausula_filtro). O `'\'` que estava aqui era aspa ESCAPADA
+            // no Rust — o SQL saía com aspa aberta, o prepare falhava e o
+            // unwrap_or_default engolia: a lista de eventos do detalhe
+            // voltava vazia SEMPRE (achado 03/11, teste cobre).
+            let mut stmt = c.prepare(&format!(
+                "SELECT {COLUNAS_EVENTO} FROM events \
+                 WHERE message LIKE '%' || ?1 || '%' ESCAPE '\\' \
+                 ORDER BY id DESC LIMIT 20"
+            ))?;
             let rows = stmt.query_map(params![padrao], row_evento)?;
             rows.collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            tracing::error!("painel: eventos do detalhe de {name} ilegíveis: {e}");
+            Vec::new()
+        });
 
     Ok(Some(DetalheSnapshot {
         nome: name.to_owned(),
