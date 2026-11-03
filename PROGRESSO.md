@@ -61,7 +61,12 @@ frio) → backups `fluxd.bak-20261103-pre-painel` +
 no arranque, eventos.token auto-gerado (0600). Regressão provada ao vivo:
 login 200 com "manter conectado", /api/events 401 sem credencial / 200
 com token na LAN (71.964 eventos), /events 303→login sem sessão, assets
-vendidos 200, MCP :7430 no ar. Restou: passeio do Gabriel no browser;
+vendidos 200, MCP :7430 no ar. **Pós-deploy no celular (4G): página vazia
+— Rocket Loader do Cloudflare (ON na zona, marcador /cdn-cgi no HTML)
+sequestrava os <script defer> e quebrava a ordem Alpine←painel.js; fix
+`5215dbd`: data-cfasync="false" nas tags (opt-out documentado, por
+script — não mexe na zona) + redeploy em LF (o primeiro archive saiu
+CRLF pelo autocrlf). Restou: passeio do Gabriel no browser;
 '/observe' pinado como "FICA ÚNICO" no plano — DELETADO por escopo
 explícito (todas as páginas viram API+SSE); anotar no execution-plan se
 ele ainda for referência.
