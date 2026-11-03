@@ -9,6 +9,12 @@
 //! colateral. "Dormindo" é design da plataforma, não defeito: vermelho aqui
 //! significa estado INCOERENTE (app de pé sem banco, sync com problems,
 //! container parcial, Laravel sem build) ou quebrado de verdade.
+//!
+//! NEUTRO (03/11, pedido do Gabriel): projeto registrado que NUNCA subiu
+//! não é alarme — banco ausente e assets sem build são o estado ESPERADO de
+//! quem ainda não rodou `flux up`/`flux build`. O item neutro tem `ok=true`
+//! (não conta vermelho no CLI nem no dot do painel) e `neutro=true` (o painel
+//! pinta cinza, não verde — verde pareceria "buildado/rodando").
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -22,12 +28,15 @@ use crate::sync;
 /// Uma checagem com veredito. `ok` = verde; `estado` é o rótulo curto
 /// (o mesmo vocabulário do `flux ps`/painel) e `detalhe` carrega a causa —
 /// o que a IA (ou o Gabriel) precisa para agir sem abrir outro comando.
+/// `neutro` = estado esperado de projeto que nunca subiu (ver doc do módulo).
 #[derive(Debug, Clone, Serialize)]
 pub struct Item {
     pub ok: bool,
     pub estado: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detalhe: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub neutro: bool,
 }
 
 fn item(ok: bool, estado: impl Into<String>) -> Item {
@@ -35,12 +44,33 @@ fn item(ok: bool, estado: impl Into<String>) -> Item {
         ok,
         estado: estado.into(),
         detalhe: None,
+        neutro: false,
+    }
+}
+
+/// Item neutro: ok (não é problema) mas não verde (não é "rodando/buildado").
+fn item_neutro(estado: impl Into<String>) -> Item {
+    Item {
+        ok: true,
+        estado: estado.into(),
+        detalhe: None,
+        neutro: true,
     }
 }
 
 impl Item {
     fn com_detalhe(mut self, detalhe: impl Into<String>) -> Item {
         self.detalhe = Some(detalhe.into());
+        self
+    }
+
+    /// Torna o item neutro quando o projeto nunca subiu — mantém `estado` e
+    /// `detalhe` (a verdade segue no rótulo), só tira o vermelho.
+    fn neutrar_se(mut self, nunca_subiu: bool) -> Item {
+        if nunca_subiu {
+            self.ok = true;
+            self.neutro = true;
+        }
         self
     }
 }
@@ -101,6 +131,9 @@ pub async fn checar_projeto(app: &AppState, name: &str) -> Veredito {
     // O banco só é vermelho quando parado com o app DE PÉ (incoerência);
     // dormindo junto com o projeto é o design ("dorme e acorda junto", 21/10).
     let acordado = matches!(containers.estado.as_str(), "ACORDADO" | "PARCIAL");
+    // Nunca subiu = nenhum container do projeto JÁ EXISTIU: banco ausente e
+    // assets sem build são esperados — neutro, não vermelho (03/11).
+    let nunca = containers.estado == "nunca-subiu";
     let (dev_host, prod_host) = hosts_de(app, name);
     Veredito {
         projeto: name.to_owned(),
@@ -108,8 +141,8 @@ pub async fn checar_projeto(app: &AppState, name: &str) -> Veredito {
         prod_host,
         containers,
         sync: checar_sync(app, name),
-        banco: checar_banco(app, name, toml_src.as_deref(), acordado).await,
-        assets: checar_assets(name, toml_src.as_deref()),
+        banco: checar_banco(app, name, toml_src.as_deref(), acordado, nunca).await,
+        assets: checar_assets(name, toml_src.as_deref(), nunca),
         hosts: item(true, "registrados"),
         sono: checar_sono(app, name),
     }
@@ -130,7 +163,8 @@ async fn checar_containers(app: &AppState, name: &str) -> Item {
         Err(e) => return item(false, "erro").com_detalhe(e),
     };
     if lista.is_empty() {
-        return item(true, "nunca-subiu").com_detalhe("nenhum container dev — rode `flux up`");
+        return item_neutro("nunca-subiu")
+            .com_detalhe("nenhum container dev — `flux up` quando precisar dele");
     }
     let linhas: Vec<Value> = lista
         .iter()
@@ -219,7 +253,13 @@ fn checar_sync(app: &AppState, name: &str) -> Item {
 /// Banco próprio: inspetura do container do grupo (caminho read-only do
 /// `db_status`, api.rs) + coerência com o app. `toml_src` já lido pelo
 /// chamador evita reler o TOML duas vezes.
-async fn checar_banco(app: &AppState, name: &str, toml_src: Option<&str>, acordado: bool) -> Item {
+async fn checar_banco(
+    app: &AppState,
+    name: &str,
+    toml_src: Option<&str>,
+    acordado: bool,
+    nunca_subiu: bool,
+) -> Item {
     let Some(src) = toml_src else {
         return item(false, "sem-toml").com_detalhe("projeto sem flux.toml no state");
     };
@@ -234,7 +274,10 @@ async fn checar_banco(app: &AppState, name: &str, toml_src: Option<&str>, acorda
     };
     let Ok(insp) = d.inspect_container(&container, None).await else {
         return item(false, "ausente")
-            .com_detalhe(format!("{container} não existe — `flux up` cria"));
+            .com_detalhe(format!(
+                "{container} não existe — `flux up` cria (esperado se o projeto nunca subiu)"
+            ))
+            .neutrar_se(nunca_subiu);
     };
     let st = insp.state.as_ref();
     let running = st.and_then(|s| s.running).unwrap_or(false);
@@ -267,7 +310,7 @@ async fn checar_banco(app: &AppState, name: &str, toml_src: Option<&str>, acorda
 /// Assets do build de frontend (Laravel só, v1): `public/build/manifest.json`
 /// presente e não-vazio. Leve de propósito — o doctor NÃO builda (isso é
 /// `flux build`, com flock e janela de silêncio).
-fn checar_assets(name: &str, toml_src: Option<&str>) -> Item {
+fn checar_assets(name: &str, toml_src: Option<&str>, nunca_subiu: bool) -> Item {
     let framework = toml_src
         .and_then(|s| flux_common::config::ProjectToml::parse_str(s).ok())
         .map(|t| t.framework().to_string());
@@ -283,10 +326,11 @@ fn checar_assets(name: &str, toml_src: Option<&str>) -> Item {
         .join("public/build/manifest.json");
     match std::fs::metadata(&manifest) {
         Err(_) => item(false, "sem-build")
-            .com_detalhe("public/build/manifest.json ausente — rode `flux build`"),
-        Ok(m) if m.len() == 0 => {
-            item(false, "build-vazio").com_detalhe("manifest.json vazio — rode `flux build`")
-        }
+            .com_detalhe("public/build/manifest.json ausente — `flux build` (esperado se o projeto nunca subiu)")
+            .neutrar_se(nunca_subiu),
+        Ok(m) if m.len() == 0 => item(false, "build-vazio")
+            .com_detalhe("manifest.json vazio — `flux build`")
+            .neutrar_se(nunca_subiu),
         Ok(_) => item(true, "buildado"),
     }
 }
@@ -369,11 +413,65 @@ mod tests {
         let v = serde_json::to_value(&i).unwrap();
         assert_eq!(v["ok"], json!(true));
         assert!(v.get("detalhe").is_none(), "detalhe ausente não vira null");
+        assert!(v.get("neutro").is_none(), "neutro=false não vira campo");
         let c = i.com_detalhe("health=healthy");
         assert_eq!(
             serde_json::to_value(&c).unwrap()["detalhe"],
             json!("health=healthy")
         );
+    }
+
+    #[test]
+    fn neutro_serializa_com_campo_e_preserva_a_verdade() {
+        let n = item_neutro("nunca-subiu").com_detalhe("nenhum container dev");
+        assert!(n.ok, "neutro não conta vermelho");
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["neutro"], json!(true), "o painel pinta pelo neutro");
+        assert_eq!(v["estado"], json!("nunca-subiu"), "rótulo segue verdadeiro");
+        assert_eq!(v["detalhe"], json!("nenhum container dev"));
+    }
+
+    #[test]
+    fn neutrar_se_so_age_quando_nunca_subiu() {
+        let vermelho = item(false, "sem-build").com_detalhe("manifest ausente");
+        let tocado = vermelho.clone().neutrar_se(false);
+        assert!(
+            !tocado.ok && !tocado.neutro,
+            "projeto que já subiu continua vermelho"
+        );
+        let perdoado = item(false, "ausente")
+            .com_detalhe("container não existe — `flux up` cria")
+            .neutrar_se(true);
+        assert!(perdoado.ok && perdoado.neutro);
+        assert_eq!(perdoado.estado, "ausente", "estado não muda");
+        assert!(
+            perdoado.detalhe.unwrap_or_default().contains("flux up"),
+            "causa segue no detalhe"
+        );
+    }
+
+    /// Um Veredito com itens neutros é verde agregado — nunca-subiu não segura
+    /// o dot "fábrica ok" do painel (03/11).
+    #[test]
+    fn veredito_com_neutros_e_verde() {
+        let v = Veredito {
+            projeto: "base-laravel".into(),
+            dev_host: "base-laravel-d.bitello.xyz".into(),
+            prod_host: "base-laravel.bitello.xyz".into(),
+            containers: item_neutro("nunca-subiu"),
+            sync: item(true, "sincronizando"),
+            banco: item_neutro("ausente"),
+            assets: item_neutro("sem-build"),
+            hosts: item(true, "registrados"),
+            sono: item(true, "dormindo"),
+        };
+        assert!(v.ok(), "neutro não segura o agregado");
+        // Uma falha REAL (sync) segue segurando:
+        let ruim = Veredito {
+            sync: item(false, "sem-relato"),
+            ..v
+        };
+        assert!(!ruim.ok());
     }
 
     #[tokio::test]
@@ -452,7 +550,7 @@ mod tests {
             .register_project("vipa", TOML_OWN, "hash")
             .unwrap();
         let src = app.state.project_toml("vipa").unwrap().unwrap();
-        let item = checar_banco(&app, "vipa", Some(&src), false).await;
+        let item = checar_banco(&app, "vipa", Some(&src), false, false).await;
         assert!(item.ok, "sem engine não é defeito: {:?}", item);
         assert_eq!(item.estado, "desconhecido");
     }
@@ -467,6 +565,7 @@ mod tests {
             &app,
             "vipa",
             Some("[db]\nown = true\ngrupo = \"GRUPO_RUIM!\"\n"),
+            false,
             false,
         )
         .await;
