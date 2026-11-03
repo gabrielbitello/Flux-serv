@@ -378,6 +378,10 @@ document.addEventListener('alpine:init', () => {
 
 // ------------------------------------------------------------------ dashboard
 document.addEventListener('alpine:init', () => {
+  // Instância do Chart da curva FORA do estado reativo do Alpine (doc no
+  // desenharCurva). Observe usa destroy+recreate e escapa do loop; aqui o
+  // update é por SET de .data — pelo proxy do Alpine isso era recursão.
+  let curvaChart = null;
   Alpine.data('dashboardPage', () => ({
     formato, // helpers compartilhados expostos pros templates
     snap: null,
@@ -393,12 +397,12 @@ document.addEventListener('alpine:init', () => {
     acordando: {},
     es: null,
     // Curva (03/11): janela em minutos + realtime (últimos 10 min via SSE —
-    // o servidor coalesce os pushes em ≥300 ms).
+    // o servidor coalesce os pushes em ≥300 ms). A instância do Chart NÃO
+    // mora aqui: ver curvaChart no escopo do módulo, logo acima.
     janela: 1440,
     realtime: false,
     JANELAS: [1440, 720, 360, 60, 30, 15],
     valorSelecionado: null,
-    grafico: null,
     // Projetos: 6 por página (03/11) — paginação no cliente, lista vem do
     // snapshot.
     porPagina: 6,
@@ -496,6 +500,10 @@ document.addEventListener('alpine:init', () => {
 
     // Gráfico da curva (Chart.js vendido, MESMO padrão do observe): linha de
     // eventos/min; CLIQUE no ponto fixa o valor selecionado (03/11).
+    // A instância vive em curvaChart (módulo, FORA do estado reativo):
+    // guardada no componente, o Alpine proxy-wraps o Chart e o SET
+    // `chart.data = …` do update entra em loop com o getter interno do
+    // próprio Chart — "too much recursion", console do Gabriel 03/11.
     desenharCurva() {
       if (!this.snap || !this.snap.curva || typeof Chart === 'undefined') return;
       const cor = {
@@ -507,12 +515,12 @@ document.addEventListener('alpine:init', () => {
       const agora = Math.floor(Date.now() / 60000) * 60000;
       const pontos = conts.map((v, i) => ({ x: agora - (conts.length - 1 - i) * 60000, y: v }));
       const self = this;
-      if (this.grafico) {
-        this.grafico.data.datasets[0].data = pontos;
-        this.grafico.update('none');
+      if (curvaChart) {
+        curvaChart.data.datasets[0].data = pontos;
+        curvaChart.update('none');
         return;
       }
-      this.grafico = new Chart(this.$refs.curva.getContext('2d'), {
+      curvaChart = new Chart(this.$refs.curva.getContext('2d'), {
         type: 'line',
         data: {
           datasets: [

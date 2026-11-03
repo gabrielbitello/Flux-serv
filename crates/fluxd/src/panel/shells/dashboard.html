@@ -80,8 +80,10 @@
   <section class="secao">
     <h2>
       Últimos 15 min
-      <span class="warn-t" x-show="snap && snap.ultimos15_total > 0"
-            x-text="'— ' + snap.ultimos15_total + ' aviso' + (snap.ultimos15_total > 1 ? 's' : '')"></span>
+      <!-- x-text avalia MESMO com x-show falso: o guard tem que estar NA
+           expressão — snap=null na 1ª renderização estourava aqui. -->
+      <span class="warn-t"
+            x-text="snap && snap.ultimos15_total > 0 ? ('— ' + snap.ultimos15_total + ' aviso' + (snap.ultimos15_total > 1 ? 's' : '')) : ''"></span>
     </h2>
     <table x-show="snap && snap.ultimos15.length > 0">
       <tbody>

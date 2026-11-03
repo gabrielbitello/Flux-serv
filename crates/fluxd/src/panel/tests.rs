@@ -1850,6 +1850,38 @@ async fn assets_com_versao_e_cache_imutavel() {
     );
 }
 
+/// Dois crashes do 1º deploy no celular do Gabriel (console 03/11):
+/// (1) `snap.ultimos15_total` em x-text CRU — x-text avalia MESMO com
+///     x-show falso, snap=null na 1ª renderização estourava;
+/// (2) Chart guardado em ESTADO do Alpine — o proxy wrapa a instância e o
+///     SET `chart.data = …` do update entra em loop com o getter interno
+///     ("too much recursion"). A instância tem que viver fora do componente.
+#[tokio::test]
+async fn dashboard_sem_os_dois_crashes_do_primeiro_deploy() {
+    let app = app_sem_docker();
+    let (_, _, dash) = get(&app, "/").await;
+    assert!(
+        dash.contains("snap && snap.ultimos15_total > 0 ? ("),
+        "x-text do 15min tem que carregar o guard NELE (x-show não impede avaliação)"
+    );
+    assert!(
+        !dash.contains("x-text=\"'— ' + snap."),
+        "x-text cru acessando snap sem guard"
+    );
+    let (_, _, js) = get(&app, "/assets/painel.js").await;
+    assert!(
+        js.contains("let curvaChart"),
+        "instância do Chart fora do estado reativo"
+    );
+    // O /observe usa this.graficos (destroy+recreate, sem SET de .data no
+    // proxy — escapou do loop). O padrão PROIBIDO é ler/atribuir o chart
+    // singular: "this.grafico." casaria em "this.graficos" — por isso o dot.
+    assert!(
+        !js.contains("this.grafico.") && !js.contains("if (this.grafico)"),
+        "Chart NUNCA em propriedade do componente (proxy do Alpine recursa)"
+    );
+}
+
 // -------------------------------------------------- login endurecido (fatia 8)
 
 /// POST /login com headers extras (cf-connecting-ip p/ simular externo).
