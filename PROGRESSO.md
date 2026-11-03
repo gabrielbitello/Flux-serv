@@ -2284,3 +2284,16 @@ curva com 10 buckets, `ultimos15_total` contando, eventos com `ip`; `/projetos`
 via CF login 200 e `/projetos` 303; frames de `/api/dashboard/follow` e
 `/api/events/follow` entregando (backlog com ip/host). Branch NÃO mergeada na
 master (ordem dele).
+
+**+1 deploy no mesmo dia (`4a8cc72`, backup
+`fluxd.bak-20261103c-cachebust`)**: o primeiro deploy quebrou no celular do
+Gabriel — console com `visiveis is not defined`: shell NOVA + painel.js VELHO
+cacheado na CF (HIT de ~8 h; origem mandava `max-age=86400`, o padrão que
+deixa 24 h de JS velho por deploy; content-length provou: 29685 na borda vs
+43400 na origem). Fix de raiz: **cache-busting** — `assets::versao()` (sha256
+dos bytes embutidos, 12 chars) substitui `__ASSETS_V__` nas 5 shells
+(`painel.js?v=<hash>`), cache dos assets sobe pra `max-age=31536000,
+immutable` (seguro agora que conteúdo novo = URL nova). Sem purge da CF: a
+shell (no-store) traz a URL nova, a borda busca fresca. Provas: painel.js
+versionado via CF com `visiveis`, `immutable` na origem, teste novo trava
+placeholder cru.
