@@ -2339,3 +2339,48 @@ PATH de ssh não-login na VM — build com `bash -lc`. Nota pro painel: o
 live_off do PAINEL não remove o `[live]` do flux.toml — o próximo acordar
 RE-LIGA o vite (`decidir_live` só pula com hot+porta vivos); off
 permanente = `flux live off` no CLI, que limpa o toml.
+
+## 2026-11-04 (tarde) — VM degradada de novo + events v8 + botão do live de verdade
+
+**VM degradada ~14:23 local (2º incidente em 2 dias)**: kernel com RCU
+stall (serial.log: `rcu_preempt self-detected stall`, dump de tasks por
+NMI, systemd-journald morto por WATCHDOG 3×). Sintoma: sshd não completa
+handshake (TCP abre, morre antes do banner), journald sem logs, túnel do
+watch do PC morto → reports parados (o painel do doctor só acusaria
+>1h). fluxd/Caddy/CF/ICMP/mutagen-estabelecida VIVOS — travada PARCIAL.
+Gabriel aprovou o restart: ACPI graceful pendurou (igual 03/11) →
+poweroff → boot rápido, tudo verde; zcode-api acordou por demanda (200
+na prova). Pós-boot o watch do PC estava ZUMBI (túnel morto, sem
+rediscagem — PID vivo desde 03/11 06:04): kill → guard regenerou em
+~10s → reports fresh. **Armadilha nova: watch do PC sem rediscagem após
+queda longa do sshd — kill + guard regenera.**
+
+**Auditoria de coleta (pedido dele: "verifica se coleta todos tipos")**:
+20 escopos no DB ⊆ emissores no código (tudo que emite, chega). Cegos
+declarados: (1) host-level (sshd/journald — o incidente de HOJE foi
+invisível pro fluxd); (2) serviços atrás do Caddy direto (zcode-api só
+aparece como wake/sleep); (3) opencode = app CLIENTE no PC alimentado
+pela API — raio zero pro fluxd. Vigilância de host (probe sshd/journal/
+disk pelo watch) OFERECIDA sem decisão.
+
+**events v8 (`46b151e`)** — "mais dados do emissor e pelo menos o código
+de resposta, sem ficar gordo": colunas `projeto`/`env`/`st` null-áveis;
+access do router nasce com projeto/env derivados do ManagedHost UMA vez
+por request; waf leva st=403; internos vazios (borda declarada).
+Filtro `?projeto=` (coluna nos novos + nome citado na mensagem nas
+antigas/internas — nunca encolhe histórico); detalhe do projeto casa por
+coluna OU mensagem (o access cujo texto não cita o nome agora aparece);
+tags de projeto clicáveis + badge de st no cliente. Estrutura de quebra:
+frame_de genérico serde (EventoNovo/EventoRow serializam direto,
+EventoJson redundante morto), Meta/Acesso agrupando parâmetros (clippy,
+sem allow novo). **Buraco consertado**: eventosPage NUNCA leu params de
+URL — os cliques do painel (?host=/?escopo=) caíam SEM filtro desde o
+rework; agora URL vence localStorage.
+
+**Botão do live de verdade (`2e7ec89`)** — botão ÚNICO na página do
+projeto refletindo o estado MEDIDO (hot+porta); live_off grava INTENÇÃO
+(settings `live_off_manual:{projeto}` = sha256 do flux.toml do momento)
+e o acordar respeita enquanto o toml não mudar; toml mudou = intenção
+expira sozinha — CLI live on convergE SEM uma linha de CLI nova.
+live_on limpa a intenção (volta na hora). LiveJson.carrega off_manual e
+o texto explica pro operador. (343 testes, TRIO verde nas duas fatias.)
