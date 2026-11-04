@@ -373,14 +373,35 @@ async fn rodar(
             rodar_cmd(&app, &docker, nome, env, &cmd, nome).await
         }
         // Live ON = o caminho idempotente do wake (decide sozinho: em pé =
-        // pula; órfão = limpa e ressuscita).
+        // pula; órfão = limpa e ressuscita). Limpa a intenção de off ANTES:
+        // o acordar volta a religar na hora, sem esperar o toml mudar.
         Acao::LiveOn => {
+            crate::compose::live_intencao_limpar(&app.state, nome);
             crate::compose::religar_live_pos_acordar(&app.state, &app, &docker, nome, env).await;
             enviar(nome, "live religado (idempotente — em pé = pulado)");
             Ok(())
         }
-        // Live OFF = os mesmos execs do CLI live: mata node, limpa hot.
-        Acao::LiveOff => rodar_cmd(&app, &docker, nome, env, cmd_live_off(), nome).await,
+        // Live OFF = os mesmos execs do CLI live: mata node, limpa hot — e
+        // grava a INTENÇÃO amarrada ao hash do flux.toml do momento
+        // (04/11): o acordar respeita o off enquanto o toml não mudar. CLI
+        // live on muda o toml → intenção expira → convergem sem o CLI saber
+        // do marcador.
+        Acao::LiveOff => {
+            let r = rodar_cmd(&app, &docker, nome, env, cmd_live_off(), nome).await;
+            if r.is_ok() {
+                crate::compose::live_intencao_off_gravar(&app.state, nome, &toml_src);
+                crate::events::event(
+                    &app.state,
+                    "info",
+                    "painel",
+                    &format!(
+                        "{nome}: live desligado pelo painel — o acordar não religa \
+                         enquanto o flux.toml não mudar"
+                    ),
+                );
+            }
+            r
+        }
     }
 }
 

@@ -2701,3 +2701,49 @@ async fn api_eventos_filtro_projeto_e_frame_emissor() {
     assert_eq!(ev["env"], "dev");
     assert_eq!(ev["st"], 429, "código de resposta no JSON: {body}");
 }
+
+/// Intenção manual do live (04/11): off pelo painel grava o hash do toml;
+/// toml mudou = intenção EXPIRA (apaga) e o acordar volta a religar — CLI
+/// e painel convergem sem o CLI saber do marcador.
+#[test]
+fn live_intencao_expira_quando_toml_muda() {
+    let app = app_sem_docker();
+    let toml_a = "name = \"vipa\"\n[dev]\nlive = \"npm run dev\"";
+    let toml_b = "name = \"vipa\"\n[dev]\nlive = \"npm run dev -- --host\"\n[x] novo = 1";
+    crate::compose::live_intencao_off_gravar(&app.state, "vipa", toml_a);
+    assert!(
+        crate::compose::live_intencao_off(&app.state, "vipa", toml_a),
+        "toml intacto = intenção vale"
+    );
+    assert!(
+        !crate::compose::live_intencao_off(&app.state, "vipa", toml_b),
+        "toml mudou = intenção expira"
+    );
+    assert!(
+        !crate::compose::live_intencao_off(&app.state, "vipa", toml_a),
+        "expirada APAGA o marcador: nem o toml original vale de novo"
+    );
+}
+
+/// O detalhe carrega off_manual no LiveJson — o botão único do painel usa
+/// isso pra explicar pro operador que o wake NÃO religa.
+#[tokio::test]
+async fn detalhe_mostra_off_manual_no_live() {
+    let app = app_sem_docker();
+    let toml = "name = \"vipa\"";
+    app.state.register_project("vipa", toml, "h").unwrap();
+    crate::compose::live_intencao_off_gravar(&app.state, "vipa", toml);
+    let snap = super::leitura::detalhe(&app, "vipa", Some((true, true)))
+        .unwrap()
+        .unwrap();
+    let live = snap.live.expect("live medido");
+    assert!(live.off_manual, "intenção válida aparece no JSON");
+    crate::compose::live_intencao_limpar(&app.state, "vipa");
+    let snap = super::leitura::detalhe(&app, "vipa", Some((true, true)))
+        .unwrap()
+        .unwrap();
+    assert!(
+        !snap.live.expect("live medido").off_manual,
+        "limpar a intenção volta o estado neutro"
+    );
+}

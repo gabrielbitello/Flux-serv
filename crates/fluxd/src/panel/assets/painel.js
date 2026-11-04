@@ -1020,7 +1020,18 @@ document.addEventListener('alpine:init', () => {
 
     liveTexto() {
       const l = this.snap && this.snap.live;
-      return l ? 'hot=' + l.hot + ' · porta 5173=' + l.porta : '(sem engine ou sem IP no state)';
+      if (!l) return '(sem engine ou sem IP no state)';
+      const base = 'hot=' + l.hot + ' · porta 5173=' + l.porta;
+      return l.off_manual
+        ? base + ' — desligado pelo painel: o acordar NÃO religa enquanto o flux.toml não mudar'
+        : base;
+    },
+
+    // Estado MEDIDO manda no botão único: hot + porta vivos = "ligado",
+    // o botão mostra o movimento que faz sentido agora.
+    liveLigado() {
+      const l = this.snap && this.snap.live;
+      return !!(l && l.hot && l.porta);
     },
 
     conectar() {

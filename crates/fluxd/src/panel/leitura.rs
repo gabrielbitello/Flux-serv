@@ -612,6 +612,10 @@ pub(super) struct DetalheSnapshot {
 pub(super) struct LiveJson {
     pub(super) hot: bool,
     pub(super) porta: bool,
+    /// Intenção manual de off VÁLIDA (04/11): live off pelo painel, toml
+    /// intacto — o acordar respeita e não religa. O botão único e o texto
+    /// do painel explicam isso pro operador.
+    pub(super) off_manual: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -688,7 +692,11 @@ pub(super) fn detalhe(
             atualizado: r.updated_at.clone(),
         }),
         eventos,
-        live: live.map(|(hot, porta)| LiveJson { hot, porta }),
+        live: live.map(|(hot, porta)| LiveJson {
+            hot,
+            porta,
+            off_manual: crate::compose::live_intencao_off(&app.state, name, toml_src),
+        }),
     }))
 }
 
