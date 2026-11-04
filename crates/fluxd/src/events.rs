@@ -15,7 +15,9 @@ use crate::state::State;
 use axum::http::{HeaderMap, header};
 
 /// Um evento acabou de entrar na tabela — payload do stream do painel.
-#[derive(Clone, Debug)]
+/// Serialize: o frame SSE do follow serializa o struct DIRETO (mesmos
+/// campos do JSON da lista — uma definição, zero espelho).
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct EventoNovo {
     pub id: i64,
     pub level: String,
@@ -27,6 +29,14 @@ pub struct EventoNovo {
     /// IP real do cliente (coluna `ip`, schema v6) — vazio nos internos. O
     /// painel usa pra marcar "é meu" (mesma origem do navegador aberto).
     pub ip: String,
+    /// Projeto emissor (coluna `projeto`, schema v8) — vazio nos internos.
+    pub projeto: String,
+    /// Ambiente do emissor (coluna `env`, schema v8) — "dev"/"prod" nos
+    /// access, vazio nos internos.
+    pub env: String,
+    /// Código HTTP de resposta (coluna `st`, schema v8) — access e waf;
+    /// `None` nos internos.
+    pub st: Option<i64>,
 }
 
 static CANAL: LazyLock<broadcast::Sender<EventoNovo>> =
@@ -137,24 +147,36 @@ pub(crate) fn linha_access(
     message
 }
 
+/// Um acesso a gravar — o grupo de campos da linha canônica fica no tipo,
+/// não espalhado em nove parâmetros soltos. `projeto`/`env` (v8) vêm do
+/// chamador (o router deriva do `ManagedHost` — fonte única, sem re-parse
+/// do host aqui).
+pub struct Acesso<'a> {
+    pub host: &'a str,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub status: u16,
+    pub dur_ms: u128,
+    pub origem: &'a Origem,
+    pub projeto: &'a str,
+    pub env: &'a str,
+}
+
 /// Log de acesso (07) com a origem do request — grava na coluna `ip` (v6),
 /// que é o que o vigia agrega.
-pub fn access(
-    st: &State,
-    host: &str,
-    method: &str,
-    path: &str,
-    status: u16,
-    dur_ms: u128,
-    origem: &Origem,
-) {
+pub fn access(st: &State, a: &Acesso) {
     gravar(
         st,
         "info",
         "access",
-        &linha_access(host, method, path, status, dur_ms, origem),
-        &origem.ip,
-        host,
+        &linha_access(a.host, a.method, a.path, a.status, a.dur_ms, a.origem),
+        &Meta {
+            ip: &a.origem.ip,
+            host: a.host,
+            projeto: a.projeto,
+            env: a.env,
+            st: Some(i64::from(a.status)),
+        },
     );
 }
 
@@ -163,7 +185,47 @@ pub fn event(st: &State, level: &str, scope: &str, message: &str) {
 }
 
 pub fn event_com_ip(st: &State, level: &str, scope: &str, message: &str, ip: &str) {
-    gravar(st, level, scope, message, ip, "");
+    gravar(
+        st,
+        level,
+        scope,
+        message,
+        &Meta {
+            ip,
+            host: "",
+            projeto: "",
+            env: "",
+            st: None,
+        },
+    );
+}
+
+/// Evento interno COM código HTTP de resposta (schema v8) — o caso do waf:
+/// 403 de bloqueio com a linha access no texto, sem projeto (pré-rota).
+pub fn event_com_ip_st(st: &State, level: &str, scope: &str, message: &str, ip: &str, status: u16) {
+    gravar(
+        st,
+        level,
+        scope,
+        message,
+        &Meta {
+            ip,
+            host: "",
+            projeto: "",
+            env: "",
+            st: Some(i64::from(status)),
+        },
+    );
+}
+
+/// Metadados da linha que andam juntos em TODO writer (v6-v8): ip real,
+/// host, emissor (projeto/env) e código de resposta.
+struct Meta<'a> {
+    ip: &'a str,
+    host: &'a str,
+    projeto: &'a str,
+    env: &'a str,
+    st: Option<i64>,
 }
 
 /// INSERT de verdade (fatia 9a): `host` da request nos access (vazio nos
@@ -171,14 +233,25 @@ pub fn event_com_ip(st: &State, level: &str, scope: &str, message: &str, ip: &st
 /// INSERT + leitura da linha numa única passagem no mesmo lock: o
 /// `created_at` do broadcast é a VERDADE do banco (default do schema),
 /// não relógio do Rust — e o id volta de graça pro canal.
-fn gravar(st: &State, level: &str, scope: &str, message: &str, ip: &str, host: &str) {
+fn gravar(st: &State, level: &str, scope: &str, message: &str, meta: &Meta) {
     let gravado = st.with(|c| {
         c.execute(
-            "INSERT INTO events(level, scope, message, ip, host) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![level, scope, message, ip, host],
+            "INSERT INTO events(level, scope, message, ip, host, projeto, env, st) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                level,
+                scope,
+                message,
+                meta.ip,
+                meta.host,
+                meta.projeto,
+                meta.env,
+                meta.st
+            ],
         )?;
         c.query_row(
-            "SELECT id, level, scope, message, created_at, host, ip FROM events WHERE id = ?1",
+            "SELECT id, level, scope, message, created_at, host, ip, projeto, env, st \
+             FROM events WHERE id = ?1",
             rusqlite::params![c.last_insert_rowid()],
             |r| {
                 Ok(EventoNovo {
@@ -189,6 +262,9 @@ fn gravar(st: &State, level: &str, scope: &str, message: &str, ip: &str, host: &
                     created_at: r.get(4)?,
                     host: r.get(5)?,
                     ip: r.get(6)?,
+                    projeto: r.get(7)?,
+                    env: r.get(8)?,
+                    st: r.get(9)?,
                 })
             },
         )

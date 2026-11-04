@@ -86,6 +86,20 @@ const formato = {
     if (m) return '/events?q=' + encodeURIComponent(m[1]);
     return '/events?escopo=anomalia';
   },
+  // Emissor (schema v8): tag "projeto" dos access do router — null nos
+  // internos/antigos (coluna vazia). O clique abre o /events filtrado pela
+  // coluna (?projeto=), com fallback de mensagem no servidor.
+  tagProjeto(ev) {
+    if (!ev.projeto) return null;
+    return { classe: ev.env === 'dev' || ev.env === 'prod' ? ev.env : 'infra', rotulo: ev.projeto };
+  },
+  // Código de resposta (schema v8): coluna nos access/waf novos; fallback =
+  // parse da mensagem (linhas antigas). null = sem código.
+  stDe(ev) {
+    if (ev.st != null) return { code: ev.st, classe: this.stClasse(ev.st) };
+    const a = this.parseAccess(ev.message);
+    return a ? { code: +a.status, classe: this.stClasse(+a.status) } : null;
+  },
 };
 
 document.addEventListener('alpine:init', () => {
@@ -97,6 +111,7 @@ document.addEventListener('alpine:init', () => {
     busca: '',
     host: '',
     ambiente: '',
+    projeto: '',
     hosts: [],
     eventos: [], // grupos, mais novo primeiro
     total: 0,
@@ -118,12 +133,18 @@ document.addEventListener('alpine:init', () => {
     ocultarMeus: false, // toggle: esconde os eventos de INFO do meu IP
 
     async init() {
+      // URL vence o localStorage: os cliques do painel (anomalia, evento,
+      // tag de projeto) chegam como ?escopo=/?host=/?projeto=/?q= — sem
+      // isso o link caía SEM filtro (buraco do rework, 04/11).
+      const q = new URLSearchParams(location.search);
       const salvo = JSON.parse(localStorage.getItem('flux.eventos.filtros') || '{}');
-      this.escopo = salvo.escopo || '';
-      this.nivel = salvo.nivel || '';
-      this.busca = salvo.busca || '';
-      this.host = salvo.host || '';
-      this.ambiente = salvo.ambiente || '';
+      const pega = (k, salvoK) => q.get(k) || salvo[salvoK] || '';
+      this.escopo = pega('escopo', 'escopo');
+      this.nivel = pega('nivel', 'nivel');
+      this.busca = pega('q', 'busca');
+      this.host = pega('host', 'host');
+      this.ambiente = pega('ambiente', 'ambiente');
+      this.projeto = pega('projeto', 'projeto');
       this.ocultarMeus = localStorage.getItem('flux.ocultar_meus') === '1';
       await this.recarregar();
       this.conectar();
@@ -153,6 +174,7 @@ document.addEventListener('alpine:init', () => {
       if (this.busca) qs.set('q', this.busca);
       if (this.host) qs.set('host', this.host);
       if (this.ambiente) qs.set('ambiente', this.ambiente);
+      if (this.projeto) qs.set('projeto', this.projeto);
       if (extra) for (const [k, v] of Object.entries(extra)) qs.set(k, v);
       return qs.toString();
     },
@@ -191,6 +213,7 @@ document.addEventListener('alpine:init', () => {
           busca: this.busca,
           host: this.host,
           ambiente: this.ambiente,
+          projeto: this.projeto,
         }),
       );
       this.eventos = [];
@@ -266,6 +289,9 @@ document.addEventListener('alpine:init', () => {
         level: ev.level,
         ip: ev.ip || '',
         host: ev.host || '',
+        projeto: ev.projeto || '',
+        env: ev.env || '',
+        st: ev.st == null ? null : ev.st,
         times: [ev.created_at],
         ultimo: ev.created_at,
         count: 1,

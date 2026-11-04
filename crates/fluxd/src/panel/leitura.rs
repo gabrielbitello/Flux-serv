@@ -96,11 +96,18 @@ pub(super) struct EventoRow {
     pub(super) created_at: String,
     pub(super) ip: String,
     pub(super) host: String,
+    /// Emissor (schema v8): projeto/env dos access do router; vazio nos
+    /// internos e nas linhas antigas (pré-v8).
+    pub(super) projeto: String,
+    pub(super) env: String,
+    /// Código HTTP de resposta (v8) — access e waf; `None` nos internos.
+    pub(super) st: Option<i64>,
 }
 
 /// O `id` é a chave estável do evento: a API pública e o append do /events
 /// novo usam pra preservar posição/dedupe entre fetches.
-pub(super) const COLUNAS_EVENTO: &str = "id, level, scope, message, created_at, ip, host";
+pub(super) const COLUNAS_EVENTO: &str =
+    "id, level, scope, message, created_at, ip, host, projeto, env, st";
 
 pub(super) fn row_evento(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventoRow> {
     Ok(EventoRow {
@@ -111,6 +118,9 @@ pub(super) fn row_evento(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventoRow> {
         created_at: r.get(4)?,
         ip: r.get(5)?,
         host: r.get(6)?,
+        projeto: r.get(7)?,
+        env: r.get(8)?,
+        st: r.get(9)?,
     })
 }
 
@@ -257,6 +267,10 @@ pub(super) struct FiltroEventos {
     /// "dev" | "prod": derivado do host (`-d.`/`vite-` = dev; vazio = sem
     /// classificação e FORA dos dois filtros).
     pub(super) ambiente: Option<String>,
+    /// Nome do projeto emissor (schema v8, 04/11): casa pela COLUNA nos
+    /// access novos e, pra linha antiga/interna (coluna vazia), pelo nome
+    /// citado na mensagem — o filtro nunca encolhe o histórico.
+    pub(super) projeto: Option<String>,
 }
 
 /// Parse da query string (`?escopo=access&nivel=warn&q=...`) com valores
@@ -277,6 +291,7 @@ pub(super) fn filtro_de(query: Option<&str>) -> FiltroEventos {
             "host" => f.host = v,
             "ambiente" => f.ambiente = v,
             "nivel" => f.nivel = v,
+            "projeto" => f.projeto = v,
             "q" => f.busca = v,
             _ => {}
         }
@@ -315,6 +330,17 @@ fn clausula_filtro(f: &FiltroEventos) -> (String, Vec<Value>) {
             _ => return (String::from("1=0"), Vec::new()),
         };
         onde.push_str(&format!(" AND {cond}"));
+    }
+    if let Some(p) = &f.projeto {
+        // Coluna primeiro (access v8+); linha antiga/interna (coluna vazia)
+        // casa pelo nome citado na mensagem — o filtro cobre o histórico.
+        vals.push(Value::from(p.clone()));
+        let n = vals.len();
+        vals.push(Value::from(format!("%{}%", formato::like_esc(p))));
+        onde.push_str(&format!(
+            " AND (projeto = ?{n} OR (projeto = '' AND message LIKE ?{} ESCAPE '\\'))",
+            n + 1
+        ));
     }
     (onde, vals)
 }
@@ -619,22 +645,24 @@ pub(super) fn detalhe(
     let (ov_prod, ov_dev) = app.state.project_hosts(name).unwrap_or((None, None));
     let syncs = crate::sync::sync_states(app);
 
-    // Eventos que mencionam o nome (mesma LIKE escapada do render antigo).
+    // Eventos do projeto (04/11): a COLUNA `projeto` (v8) é a fonte — os
+    // access do router já nascem com ela; linha antiga/interna (coluna
+    // vazia) casa pelo nome citado na mensagem, mesmo padrão escapado de
+    // antes. ESCAPE '\\' em Rust = `'` do SQL espera a BARRA (mesmo
+    // contrato do clausula_filtro). O `'\'` que estava aqui era aspa
+    // ESCAPADA no Rust — o SQL saía com aspa aberta, o prepare falhava e o
+    // unwrap_or_default engolia: a lista de eventos do detalhe voltava
+    // vazia SEMPRE (achado 03/11, teste cobre).
     let padrao = formato::like_esc(name);
     let eventos = app
         .state
         .with(|c| {
-            // ESCAPE '\\' em Rust = `'` do SQL espera a BARRA (mesmo contrato
-            // do clausula_filtro). O `'\'` que estava aqui era aspa ESCAPADA
-            // no Rust — o SQL saía com aspa aberta, o prepare falhava e o
-            // unwrap_or_default engolia: a lista de eventos do detalhe
-            // voltava vazia SEMPRE (achado 03/11, teste cobre).
             let mut stmt = c.prepare(&format!(
                 "SELECT {COLUNAS_EVENTO} FROM events \
-                 WHERE message LIKE '%' || ?1 || '%' ESCAPE '\\' \
+                 WHERE projeto = ?1 OR (projeto = '' AND message LIKE '%' || ?2 || '%' ESCAPE '\\') \
                  ORDER BY id DESC LIMIT 20"
             ))?;
-            let rows = stmt.query_map(params![padrao], row_evento)?;
+            let rows = stmt.query_map(params![name, format!("%{padrao}%")], row_evento)?;
             rows.collect()
         })
         .unwrap_or_else(|e| {

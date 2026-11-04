@@ -100,6 +100,11 @@
                 <span class="tag" :class="formato.marcaDe(ev, meuIp).classe"
                       x-text="formato.marcaDe(ev, meuIp).rotulo"></span>
               </template>
+              <template x-if="formato.tagProjeto(ev)">
+                <a class="tag" :class="formato.tagProjeto(ev).classe" @click.stop
+                   :href="'/events?projeto=' + encodeURIComponent(formato.tagProjeto(ev).rotulo)"
+                   x-text="formato.tagProjeto(ev).rotulo"></a>
+              </template>
             </td>
           </tr>
         </template>
@@ -205,11 +210,26 @@
                 </div>
               </template>
               <template x-if="!formato.parseAccess(ev.message)">
-                <span x-text="ev.message"></span>
+                <span>
+                  <span x-text="ev.message"></span>
+                  <!-- Código de resposta (schema v8): coluna nos waf/access
+                       novos; fallback = parse da mensagem (linhas antigas). -->
+                  <template x-if="formato.stDe(ev)">
+                    <span class="st" :class="formato.stDe(ev).classe"
+                          x-text="formato.stDe(ev).code"></span>
+                  </template>
+                </span>
               </template>
               <template x-if="formato.marcaDe(ev, meuIp)">
                 <span class="tag" :class="formato.marcaDe(ev, meuIp).classe"
                       x-text="formato.marcaDe(ev, meuIp).rotulo"></span>
+              </template>
+              <!-- Emissor (schema v8, 04/11): clique abre o /events
+                   filtrado pela coluna de projeto. -->
+              <template x-if="formato.tagProjeto(ev)">
+                <a class="tag" :class="formato.tagProjeto(ev).classe" @click.stop
+                   :href="'/events?projeto=' + encodeURIComponent(formato.tagProjeto(ev).rotulo)"
+                   x-text="formato.tagProjeto(ev).rotulo"></a>
               </template>
             </td>
           </tr>

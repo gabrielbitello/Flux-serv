@@ -1580,12 +1580,16 @@ fn inserir_access(app: &Arc<AppState>, ip: &str, host: &str, path: &str) {
     );
     crate::events::access(
         &app.state,
-        host,
-        "GET",
-        path,
-        200,
-        3,
-        &crate::events::origem_de(&h, false, ip),
+        &crate::events::Acesso {
+            host,
+            method: "GET",
+            path,
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::origem_de(&h, false, ip),
+            projeto: "",
+            env: "",
+        },
     );
 }
 
@@ -2227,21 +2231,29 @@ async fn eventos_filtram_por_host_e_ambiente() {
     // access COM host de dev e de prod + evento interno (sem host).
     crate::events::access(
         &app.state,
-        "vipers-d.bitello.xyz",
-        "GET",
-        "/",
-        200,
-        3,
-        &crate::events::Origem::local(),
+        &crate::events::Acesso {
+            host: "vipers-d.bitello.xyz",
+            method: "GET",
+            path: "        ",
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::Origem::local(),
+            projeto: "",
+            env: "",
+        },
     );
     crate::events::access(
         &app.state,
-        "vippers.bitello.xyz",
-        "GET",
-        "/",
-        200,
-        3,
-        &crate::events::Origem::local(),
+        &crate::events::Acesso {
+            host: "vippers.bitello.xyz",
+            method: "GET",
+            path: "        ",
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::Origem::local(),
+            projeto: "",
+            env: "",
+        },
     );
     crate::events::event(&app.state, "info", "painel", "interno sem host");
 
@@ -2290,12 +2302,16 @@ async fn api_eventos_filtra_por_ambiente_e_lista_hosts() {
     let app = app_sem_docker();
     crate::events::access(
         &app.state,
-        "djm-d.bitello.xyz",
-        "GET",
-        "/cms",
-        200,
-        3,
-        &crate::events::Origem::local(),
+        &crate::events::Acesso {
+            host: "djm-d.bitello.xyz",
+            method: "GET",
+            path: "        ",
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::Origem::local(),
+            projeto: "",
+            env: "",
+        },
     );
     let (router, _dir) = painel_com_auth(&app).await;
     let cookie = cookie_de_sessao(&app, &router).await;
@@ -2517,4 +2533,171 @@ fn live_off_nao_mata_o_proprio_shell() {
         cmdline_do_shell.contains("node"),
         "cmdline do shell deveria casar com *node* (senão o guard é desnecessário)"
     );
+}
+
+/// Schema v8 (04/11): access do router nasce com emissor (projeto/env) e
+/// código de resposta (st); evento interno fica vazio/null — a borda é
+/// deliberada (emissor por coluna nos access, mensagem nos internos).
+#[tokio::test]
+async fn access_grava_emissor_e_st_v8() {
+    let app = app_sem_docker();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.5"),
+    );
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "loja.bitello.xyz",
+            method: "GET",
+            path: "produtos",
+            status: 502,
+            dur_ms: 9,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.5"),
+            projeto: "vippers",
+            env: "prod",
+        },
+    );
+    crate::events::event(&app.state, "info", "up", "interno sem emissor");
+    let rows: Vec<(String, String, Option<i64>)> = app
+        .state
+        .with(|c| {
+            let mut stmt = c.prepare("SELECT projeto, env, st FROM events ORDER BY id ASC")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .unwrap();
+    let (proj, env, st) = &rows[0];
+    assert_eq!(proj, "vippers", "projeto do access na coluna: {rows:?}");
+    assert_eq!(env, "prod");
+    assert_eq!(*st, Some(502), "código de resposta na coluna: {rows:?}");
+    let (proj2, env2, st2) = &rows[1];
+    assert_eq!(proj2, "", "interno sem projeto");
+    assert_eq!(env2, "");
+    assert_eq!(*st2, None, "interno sem st");
+}
+
+/// Filtro ?projeto= (04/11): casa a COLUNA nos access v8+ e, pra linha
+/// antiga/interna (coluna vazia), o nome citado na mensagem — o filtro
+/// nunca encolhe o histórico.
+#[tokio::test]
+async fn filtro_projeto_casa_coluna_e_mensagem() {
+    let app = app_sem_docker();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.6"),
+    );
+    // access NOVO: coluna preenchida, mensagem SEM o nome do projeto.
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "outra-cosia.bitello.xyz",
+            method: "GET",
+            path: "sem-vipa-no-texto",
+            status: 200,
+            dur_ms: 1,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.6"),
+            projeto: "vipa",
+            env: "dev",
+        },
+    );
+    // interno antigo: coluna vazia, nome citado na mensagem.
+    crate::events::event(&app.state, "info", "up", "flux-vipa-dev acordou (wake)");
+    // fora do filtro nos dois mundos.
+    crate::events::event(&app.state, "info", "up", "flux-outro: nada a ver");
+    let filtro = super::leitura::FiltroEventos {
+        projeto: Some("vipa".into()),
+        ..Default::default()
+    };
+    let (_, rows, total) = super::leitura::eventos_filtrados(&app, 1, 50, &filtro).unwrap();
+    assert_eq!(total, 2, "coluna + mensagem: {rows:?}");
+    assert!(
+        rows.iter()
+            .all(|r| r.projeto == "vipa" || r.message.contains("vipa"))
+    );
+}
+
+/// O detalhe do projeto ganha a coluna: access cujo TEXTO não menciona o
+/// nome mas cuja COLUNA diz o projeto entra na lista (era invisível na
+/// era do LIKE puro).
+#[tokio::test]
+async fn detalhe_cobre_projeto_por_coluna() {
+    let app = app_sem_docker();
+    app.state
+        .register_project("vipa", "name = \"vipa\"", "h")
+        .unwrap();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.7"),
+    );
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "dominio-alheio.bitello.xyz",
+            method: "GET",
+            path: "texto-sem-vipa",
+            status: 200,
+            dur_ms: 1,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.7"),
+            projeto: "vipa",
+            env: "dev",
+        },
+    );
+    let snap = super::leitura::detalhe(&app, "vipa", None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        snap.eventos.iter().any(|e| e.projeto == "vipa"),
+        "detalhe pela COLUNA de projeto: {:?}",
+        snap.eventos
+    );
+}
+
+/// API `/api/events?projeto=` server-side (04/11) + frame do SSE carregando
+/// emissor e st — o append ao vivo usa os mesmos badges da lista.
+#[tokio::test]
+async fn api_eventos_filtro_projeto_e_frame_emissor() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.8"),
+    );
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "loja-d.bitello.xyz",
+            method: "GET",
+            path: "no-filtro",
+            status: 429,
+            dur_ms: 2,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.8"),
+            projeto: "vippers",
+            env: "dev",
+        },
+    );
+    crate::events::event(&app.state, "info", "up", "flux-outro: fora");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, body) = pedir_api(
+        &app,
+        router,
+        "/api/events?projeto=vippers",
+        None,
+        &[
+            ("x-forwarded-for", "192.168.140.50".into()),
+            ("authorization", format!("Bearer {TOKEN_LEITURA}")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["total"], 1, "só o access com a coluna: {body}");
+    let ev = &d["eventos"][0];
+    assert_eq!(ev["projeto"], "vippers");
+    assert_eq!(ev["env"], "dev");
+    assert_eq!(ev["st"], 429, "código de resposta no JSON: {body}");
 }

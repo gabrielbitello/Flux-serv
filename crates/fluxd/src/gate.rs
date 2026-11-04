@@ -410,12 +410,16 @@ pub async fn pagina(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Res
     };
     events::access(
         &app.state,
-        &host,
-        "GET",
-        PATH,
-        status.as_u16(),
-        started.elapsed().as_millis(),
-        &origem,
+        &events::Acesso {
+            host: &host,
+            method: "GET",
+            path: PATH,
+            status: status.as_u16(),
+            dur_ms: started.elapsed().as_millis(),
+            origem: &origem,
+            projeto: "",
+            env: "dev",
+        },
     );
     r
 }
@@ -437,12 +441,16 @@ pub async fn processar(
     if estado_ip(&app.state, &ip) == EstadoIp::Banido {
         events::access(
             &app.state,
-            &host,
-            "POST",
-            PATH,
-            403,
-            started.elapsed().as_millis(),
-            &origem,
+            &events::Acesso {
+                host: &host,
+                method: "POST",
+                path: PATH,
+                status: 403,
+                dur_ms: started.elapsed().as_millis(),
+                origem: &origem,
+                projeto: "",
+                env: "dev",
+            },
         );
         return resposta_bloqueado();
     }
@@ -477,12 +485,16 @@ pub async fn processar(
         tracing::error!("gate: gravando confiança de {ip}: {e}");
         events::access(
             &app.state,
-            &host,
-            "POST",
-            PATH,
-            500,
-            started.elapsed().as_millis(),
-            &origem,
+            &events::Acesso {
+                host: &host,
+                method: "POST",
+                path: PATH,
+                status: 500,
+                dur_ms: started.elapsed().as_millis(),
+                origem: &origem,
+                projeto: "",
+                env: "dev",
+            },
         );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -498,12 +510,16 @@ pub async fn processar(
     );
     events::access(
         &app.state,
-        &host,
-        "POST",
-        PATH,
-        303,
-        started.elapsed().as_millis(),
-        &origem,
+        &events::Acesso {
+            host: &host,
+            method: "POST",
+            path: PATH,
+            status: 303,
+            dur_ms: started.elapsed().as_millis(),
+            origem: &origem,
+            projeto: "",
+            env: "dev",
+        },
     );
     redirecionar(&retorno_validado(form.retorno.as_deref()))
 }
@@ -545,7 +561,19 @@ fn falha(
             resposta_desafio("/", &cfg, Some("senha ou captcha incorretos")),
         )
     };
-    events::access(&app.state, host, "POST", PATH, status, 0, origem);
+    events::access(
+        &app.state,
+        &events::Acesso {
+            host,
+            method: "POST",
+            path: PATH,
+            status,
+            dur_ms: 0,
+            origem,
+            projeto: "",
+            env: "dev",
+        },
+    );
     r
 }
 

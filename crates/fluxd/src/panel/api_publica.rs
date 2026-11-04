@@ -259,18 +259,9 @@ fn minutos_de(q: Option<&str>) -> usize {
 
 // ------------------------------------------------------------------ rotas
 
-#[derive(serde::Serialize)]
-struct EventoJson {
-    id: i64,
-    created_at: String,
-    level: String,
-    scope: String,
-    message: String,
-    /// IP real do cliente (coluna `ip`) — badge "é você"/"infra" no painel.
-    ip: String,
-    /// Host da request (access, schema v7) — vazio nos internos.
-    host: String,
-}
+/// Evento no JSON da lista: o `EventoRow` do leitura DIRETO — mesmo struct
+/// do frame SSE (v7 ip/host, v8 projeto/env/st), sem espelho de campos.
+type EventoJson = leitura::EventoRow;
 
 #[derive(serde::Serialize)]
 struct ListaEventos {
@@ -326,18 +317,7 @@ async fn eventos(
                     .into_iter()
                     .map(|(host, ambiente)| HostJson { host, ambiente })
                     .collect(),
-                eventos: rows
-                    .into_iter()
-                    .map(|ev| EventoJson {
-                        id: ev.id,
-                        created_at: ev.created_at,
-                        level: ev.level,
-                        scope: ev.scope,
-                        message: ev.message,
-                        ip: ev.ip,
-                        host: ev.host,
-                    })
-                    .collect(),
+                eventos: rows.into_iter().collect(),
             })
             .into_response()
         }
@@ -358,28 +338,14 @@ pub(super) fn erro_json(status: StatusCode, msg: &str) -> Response {
 const PING_CADA: Duration = Duration::from_secs(15);
 
 /// Frame SSE de um evento: JSON na linha `data` (o cliente faz parse e
-/// appenda — o `id` é a chave de dedupe/posição). `ip`+`host` vão junto: o
-/// append ao vivo usa pros badges "é você"/"infra" (mesma semântica da lista).
-fn frame_de(
-    id: i64,
-    created_at: &str,
-    level: &str,
-    scope: &str,
-    message: &str,
-    ip: &str,
-    host: &str,
-) -> String {
+/// appenda — o `id` é a chave de dedupe/posição). Genérico sobre o tipo da
+/// linha (EventoNovo do broadcast, EventoRow do backlog) — MESMOS campos do
+/// JSON da lista (v7 ip/host, v8 projeto/env/st): uma definição, zero
+/// espelho de campos.
+fn frame_de<T: serde::Serialize>(ev: &T) -> String {
     format!(
         "data: {}\n\n",
-        serde_json::json!({
-            "id": id,
-            "created_at": created_at,
-            "level": level,
-            "scope": scope,
-            "message": message,
-            "ip": ip,
-            "host": host,
-        })
+        serde_json::to_string(ev).expect("serialização de evento não falha (campos planos)")
     )
 }
 
@@ -402,6 +368,18 @@ fn casa_filtro(f: &leitura::FiltroEventos, ev: &crate::events::EventoNovo) -> bo
         && !ev.message.to_lowercase().contains(&q.to_lowercase())
     {
         return false;
+    }
+    if let Some(p) = &f.projeto {
+        // Espelho do clausula_filtro: coluna nos access v8+; linha antiga/
+        // interna (coluna vazia) casa pelo nome citado na mensagem.
+        let casa = if ev.projeto.is_empty() {
+            ev.message.to_lowercase().contains(&p.to_lowercase())
+        } else {
+            &ev.projeto == p
+        };
+        if !casa {
+            return false;
+        }
     }
     true
 }
@@ -432,20 +410,8 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
         }
     };
     let ultimo = backlog.last().map(|ev| ev.id).unwrap_or(desde);
-    let fila: VecDeque<Result<String, Infallible>> = backlog
-        .iter()
-        .map(|ev| {
-            Ok(frame_de(
-                ev.id,
-                &ev.created_at,
-                &ev.level,
-                &ev.scope,
-                &ev.message,
-                &ev.ip,
-                &ev.host,
-            ))
-        })
-        .collect();
+    let fila: VecDeque<Result<String, Infallible>> =
+        backlog.iter().map(|ev| Ok(frame_de(ev))).collect();
 
     let app = Arc::clone(&st.app);
     let frames = futures_util::stream::unfold(
@@ -478,10 +444,7 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
                                 continue;
                             }
                             ultimo = ev.id;
-                            let frame = Ok(frame_de(
-                                ev.id, &ev.created_at, &ev.level, &ev.scope, &ev.message, &ev.ip,
-                                &ev.host,
-                            ));
+                            let frame = Ok(frame_de(&ev));
                             return Some((frame, (rx, tick, ultimo, filtro, app, fila)));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -491,12 +454,9 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
                                     if let Some(m) = ausentes.last() {
                                         ultimo = m.id;
                                     }
-                                    fila.extend(ausentes.iter().map(|ev| {
-                                        Ok(frame_de(
-                                            ev.id, &ev.created_at, &ev.level, &ev.scope, &ev.message,
-                                            &ev.ip, &ev.host,
-                                        ))
-                                    }));
+                                    fila.extend(
+                                        ausentes.iter().map(|ev| Ok(frame_de(ev))),
+                                    );
                                     continue;
                                 }
                                 Err(e) => {

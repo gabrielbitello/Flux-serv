@@ -68,6 +68,8 @@
         <option :value="h.host" x-text="h.host + ' (' + h.ambiente + ')'"></option>
       </template>
     </select>
+    <input class="input" type="text" x-model="projeto" @input="buscaAoVivo()"
+           placeholder="projeto…" aria-label="filtrar por projeto" style="width:9rem">
     <input class="input busca" type="text" x-model="busca" @input="buscaAoVivo()"
            placeholder="buscar na mensagem…" aria-label="buscar na mensagem">
     <label class="muted" title="esconde os eventos de info vindos do IP deste navegador (warn/error continuam)">
@@ -99,13 +101,28 @@
               </div>
             </template>
             <template x-if="!g.access">
-              <span x-text="g.message"></span>
+              <span>
+                <span x-text="g.message"></span>
+                <!-- Código de resposta (schema v8): coluna nos access/waf
+                     novos; fallback = parse da mensagem (linhas antigas). -->
+                <template x-if="formato.stDe(g)">
+                  <span class="st" :class="formato.stDe(g).classe"
+                        x-text="formato.stDe(g).code"></span>
+                </template>
+              </span>
             </template>
             <!-- Origem do evento (03/11): "você" = ip deste navegador;
                  "host" = ip da infra. Meu-ip sem marca = internet comum. -->
             <template x-if="formato.marcaDe(g, meuIp)">
               <span class="tag" :class="formato.marcaDe(g, meuIp).classe"
                     x-text="formato.marcaDe(g, meuIp).rotulo"></span>
+            </template>
+            <!-- Emissor (schema v8, 04/11): clique filtra o /events pela
+                 coluna de projeto (fallback de mensagem no servidor). -->
+            <template x-if="formato.tagProjeto(g)">
+              <a class="tag" :class="formato.tagProjeto(g).classe" @click.stop
+                 :href="'/events?projeto=' + encodeURIComponent(formato.tagProjeto(g).rotulo)"
+                 x-text="formato.tagProjeto(g).rotulo"></a>
             </template>
             <template x-if="g.count > 1">
               <details class="cru" @click.stop>
