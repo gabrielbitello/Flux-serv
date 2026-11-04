@@ -2496,3 +2496,25 @@ async fn painel_nao_manda_mais_no_referrer() {
         "referrer-policy do painel: {pol}"
     );
 }
+
+/// O script do live_off NÃO pode se matar: o cmdline do próprio shell
+/// carrega o literal `*node*` do case, então sem o guard de `$$` o loop
+/// mandava SIGTERM pra ele mesmo (exit 143 = 128+15) antes do rm/echo —
+/// "ação live_off dev em vippers: FALHOU: exit 143" ao vivo no 04/11.
+/// O teste trava o guard E prova que ele é necessário (o texto do shell
+/// de fato casa com o padrão).
+#[test]
+fn live_off_nao_mata_o_proprio_shell() {
+    let cmd = super::acoes::cmd_live_off();
+    assert!(
+        cmd.contains("[ \"$d\" = \"/proc/$$\" ] && continue"),
+        "guard do próprio pid ausente no script do live_off"
+    );
+    // Sem o guard, o próprio shell casaria com *node* — a prova de que o
+    // guard não é decorativo.
+    let cmdline_do_shell = format!("sh -c {cmd}");
+    assert!(
+        cmdline_do_shell.contains("node"),
+        "cmdline do shell deveria casar com *node* (senão o guard é desnecessário)"
+    );
+}
