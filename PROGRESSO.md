@@ -2309,3 +2309,33 @@ do update recursava com o getter interno; instância agora vive em
 destroy+recreate, sem SET de .data no proxy — documentado no código e
 travado por teste). Gabriel respondeu "Não" à pergunta sobre reverter
 toggle/badges do /events: FICAM.
+
+## 2026-11-04 — fix live_off (exit 143) achado ao vivo no painel novo
+
+Gabriel clicou "live off" (vippers dev) no painel e o evento saiu vermelho:
+`ação live_off dev em vippers: FALHOU: comando saiu com exit 143`. Causa
+proposta por código e provada A/B em busybox: o cmdline do `sh -c` do exec
+carrega o literal `*node*` do case, então o loop de kill varria `/proc`,
+achava o PRÓPRIO shell e se matava (SIGTERM = 128+15) antes do rm/echo. O
+vite morria de verdade (o wrapper do live faz o `rm -f public/hot` na morte
+do npm — `compose.rs:959`), então o objetivo se cumpria; o bug era de RELATO
+(evento error à toa). Bug pré-existente do master (`26570db`, fatia 6b) — o
+CLI `live off` tem o MESMO script e segue sem mexer (decisão dele: só o
+painel; lá o exit é ignorado). O rework não causou: só deixou o erro
+VISÍVEL (card "Últimos 15 min").
+
+`83dac38`: guard `[ "$d" = "/proc/$$" ] && continue` antes do case +
+`cmd_live_off()` extraído pra fonte única do teste. Prova A/B no VM
+(container busybox jogável, MESMO caminho `docker exec sh -c` do fluxd):
+script velho rc=143 sem chegar no echo; script novo rc=0 + "live OFF" e o
+fake node (`sh /tmp/node`) morre com o shell sobrevivendo. Teste novo
+`live_off_nao_mata_o_proprio_shell` trava o guard e prova que o cmdline do
+shell casa com *node* (senão o guard seria decorativo). TRIO verde escopado
+`-p fluxd` (337 testes). **DEPLOYADO 04/11 por ordem dele ("conserta e
+deploya")**: build 42s → backup `/usr/local/bin/fluxd.bak-20261104a-liveoff`
+→ stop/mv/start `active`; strings do binary prova o guard; regressão ao
+vivo painel 303 + `/api/dashboard` 401. Armadilha nova: `cargo` não está no
+PATH de ssh não-login na VM — build com `bash -lc`. Nota pro painel: o
+live_off do PAINEL não remove o `[live]` do flux.toml — o próximo acordar
+RE-LIGA o vite (`decidir_live` só pula com hot+porta vivos); off
+permanente = `flux live off` no CLI, que limpa o toml.
