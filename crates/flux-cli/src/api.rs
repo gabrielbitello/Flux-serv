@@ -333,10 +333,11 @@ pub struct GateSenhaOut {
     pub senha: Option<String>,
 }
 
-/// Resposta dos endpoints de flag do gate (`unban`/`revogar`/`turnstile`).
+/// Resposta dos endpoints de flag do gate (`confiar`/`unban`/`revogar`/`turnstile`).
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct GateFlagOut {
+    pub confiada: Option<bool>,
     pub desbanido: Option<bool>,
     pub revogada: Option<bool>,
     pub turnstile: Option<bool>,
@@ -856,6 +857,16 @@ impl ApiClient {
             msg: format!("serializando gate unban: {e}"),
         })?;
         let r = self.call("POST", "/gate/unban", Some(corpo)).await?;
+        self.json_out(r)
+    }
+
+    /// POST /gate/confiar — confia num IP por 30 dias sem passar pelo
+    /// desafio (remove ban e zera as tentativas no mesmo comando).
+    pub async fn gate_confiar(&self, ip: String) -> Result<GateFlagOut, ApiError> {
+        let corpo = serde_json::to_string(&GateIpIn { ip }).map_err(|e| ApiError::Protocolo {
+            msg: format!("serializando gate confiar: {e}"),
+        })?;
+        let r = self.call("POST", "/gate/confiar", Some(corpo)).await?;
         self.json_out(r)
     }
 

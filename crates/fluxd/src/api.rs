@@ -84,6 +84,7 @@ pub fn build_api(app: Arc<AppState>) -> Router {
         .route("/gate", get(gate_status))
         .route("/gate/senha", post(gate_senha))
         .route("/gate/unban", post(gate_unban))
+        .route("/gate/confiar", post(gate_confiar))
         .route("/gate/revogar", post(gate_revogar))
         .route("/gate/turnstile", post(gate_turnstile))
         // Vigia (26/10): status do limiar e override por projeto — o POST
@@ -1486,6 +1487,42 @@ async fn gate_unban(State(app): State<Arc<AppState>>, Json(b): Json<GateIpBody>)
             format!("removendo o ban: {e}"),
         ),
     }
+}
+
+/// POST /gate/confiar — confia num IP por `DIAS_CONFIANCA` dias (comando do
+/// operador): upsert de confiança + zera as tentativas + remove ban — o ban
+/// vence a confiança em `estado_ip`, então confiar sem desbanir não solta
+/// IP banido.
+async fn gate_confiar(State(app): State<Arc<AppState>>, Json(b): Json<GateIpBody>) -> Response {
+    let ip = b.ip.trim().to_owned();
+    if ip.is_empty() {
+        return erro(StatusCode::UNPROCESSABLE_ENTITY, "IP é obrigatório");
+    }
+    if let Err(e) = crate::gate::confiar(&app.state, &ip, crate::gate::DIAS_CONFIANCA) {
+        return erro(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("confiando no IP: {e}"),
+        );
+    }
+    let desbanido = match crate::gate::desbanir(&app.state, &ip) {
+        Ok(d) => d,
+        Err(e) => {
+            return erro(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("confiança gravada, mas removendo o ban de {ip}: {e}"),
+            );
+        }
+    };
+    crate::events::event(
+        &app.state,
+        "info",
+        "gate",
+        &format!(
+            "gate: IP {ip} confiável por {} dias por comando",
+            crate::gate::DIAS_CONFIANCA
+        ),
+    );
+    Json(serde_json::json!({ "confiada": true, "desbanido": desbanido })).into_response()
 }
 
 async fn gate_revogar(State(app): State<Arc<AppState>>, Json(b): Json<GateIpBody>) -> Response {

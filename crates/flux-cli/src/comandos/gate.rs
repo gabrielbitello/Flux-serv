@@ -7,7 +7,7 @@ use crate::GateCmd;
 use crate::api::ApiClient;
 use crate::contexto::falhar;
 
-/// `flux gate status|senha|unban|revogar|turnstile` — a régua do desafio é
+/// `flux gate status|senha|unban|confiar|revogar|turnstile` — a régua do desafio é
 /// do fluxd; aqui é só o painel de controle do operador.
 pub(crate) async fn gate(cmd: GateCmd) {
     let cliente = ApiClient::from_env();
@@ -78,6 +78,21 @@ pub(crate) async fn gate(cmd: GateCmd) {
             };
             if out.desbanido == Some(true) {
                 println!("ban removido — o IP volta ao desafio normal");
+            }
+        }
+        GateCmd::Confiar { ip } => {
+            let out = match cliente.gate_confiar(ip).await {
+                Ok(o) => o,
+                Err(e) => falhar(e),
+            };
+            if out.confiada == Some(true) {
+                if out.desbanido == Some(true) {
+                    println!(
+                        "IP confiável por 30 dias (ban removido junto) — passa direto pelo desafio"
+                    );
+                } else {
+                    println!("IP confiável por 30 dias — passa direto pelo desafio");
+                }
             }
         }
         GateCmd::Revogar { ip } => {

@@ -331,6 +331,13 @@ enum GateCmd {
         /// IP na notação do log (ex.: 203.0.113.9).
         ip: String,
     },
+    /// Confiar num IP por 30 dias sem passar pelo desafio — remove ban e
+    /// zera as tentativas no mesmo comando (o ban vence a confiança, então
+    /// confiar sem desbanir não solta IP banido).
+    Confiar {
+        /// IP na notação do log (ex.: 203.0.113.9).
+        ip: String,
+    },
     /// Revoga a confiança de um IP antes do prazo de 30 dias.
     Revogar { ip: String },
     /// Configura o Turnstile do Cloudflare no form do desafio.
