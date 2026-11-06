@@ -2,6 +2,38 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 04–06/11 — Gate: caso das falhas de Turnstile FECHADO por medição + `flux gate confiar <ip>` (`a48be9b`)
+
+O Gabriel colou um 401 do console (`challenges.cloudflare.com/…/pat/…`) e
+pediu diagnóstico antes de qualquer edição. Provas (04/11): o 401 é o fluxo de
+Private Access Token da CF — resposta ESPERADA e documentada, noise de console;
+o real eram 6 falhas de "captcha incorreta" no gate do `vippers-d`
+(138.118.171.216, 17:20–17:37 UTC). Em 06/11 ele confirmou que o widget
+COMPLETAVA no browser e o gate recusava — recusa era server-side.
+
+Fechado por medição com token REAL (Playwright extraiu do widget vivo na
+página do desafio): par site/secret VÁLIDO desde 24/10 (evento "Turnstile
+configurado" = 24/10 07:56, nunca reconfigurado); a CF **NÃO reforça
+`remoteip`** (token passou com remoteip divergente e sem o parâmetro — os
+relatos da comunidade não se aplicam aqui); e a testemunha que nomeou a causa:
+o PAINEL valida Turnstile com o mesmo código (`panel/mod.rs:216-234`) e loga
+o MOTIVO — 17:37 recusou 3× "captcha **indisponível**" (rede/timeout no canal
+siteverify) no mesmo minuto das falhas do gate → canal instável na VM que já
+degradava (RCU stall; o sshd morreu de novo em 06/11 — recovery
+`poweroff`+start com ok dele, perda zero, 3ª vez em 4 dias). Na memória:
+painel recusa login com "captcha inválido" intermitente desde 03/11,
+compatível com token expirado (>5 min entre load e submit) — hipótese não
+provada. Pendências de ok (NADA editado): gate logar o motivo real do
+siteverify (como o painel já faz); `data-cfasync=false` no api.js do desafio.
+
+Feature nova (pedido do dia; no chat do vippers havia unban, confiar não
+tinha): **`flux gate confiar <ip>`** — confia 30 dias sem passar pelo
+desafio; um comando faz upsert de confiança + zera tentativas + REMOVE o ban
+(o ban vence a confiança em `estado_ip`, então confiar sem desbanir não
+solta IP banido). API `POST /gate/confiar` (token; 422 em IP vazio —
+`confiar("")` gravaria linha vazia); CLI global espelhando unban/revogar.
+TRIO verde (492 testes). Deploy do fluxd + rebuild do CLI pendentes do ok.
+
 ## 31/10–02/11 — PAINEL NOVO: API+SSE+Alpine — 10 fatias commitadas, escopo fechado em 13 rodadas de pergunta (`377fada`…`26570db`)
 
 A dor que abriu: detalhe expandido do /events fechava sozinho (fix `377fada`).
