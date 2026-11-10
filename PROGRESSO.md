@@ -2,6 +2,46 @@
 
 Diário de status do projeto. Entradas acumuladas por sessão, mais recente no topo.
 
+## 10/11 — Degradação da VM: CAUSA RAIZ ACHADA (VBS religado → modo NEM) + captcha diz a verdade (`fda4ae4`)
+
+Gabriel não conseguia entrar no PAINEL (não no gate): ~20 tentativas
+00:07–00:24 locais, `POST /login 303 → /login?erro=captcha`, e o events
+provava `login recusado: turnstile (captcha indisponível)` ×2 — o mesmo
+mecanismo de 04/11, desta vez com a causa de fundo FECHADA:
+
+- **Journal da VM é PERSISTENTE** (desmente a crença de "volátil":
+  `/var/log/journal`, 283,9M/4G — os stalls do boot degradado estão
+  gravados). Congelamentos PROVADOS da VM inteira: 191 s e 175 s
+  (`clocksource: Long readout interval` + `rcu_preempt kthread starved` +
+  `TSC doesn't count with P0 frequency` = perda de timer). Densidade por
+  boot: era VT-x (boot -6, 13 dias) = 31 linhas `rcu:` (quase só banner);
+  era NEM (boot -4, 1,5 dia) = 168.
+- **A virada:** Kernel-Boot event 153 — boot de 14/10 = "políticas: 0" (VBS
+  off); boot de 31/10 21:06 = "**VBS Enabled**". O hypervisor do Windows
+  voltou entre 14/10 e 31/10 (HVCI segue 0 no registro — outra política
+  religou o VBS; quem foi, aberto). O reboot de 31/10 matou o boot -6 da VM
+  às 21:04 (hora exata) e desde 02/11 a VM roda em **NEM** (VBox.log:
+  `HMR3Init: Attempting fall back to NEM: AMD-V is not available`;
+  `HypervisorPresent=True`) — o modo "snail" de 13/10. NEM virtualiza timer
+  mal → perda de interrupção → RCU stalls → processos pendurados em syscall
+  (journald/dockerd morrem, fluxd sobrevive): a sequência dos 4 incidentes
+  (02-03/11, 06/11, 10/11). Fix (toggle VBS + reboot do host) pendente de ok.
+- **Episódio:** recovery playbook re-provado (~09:50 local); dano colateral
+  no PC = 65 ssh.exe zumbis (ticks de 5 min pendurados desde 03:09 UTC) +
+  watch wedged — mortos, guard regenerou; canal siteverify provado pós-boot
+  (`invalid-input-secret` em 64 ms pela ponte :2016). Deploy do a48be9b já
+  tinha sido feito por outra sessão 09/11 23:01 (`fluxd.bak-20261109-confiar`)
+  — pendência de 06/11 fechada sem ação desta sessão.
+
+**Feature (`fda4ae4`):** recusa de captcha distingue indisponível de
+inválido. `VereditoTurnstile::Invalido` virou `String` e carrega os
+`error-codes` oficiais da CF (`timeout-or-duplicate`, `invalid-input-response`…)
+até a resposta: o event do gate ganha o motivo real (antes: "captcha
+incorreta" genérico — o motivo rico morria no chamada), painel redireciona
+com flag própria `captcha_indisponivel` e a página do desafio rende frase
+fechada própria ("captcha indisponível — problema no servidor"). TRIO verde
+(497 testes no workspace). Deploy do fluxd pendente de ok.
+
 ## 04–06/11 — Gate: caso das falhas de Turnstile FECHADO por medição + `flux gate confiar <ip>` (`a48be9b`)
 
 O Gabriel colou um 401 do console (`challenges.cloudflare.com/…/pat/…`) e
