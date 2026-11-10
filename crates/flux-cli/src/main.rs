@@ -427,9 +427,17 @@ enum EnvCmd {
 
 #[derive(Subcommand)]
 enum VmCmd {
+    /// Estado no hipervisor, sem tocar em nada.
     Status,
+    /// Liga a VM headless — idempotente (autostart do logon chama isto).
     Start,
-    Stop,
+    /// Desliga gracefully (ACPI); corte seco do playbook de recovery só
+    /// com --forcar.
+    Stop {
+        /// Corte seco (guest wedged ignora ACPI) — mata sem flush.
+        #[arg(long)]
+        forcar: bool,
+    },
     Ssh,
     Checkpoint,
     /// Checkpoint Hyper-V + novo fluxd com rollback automático (14).
@@ -578,9 +586,12 @@ async fn main() {
             }
         }
         Cmd::Vm { cmd } => match cmd {
+            VmCmd::Status => comandos::vm::status(),
+            VmCmd::Start => comandos::vm::start(),
+            VmCmd::Stop { forcar } => comandos::vm::stop(forcar),
             VmCmd::Ssh => vm_ssh(),
             VmCmd::Upgrade => stub("fase F16 (spec 14) — upgrade do fluxd com rollback"),
-            _ => stub("fase F1 (spec 01) — VM Hyper-V Bookworm"),
+            VmCmd::Checkpoint => stub("fase F1 (spec 01) — checkpoint/savestate da VM"),
         },
         Cmd::Setup { .. } => stub("fase F1 (spec 01) — setup do host Windows + VM"),
         Cmd::Token {
