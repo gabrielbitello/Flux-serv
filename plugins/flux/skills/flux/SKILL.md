@@ -52,10 +52,13 @@ flux sync status|pause|resume|reset    # reset = terminate+create com rescan tot
 flux db fresh --yes [--seed|--no-seed] # rebuild dev-only, recusa sem --yes
 flux db status                         # banco próprio: container, health, TTL por database
 flux watch                             # serviço leve: branches/worktrees + fila de rescan
+flux vm status                         # estado da VM no hipervisor (sem tocar em nada)
+flux vm start                          # liga a VM headless — idempotente (autostart do logon chama isto)
+flux vm stop [--forcar]                # graceful ACPI (teto 120 s); corte seco do recovery só com --forcar
 flux vm ssh                            # SSH interativo na VM
 ```
 
-Stubs que recusam com a fase alvo (exit 2, nada silencioso): `flux db migrate|seed|console|dump|restore`, `flux vm start|stop|checkpoint|upgrade`, `flux tunnel status`, `flux setup`, `flux panel`, `flux self-update`, `flux tool`.
+Stubs que recusam com a fase alvo (exit 2, nada silencioso): `flux db migrate|seed|console|dump|restore`, `flux vm checkpoint|upgrade`, `flux tunnel status`, `flux setup`, `flux panel`, `flux self-update`, `flux tool`.
 
 ## flux.toml
 
@@ -75,11 +78,13 @@ Uma sessão `one-way-replica` por projeto (`flux-{name}`; worktree = `flux-{name
 ## Sono e ciclo de vida
 
 - Dev dorme após `idle_minutes` (15); prod pausa após 30 (wake ~1,1 s). Acordam: request proxyada, lease CLI/painel, CPU > teto, browser beat — ou tool MCP `flux_acordar`.
-- VM sem autostart no boot do host — powered off pós-reboot é esperado; ligar no hypervisor.
+- **VM**: autostart no logon do host (task `FluxVMAutostart`, +90 s) chama `flux vm start`. Ligar/desligar = `flux vm start` / `flux vm stop [--forcar]` — NUNCA VBoxManage direto (fonte única = CLI; binário da task: `.flux\bin\flux-vm.exe`, atualizar após rebuild do CLI). Desligar a VM derruba TUDO (containers, zcode-api, rádio djm).
+- **NUNCA religar Hyper-V/VBS/"Isolamento do núcleo" no host** — com o hypervisor ativo o VirtualBox cai no modo NEM e a VM degrada (perda de timer → RCU stalls → journald/dockerd pendurados em syscall: causa raiz dos incidentes de 02–10/11, PROGRESSO 10/11). Correção pendente do reboot do host: `%USERPROFILE%\.flux\toggle-hypervisor-off.ps1`.
 - Projeto `[temporary]` teardown após `ttl_hours` (6 h) sem interação. Repo Windows NUNCA é tocado.
 
 ## Debug rápido (por sintoma)
 
+- **VM wedged (docker/sshd pendurados, fluxd vivo)** → playbook: `flux vm stop --forcar` + `flux vm start` (graceful ignora ACPI, corte seco decide; perda zero provado). O kernel log do boot anterior PERSISTE: na VM, `journalctl -k -b -1 | grep -E "rcu|Long readout"`.
 - **CLI não acha fluxd** → túnel SSH `127.0.0.1:7420` morto: matar o `ssh.exe` do forward e rodar de novo (o CLI reabre).
 - **Sync divergiu / pasta recriada na VM / ignore mudou** → `flux sync reset` (terminate+create, progresso ao vivo).
 - **Container em estado estranho** → `flux ps`, depois `flux up` de novo (fluxd reconcilia lendo a verdade do Docker a cada 60 s).
@@ -96,6 +101,7 @@ Fábrica WSL antiga (`*.dev`, porteiro, devfactory) foi DESINSTALADA em 14/10/20
 
 | Data | Mudança |
 |---|---|
+| 2026-11-10 | `flux vm status/start/stop [--forcar]` reais (stub só checkpoint/upgrade); autostart da VM no logon (task `FluxVMAutostart` → `flux vm start`, idempotente); aviso NEM/VBS + playbook de VM wedged no debug. |
 | 2026-10-22 | Migrou pro plugin `flux` (skill + /flux:init + docker guard). Seção MCP nova; comando `docker` agora é barrado por hook. |
 | 2026-10-22 (noite) | MCP virou HTTP servido DENTRO da VM (:7430, LAN-only, token da API) — registrado na config do zcode; plugin ficou sem MCP embutido (0.1.1). |
 | 2026-10-14 | Criada substituindo a skill `dev-servers` (fábrica WSL morta) |

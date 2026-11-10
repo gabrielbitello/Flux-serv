@@ -42,6 +42,24 @@ com flag própria `captcha_indisponivel` e a página do desafio rende frase
 fechada própria ("captcha indisponível — problema no servidor"). TRIO verde
 (497 testes no workspace). Deploy do fluxd pendente de ok.
 
+**Deploy do `fda4ae4` PROVADO ao vivo** (ok do Gabriel): build na VM
+(`/home/flux/flux-src`, base a48be9b + os 3 arquivos, rustc 1.99), backup
+`fluxd.bak-20261110-captcha`, `mv` + restart; smoke: POST /login sem token →
+303 `erro=captcha` e o events loga o motivo rico novo — "login recusado:
+turnstile (captcha inválido (missing-input-response))".
+
+**Autostart + `flux vm` reais (`26151d3`):** CLI ganha `flux vm
+status|start|stop [--forcar]` — fonte única do ciclo de energia (VBoxManage
+nunca mais na mão; constantes `VBOXMANAGE`/`VM_NOME` em `comandos/vm.rs`).
+Task `FluxVMAutostart` do logon (+90 s) chama `.flux\bin\flux-vm.exe vm start`
+(cópia do release — o `flux.exe` de `.flux\bin` é o do watch, locked em
+execução; ATUALIZAR a cópia após rebuild do CLI), idempotente, PROVADA ao
+vivo: run manual → LastTaskResult=0 + log "já no ar". stop = graceful ACPI
+com teto 120 s; corte seco (playbook de recovery) só com `--forcar`. Skill do
+plugin atualizada (fonte + cache): ciclo diário, stubs restantes, aviso
+NEM/VBS, playbook de VM wedged. Fix do VBS segue pendente do reboot do host
+(`toggle-hypervisor-off.ps1`).
+
 ## 04–06/11 — Gate: caso das falhas de Turnstile FECHADO por medição + `flux gate confiar <ip>` (`a48be9b`)
 
 O Gabriel colou um 401 do console (`challenges.cloudflare.com/…/pat/…`) e
