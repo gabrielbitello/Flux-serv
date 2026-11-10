@@ -1713,8 +1713,33 @@ async fn turnstile_configurado_exige_o_token() {
     assert_eq!(s, StatusCode::SEE_OTHER);
     assert_eq!(
         flag_de(&h).as_deref(),
-        Some("captcha"),
-        "sem token de captcha, nem com senha certa"
+        Some("captcha_indisponivel"),
+        "sem token e sem ponte no teste = indisponível (fail-closed), nem com senha certa"
+    );
+}
+
+/// A flag própria de indisponibilidade rende a frase verdadeira na página de
+/// login — o usuário não leva a culpa quando o problema é do servidor.
+#[tokio::test]
+async fn login_indica_indisponibilidade_do_captcha() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (_, _, pagina) = pedir(
+        &app,
+        router,
+        "GET",
+        "/login?erro=captcha_indisponivel",
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        pagina.contains("Captcha indisponível"),
+        "frase de indisponibilidade rendida: {pagina}"
+    );
+    assert!(
+        !pagina.contains("Captcha inválido"),
+        "não acusar o captcha do usuário: {pagina}"
     );
 }
 

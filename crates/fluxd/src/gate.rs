@@ -297,7 +297,9 @@ pub enum VereditoTurnstile {
     /// Sem secret configurada — o form roda sem captcha (com warn no log).
     Desativado,
     Valido,
-    Invalido(&'static str),
+    /// Motivo curto e fechado: "captcha indisponível" (rede/timeout) ou
+    /// "captcha inválido (códigos)" com o `error-codes` que a CF devolveu.
+    Invalido(String),
 }
 
 /// Verificação server-side do token do widget: POST à ponte TLS do Caddy →
@@ -324,7 +326,7 @@ pub async fn turnstile_verificar(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("gate: montando request do siteverify: {e}");
-            return VereditoTurnstile::Invalido("captcha indisponível");
+            return VereditoTurnstile::Invalido("captcha indisponível".into());
         }
     };
     let resp =
@@ -332,29 +334,44 @@ pub async fn turnstile_verificar(
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::error!("gate: siteverify inalcançável (ponte do Caddy no ar?): {e}");
-                return VereditoTurnstile::Invalido("captcha indisponível");
+                return VereditoTurnstile::Invalido("captcha indisponível".into());
             }
             Err(_) => {
                 tracing::error!("gate: siteverify excedeu 10s — recusado (fail-closed)");
-                return VereditoTurnstile::Invalido("captcha indisponível");
+                return VereditoTurnstile::Invalido("captcha indisponível".into());
             }
         };
     let bytes = match resp.into_body().collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => {
             tracing::error!("gate: corpo do siteverify ilegível: {e}");
-            return VereditoTurnstile::Invalido("captcha indisponível");
+            return VereditoTurnstile::Invalido("captcha indisponível".into());
         }
     };
     veredito_do_json(&bytes)
 }
 
 /// Parse do JSON do siteverify (`{"success": bool, ...}`). Campo ausente ou
-/// JSON podre = `Invalido` — nunca é válido por acidente.
+/// JSON podre = `Invalido` — nunca é válido por acidente. Os `error-codes`
+/// oficiais da CF entram no motivo (`timeout-or-duplicate` = token velho ou
+/// reusado; `invalid-input-response` = token estragado) — é o que separa
+/// "captcha expirou" de "servidor fora" no log.
 fn veredito_do_json(bytes: &[u8]) -> VereditoTurnstile {
     match serde_json::from_slice::<serde_json::Value>(bytes) {
         Ok(v) if v["success"].as_bool() == Some(true) => VereditoTurnstile::Valido,
-        _ => VereditoTurnstile::Invalido("captcha inválido"),
+        Ok(v) => {
+            let codigos: Vec<&str> = v["error-codes"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
+                .unwrap_or_default();
+            if codigos.is_empty() {
+                VereditoTurnstile::Invalido("captcha inválido".into())
+            } else {
+                tracing::warn!("gate: siteverify recusou o token: {}", codigos.join(","));
+                VereditoTurnstile::Invalido(format!("captcha inválido ({})", codigos.join(",")))
+            }
+        }
+        Err(_) => VereditoTurnstile::Invalido("captcha inválido".into()),
     }
 }
 
@@ -453,12 +470,12 @@ pub async fn processar(
     if let Some(secret) = &cfg.secret {
         let token = form.turnstile_token.as_deref().unwrap_or_default();
         let veredito = if token.is_empty() {
-            VereditoTurnstile::Invalido("captcha ausente")
+            VereditoTurnstile::Invalido("captcha ausente".into())
         } else {
             turnstile_verificar(&app.http, secret, token, &ip).await
         };
-        if veredito != VereditoTurnstile::Valido {
-            return falha(&app, &host, &ip, &origem, "captcha");
+        if let VereditoTurnstile::Invalido(motivo) = veredito {
+            return falha(&app, &host, &ip, &origem, &motivo);
         }
     } else {
         tracing::warn!(
@@ -522,11 +539,18 @@ fn falha(
         tracing::error!("gate: registrando falha de {ip}: {e}");
         (false, 0)
     });
+    // O motivo do captcha já sai do veredito com texto próprio ("captcha
+    // indisponível", "captcha inválido (...)"); só "senha" recebe "incorreta".
+    let acao = if motivo.starts_with("captcha") {
+        motivo.to_string()
+    } else {
+        format!("{motivo} incorreta")
+    };
     events::event(
         &app.state,
         "warn",
         "gate",
-        &format!("gate: {motivo} incorreta do IP {ip} ({falhas}/{TETO_TENTATIVAS}) host={host}"),
+        &format!("gate: {acao} do IP {ip} ({falhas}/{TETO_TENTATIVAS}) host={host}"),
     );
     let (status, r) = if banido {
         events::event(
@@ -540,10 +564,7 @@ fn falha(
         (403, resposta_bloqueado())
     } else {
         let cfg = turnstile_config(&app.state);
-        (
-            401,
-            resposta_desafio("/", &cfg, Some("senha ou captcha incorretos")),
-        )
+        (401, resposta_desafio("/", &cfg, Some(motivo)))
     };
     events::access(&app.state, host, "POST", PATH, status, 0, origem);
     r
@@ -622,9 +643,20 @@ fn cabec_seguras(r: &mut Response) {
     );
 }
 
+/// Frase FECHADA por tipo de erro — nunca ecoa entrada (regra da 08). O
+/// indisponível é distinto pra não culpar o captcha do usuário quando o
+/// problema é do servidor (ponte do siteverify fora do ar).
+fn frase_do_erro(erro: &str) -> &'static str {
+    if erro.starts_with("captcha indisponível") {
+        "captcha indisponível — problema no servidor; tenta de novo em instantes"
+    } else {
+        "senha ou captcha incorretos — tente de novo"
+    }
+}
+
 /// Página do desafio: HTML puro, form POSTando na rota real do gate. O erro
-/// é frase FIXA (nunca ecoa entrada). Widget do Turnstile só quando há site
-/// key configurada.
+/// rende uma das frases fechadas de [`frase_do_erro`] (nunca ecoa entrada).
+/// Widget do Turnstile só quando há site key configurada.
 pub fn resposta_desafio(retorno: &str, cfg: &TurnstileConfig, erro: Option<&str>) -> Response {
     let widget = match &cfg.site {
         Some(site) => format!(
@@ -635,7 +667,8 @@ pub fn resposta_desafio(retorno: &str, cfg: &TurnstileConfig, erro: Option<&str>
         None => String::new(),
     };
     let aviso_erro = erro
-        .map(|_| "<p class=\"err\">senha ou captcha incorretos — tente de novo</p>")
+        .map(frase_do_erro)
+        .map(|frase| format!("<p class=\"err\">{frase}</p>"))
         .unwrap_or_default();
     let corpo = format!(
         "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">\
@@ -836,17 +869,51 @@ mod tests {
         );
         assert_eq!(
             veredito_do_json(b"{\"success\":false,\"error-codes\":[\"invalid-input-response\"]}"),
-            VereditoTurnstile::Invalido("captcha inválido")
+            VereditoTurnstile::Invalido("captcha inválido (invalid-input-response)".into())
         );
         assert_eq!(
             veredito_do_json(b"{}"),
-            VereditoTurnstile::Invalido("captcha inválido"),
+            VereditoTurnstile::Invalido("captcha inválido".into()),
             "campo ausente nunca é válido"
         );
         assert_eq!(
             veredito_do_json(b"html podre"),
-            VereditoTurnstile::Invalido("captcha inválido")
+            VereditoTurnstile::Invalido("captcha inválido".into())
         );
+        assert_eq!(
+            veredito_do_json(
+                b"{\"success\":false,\"error-codes\":[\"timeout-or-duplicate\",\"bad-request\"]}"
+            ),
+            VereditoTurnstile::Invalido(
+                "captcha inválido (timeout-or-duplicate,bad-request)".into()
+            )
+        );
+    }
+
+    /// Indisponibilidade ganha frase própria na página — não acusar o captcha
+    /// do usuário quando o problema é do servidor. Os outros erros mantêm a
+    /// frase genérica.
+    #[tokio::test]
+    async fn desafio_mostra_frase_de_indisponibilidade() {
+        let cfg = TurnstileConfig {
+            site: None,
+            secret: None,
+        };
+        let r = resposta_desafio("/cms", &cfg, Some("captcha indisponível"));
+        let corpo =
+            String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(
+            corpo.contains("captcha indisponível"),
+            "frase própria de indisponibilidade: {corpo}"
+        );
+        assert!(
+            !corpo.contains("senha ou captcha incorretos"),
+            "não acusar o usuário quando o problema é do servidor: {corpo}"
+        );
+        let r = resposta_desafio("/cms", &cfg, Some("senha"));
+        let corpo =
+            String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(corpo.contains("senha ou captcha incorretos"), "{corpo}");
     }
 
     #[tokio::test]

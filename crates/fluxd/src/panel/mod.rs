@@ -135,6 +135,9 @@ fn texto_do_erro(flag: Option<&str>) -> Option<&'static str> {
     match flag {
         Some("1") => Some("Senha incorreta."),
         Some("captcha") => Some("Captcha inválido — tenta de novo."),
+        Some("captcha_indisponivel") => {
+            Some("Captcha indisponível — problema no servidor; tenta de novo em instantes.")
+        }
         Some("lock") => Some("Muitas tentativas — o login reabre em até 5 minutos."),
         _ => None,
     }
@@ -228,7 +231,14 @@ async fn login_submit(
                     "painel",
                     &format!("login recusado: turnstile ({motivo}) ip={ip}"),
                 );
-                return redirecao_erro_login("captcha");
+                // Indisponibilidade não é culpa do captcha do usuário — flag
+                // própria pra página dizer a verdade em vez de "inválido".
+                let flag: &'static str = if motivo.starts_with("captcha indisponível") {
+                    "captcha_indisponivel"
+                } else {
+                    "captcha"
+                };
+                return redirecao_erro_login(flag);
             }
             crate::gate::VereditoTurnstile::Desativado => {}
         }
