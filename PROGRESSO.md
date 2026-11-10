@@ -60,6 +60,20 @@ plugin atualizada (fonte + cache): ciclo diário, stubs restantes, aviso
 NEM/VBS, playbook de VM wedged. Fix do VBS segue pendente do reboot do host
 (`toggle-hypervisor-off.ps1`).
 
+**Merge `agente/03-11` → master (`03b260f`, ordem do Gabriel — "lá tá a
+versão nova, mas incompleta"):** auto-merge LIMPO, zero conflito textual (os
+lados tocaram regiões distintas); semântica conferida no TRIO: fmt + clippy
+`-D warnings` + **520 testes** (345 no fluxd, +22 do branch), 0 falhas. A
+assinatura v8 do `events::access` (struct `Acesso`) prevalece nos 5 pontos do
+gate; a lógica do veredito rico (`Invalido(String)`, `frase_do_erro`, flag
+`captcha_indisponivel`) sobreviveu dentro dela. O branch traz doctor neutro,
+vigia /api, contratos API (ip/host/`meu_ip`), cliente do painel rework
+(Chart.js/SSE ≥300 ms), live com INTENÇÃO, `/projetos`, `/events` ×N 30 min e
+o fix do bug de SQL `'\'`. **PENDENTE: deploy do merge na VM — o fluxd no ar
+segue `fda4ae4` (painel VELHO desde 09/11 23:01, quando o deploy do confiar
+sobrescreveu os deploys do rework sem merge).** Worktree
+`.worktree/agente-03-11` fica no branch como arquivo.
+
 ## 04–06/11 — Gate: caso das falhas de Turnstile FECHADO por medição + `flux gate confiar <ip>` (`a48be9b`)
 
 O Gabriel colou um 401 do console (`challenges.cloudflare.com/…/pat/…`) e
