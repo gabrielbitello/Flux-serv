@@ -6,6 +6,16 @@
 //!
 //! SEM auth de propósito: é CSS e fonte, zero segredo, e a página de login
 //! (única sem sessão) também carrega o estilo.
+//!
+//! CACHE-BUSTING (03/11): as shells referenciam os assets com
+//! `?v=__ASSETS_V__` e os handlers substituem o placeholder pela VERSÃO
+//! aqui de baixo — hash dos bytes EMBUTIDOS. Binário novo com asset novo =
+//! URL nova = a borda (CF) nunca mais serve JS velho com shell nova (o
+//! deploy de 03/11 ficou ~24 h assim: shell usando `visiveis`, js cached
+//! sem o getter — erro direto no console do Gabriel). Com a URL mudando
+//! junto do conteúdo, o cache pode ser LONGO e `immutable`.
+
+use std::sync::LazyLock;
 
 use axum::extract::Path;
 use axum::http::{StatusCode, header};
@@ -29,6 +39,34 @@ const PLEX_SANS_500: &[u8] = include_bytes!("fontes/IBMPlexSans-Medium.woff2");
 const PLEX_SANS_600: &[u8] = include_bytes!("fontes/IBMPlexSans-SemiBold.woff2");
 const PLEX_MONO_400: &[u8] = include_bytes!("fontes/IBMPlexMono-Regular.woff2");
 const PLEX_MONO_500: &[u8] = include_bytes!("fontes/IBMPlexMono-Medium.woff2");
+
+/// Placeholder NAS SHELLS — os handlers substituem por [`versao`].
+pub(crate) const V_PLACEHOLDER: &str = "__ASSETS_V__";
+
+/// Versão do conjunto de assets: 12 chars do sha256 dos bytes embutidos
+/// (mesmo `sha256_hex` da auth — sem dependência nova). Um hash SÓ pra
+/// simplificar: qualquer asset mudando muda a URL de todos — os que não
+/// mudaram se recacheiam de graça (mesmo conteúdo, novo TTL).
+pub(crate) fn versao() -> &'static str {
+    static V: LazyLock<String> = LazyLock::new(|| {
+        let mut base: Vec<u8> = Vec::new();
+        base.extend_from_slice(ESTILO.as_bytes());
+        base.extend_from_slice(PAINEL_JS.as_bytes());
+        base.extend_from_slice(ALPINE.as_bytes());
+        base.extend_from_slice(CHARTJS.as_bytes());
+        for f in [
+            PLEX_SANS_400,
+            PLEX_SANS_500,
+            PLEX_SANS_600,
+            PLEX_MONO_400,
+            PLEX_MONO_500,
+        ] {
+            base.extend_from_slice(f);
+        }
+        crate::api::auth::sha256_hex(&base)[..12].to_owned()
+    });
+    &V
+}
 
 /// `GET /assets/estilo.css` — a folha única do painel novo.
 pub(super) async fn estilo() -> Response {
@@ -69,13 +107,15 @@ pub(super) async fn fonte(Path(arquivo): Path<String>) -> Response {
 
 /// `'static` nos dois: todo corpo aqui é const embedded (include_*), e o
 /// `IntoResponse` de `&[u8]` no axum só existe para `'static`.
+///
+/// Cache LONGO e `immutable` (03/11): a URL dos assets carrega `?v=<hash>`
+/// (as shells, via [`versao`]) — conteúdo novo vira URL nova, então pode
+/// ficar 1 ano na borda sem risco de JS velho.
 fn resposta(corpo: &'static [u8], tipo: &'static str) -> Response {
     (
         [
             (header::CONTENT_TYPE, tipo),
-            // Imutável na prática (fonte/versionado); 1 dia basta pra
-            // atualização simples sem bust de cache.
-            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         corpo,
     )

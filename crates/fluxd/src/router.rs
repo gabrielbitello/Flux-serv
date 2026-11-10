@@ -210,6 +210,20 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
     let Decision { host, mut action } =
         decision::decide(&host_raw, &path, wants_json, &app.domain, &src);
 
+    // Emissor do access (schema v8, 04/11): projeto/env derivados do
+    // ManagedHost UMA vez — fonte única (`projeto_do_host`), sem re-parse
+    // dentro do events.rs. Host desconhecido = sem projeto e sem env (não
+    // é "prod" — é nada).
+    let ev_projeto_opt = projeto_do_host(&host);
+    let ev_projeto = ev_projeto_opt.as_deref().unwrap_or("");
+    let ev_env = if ev_projeto_opt.is_some() && host.is_dev() {
+        "dev"
+    } else if ev_projeto_opt.is_some() {
+        "prod"
+    } else {
+        ""
+    };
+
     // Redroom (21/10): modo de contenção GLOBAL — ligado, TODO request que
     // chega neste router (túnel Cloudflare, rede local, host gerenciado ou
     // não, painel público e rota de deploy inclusos) recebe a página estática
@@ -230,12 +244,16 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
         let r = redroom::resposta();
         events::access(
             &app.state,
-            &host_raw,
-            method.as_str(),
-            &path_log,
-            r.status().as_u16(),
-            started.elapsed().as_millis(),
-            &origem,
+            &events::Acesso {
+                host: &host_raw,
+                method: method.as_str(),
+                path: &path_log,
+                status: r.status().as_u16(),
+                dur_ms: started.elapsed().as_millis(),
+                origem: &origem,
+                projeto: ev_projeto,
+                env: ev_env,
+            },
         );
         return r;
     }
@@ -260,12 +278,16 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                 let r = gate::resposta_bloqueado();
                 events::access(
                     &app.state,
-                    &host_raw,
-                    method.as_str(),
-                    &path_log,
-                    r.status().as_u16(),
-                    started.elapsed().as_millis(),
-                    &origem,
+                    &events::Acesso {
+                        host: &host_raw,
+                        method: method.as_str(),
+                        path: &path_log,
+                        status: r.status().as_u16(),
+                        dur_ms: started.elapsed().as_millis(),
+                        origem: &origem,
+                        projeto: ev_projeto,
+                        env: ev_env,
+                    },
                 );
                 return r;
             }
@@ -275,12 +297,16 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
                     gate::resposta_desafio(&path_log, &gate::turnstile_config(&app.state), None);
                 events::access(
                     &app.state,
-                    &host_raw,
-                    method.as_str(),
-                    &path_log,
-                    r.status().as_u16(),
-                    started.elapsed().as_millis(),
-                    &origem,
+                    &events::Acesso {
+                        host: &host_raw,
+                        method: method.as_str(),
+                        path: &path_log,
+                        status: r.status().as_u16(),
+                        dur_ms: started.elapsed().as_millis(),
+                        origem: &origem,
+                        projeto: ev_projeto,
+                        env: ev_env,
+                    },
                 );
                 return r;
             }
@@ -533,12 +559,16 @@ async fn handle(State((app, panel)): State<(Arc<AppState>, Router)>, req: Reques
 
     events::access(
         &app.state,
-        &host_raw,
-        method.as_str(),
-        &path_log,
-        resp.status().as_u16(),
-        started.elapsed().as_millis(),
-        &origem,
+        &events::Acesso {
+            host: &host_raw,
+            method: method.as_str(),
+            path: &path_log,
+            status: resp.status().as_u16(),
+            dur_ms: started.elapsed().as_millis(),
+            origem: &origem,
+            projeto: ev_projeto,
+            env: ev_env,
+        },
     );
     resp
 }

@@ -74,14 +74,19 @@ pub async fn beat(State(app): State<Arc<AppState>>, headers: HeaderMap) -> Respo
                     return tocar(&app.state, &name, Env::Dev);
                 }
                 tracing::debug!(target: "gate", host = %host_raw, "dev: beat externo sem confiança — retido");
+                let origem = crate::events::origem_de(&headers, true, &ip);
                 crate::events::access(
                     &app.state,
-                    host_raw,
-                    "POST",
-                    "/__flux/beat",
-                    404,
-                    started.elapsed().as_millis(),
-                    &crate::events::origem_de(&headers, true, &ip),
+                    &crate::events::Acesso {
+                        host: host_raw,
+                        method: "POST",
+                        path: "/__flux/beat",
+                        status: 404,
+                        dur_ms: started.elapsed().as_millis(),
+                        origem: &origem,
+                        projeto: "",
+                        env: "dev",
+                    },
                 );
                 return StatusCode::NOT_FOUND.into_response();
             }

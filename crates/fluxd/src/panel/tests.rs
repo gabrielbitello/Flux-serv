@@ -1486,6 +1486,22 @@ async fn sse_dashboard_pusha_so_quando_muda() {
         .unwrap();
     let (router2, _dir2) = painel_com_auth(&app).await;
     let cookie = cookie_de_sessao(&app, &router2).await;
+    // Alinha FORA do risco de virada de minuto: a curva tem buckets de 1 min
+    // e a virada muda o snapshot DE VERDADE (o bucket desloca de índice) —
+    // push nesse caso é comportamento correto, não violação do
+    // push-só-quando-muda. Abrindo o stream no segundo ≤45, o 1º push e os
+    // 7 s de silêncio ficam TODOS dentro do mesmo minuto (45+7 < 60).
+    loop {
+        let s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            % 60;
+        if s <= 45 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
     let (status, ctype, mut body) = {
         // abre o stream com sessão+LAN
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1549,6 +1565,324 @@ async fn sse_dashboard_pusha_so_quando_muda() {
     assert!(
         segundo.contains("dash-mudou-51"),
         "push na mudança: {segundo}"
+    );
+}
+
+// -------------------------------------------- contratos ip/host/meu_ip (03/11)
+
+/// Access sintético com IP e HOST de verdade (via events::access — MESMO
+/// caminho do router), pra testar os contratos novos do JSON.
+fn inserir_access(app: &Arc<AppState>, ip: &str, host: &str, path: &str) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_str(ip).unwrap(),
+    );
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host,
+            method: "GET",
+            path,
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::origem_de(&h, false, ip),
+            projeto: "",
+            env: "",
+        },
+    );
+}
+
+/// A lista de eventos carrega `ip`+`host` de cada linha e o `meu_ip` da
+/// request — os badges "é você"/"infra" do painel dependem dos três.
+#[tokio::test]
+async fn api_eventos_carrega_ip_host_e_meu_ip() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    inserir_access(&app, "192.168.140.9", "teste-d.bitello.xyz", "/pedidos");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, body) = pedir_api(
+        &app,
+        router,
+        "/api/events",
+        None,
+        &[
+            ("x-forwarded-for", "192.168.140.50".into()),
+            ("authorization", format!("Bearer {TOKEN_LEITURA}")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ev = &d["eventos"][0];
+    assert_eq!(ev["ip"], "192.168.140.9", "ip da linha no JSON: {body}");
+    assert_eq!(ev["host"], "teste-d.bitello.xyz", "host no JSON: {body}");
+    assert_eq!(
+        d["meu_ip"], "192.168.140.50",
+        "meu_ip = o IP da REQUEST (XFF), não do evento: {body}"
+    );
+}
+
+/// O frame do SSE carrega ip+host — o append AO VIVO usa pros mesmos badges.
+#[tokio::test]
+async fn sse_eventos_follow_frame_carrega_ip_host() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    inserir_access(&app, "203.0.113.77", "loja.bitello.xyz", "/carrinho");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (_, _, mut body) = abrir_sse(&app, router, "/api/events/follow?desde=0").await;
+    let frame = ler_ate(&mut body, "/carrinho", 10).await;
+    assert!(
+        frame.contains("\"ip\":\"203.0.113.77\"")
+            && frame.contains("\"host\":\"loja.bitello.xyz\""),
+        "frame sem ip/host: {frame}"
+    );
+}
+
+/// BUG achado (03/11): o SELECT do detalhe tinha `'\'` no Rust = aspa
+/// ESCAPADA — o SQL saía com aspa aberta, o prepare falhava e o
+/// unwrap_or_default engolia: a lista de eventos do detalhe voltava vazia
+/// SEMPRE. Agora a lista menciona o projeto.
+#[tokio::test]
+async fn detalhe_lista_eventos_do_projeto() {
+    let app = app_sem_docker();
+    app.state
+        .register_project("vipa", "name = \"vipa\"", "h")
+        .unwrap();
+    crate::events::event(&app.state, "info", "up", "flux-vipa-dev acordou (wake)");
+    crate::events::event(&app.state, "info", "sync", "flux-outro: sem relação");
+    let snap = super::leitura::detalhe(&app, "vipa", None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !snap.eventos.is_empty(),
+        "detalhe SEM os eventos do projeto = bug do escape, de novo"
+    );
+    assert!(snap.eventos.iter().all(|e| e.message.contains("vipa")));
+}
+
+/// Card "últimos 15 min": warn da janela entra, warn velho e info ficam fora;
+/// o total é a verdade da janela (não do teto da lista).
+#[tokio::test]
+async fn ultimos15_janela_e_nivel() {
+    let app = app_sem_docker();
+    crate::events::event(&app.state, "warn", "teste", "warn-15min-dentro");
+    crate::events::event(&app.state, "info", "teste", "info-15min-fora");
+    app.state
+        .with(|c| {
+            c.execute(
+                "INSERT INTO events(level, scope, message, created_at) \
+                 VALUES ('warn', 'teste', 'warn-velho-fora', datetime('now', '-20 minutes'))",
+                [],
+            )
+        })
+        .unwrap();
+    let (lista, total) = super::leitura::ultimos15(&app).unwrap();
+    assert_eq!(total, 1, "total da janela de 15 min: {total}");
+    assert_eq!(lista.len(), 1);
+    assert_eq!(lista[0].message, "warn-15min-dentro");
+}
+
+/// A curva obedece a janela pedida (buckets = minutos) e o teto de 24 h.
+#[tokio::test]
+async fn curva_janela_por_minutos() {
+    let app = app_sem_docker();
+    crate::events::event(&app.state, "info", "teste", "curva-janela-1");
+    let (conts10, _, _) = super::leitura::curva_contagem(&app, 10).unwrap().unwrap();
+    assert_eq!(conts10.len(), 10);
+    let (conts_teto, _, _) = super::leitura::curva_contagem(&app, 999_999)
+        .unwrap()
+        .unwrap();
+    assert_eq!(conts_teto.len(), 24 * 60, "clamp no teto de 24 h");
+}
+
+/// `?minutos=` da API: 10 vira 10 buckets; lixo e absurdo caem no default
+/// (1440) — a curva nunca quebra a página por query malformada.
+#[tokio::test]
+async fn dashboard_minutos_na_query() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    crate::events::event(&app.state, "info", "teste", "dash-minutos-1");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let headers = |token: &str| {
+        vec![
+            ("x-forwarded-for", "192.168.140.50".to_owned()),
+            ("authorization", format!("Bearer {token}")),
+        ]
+    };
+    let (_, b1) = pedir_api(
+        &app,
+        router.clone(),
+        "/api/dashboard?minutos=10",
+        None,
+        &headers(TOKEN_LEITURA),
+    )
+    .await;
+    let d1: serde_json::Value = serde_json::from_str(&b1).unwrap();
+    assert_eq!(
+        d1["curva"]["conts"].as_array().map(|a| a.len()),
+        Some(10),
+        "?minutos=10 → 10 buckets: {b1}"
+    );
+    for q in ["?minutos=lixo", "?minutos=999999", ""] {
+        let (_, b) = pedir_api(
+            &app,
+            router.clone(),
+            &format!("/api/dashboard{q}"),
+            None,
+            &headers(TOKEN_LEITURA),
+        )
+        .await;
+        let d: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(
+            d["curva"]["conts"].as_array().map(|a| a.len()),
+            Some(1440),
+            "{q} → default 1440"
+        );
+        assert_eq!(d["meu_ip"], "192.168.140.50", "meu_ip no snapshot ({q})");
+    }
+}
+
+// ------------------------------------------ página /projetos + rework (03/11)
+
+/// A página nova de listagem segue o padrão das outras: sessão obrigatória
+/// (herdada do guard) e shell estática com o componente próprio.
+#[tokio::test]
+async fn pagina_projetos_exige_sessao_e_serve_shell() {
+    let app = app_sem_docker();
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, headers, _) = pedir(&app, router.clone(), "GET", "/projetos", None, None).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "auth herdada do guard");
+    assert_eq!(
+        headers.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        Some("/login"),
+        "sem sessão manda pro login como qualquer rota"
+    );
+    let (status, _, shell) = get(&app, "/projetos").await;
+    assert_eq!(status, StatusCode::OK, "com sessão a listagem responde");
+    assert!(shell.contains("projetosPage"), "componente: {shell}");
+}
+
+/// Nav nova + cliente do rework: TODAS as shells apontam pra /projetos e o
+/// painel.js traz os contratos da fatia (toggle compartilhado, gap do
+/// agrupamento, janela da curva no SSE, anomalia com pista, doctor neutro).
+#[tokio::test]
+async fn nav_e_cliente_do_rework_do_dashboard() {
+    let app = app_sem_docker();
+    for uri in ["/", "/projetos", "/events", "/projects/vipers", "/observe"] {
+        let (_, _, shell) = get(&app, uri).await;
+        assert!(
+            shell.contains("href=\"/projetos\""),
+            "nav de {uri} sem link /projetos"
+        );
+    }
+    let (_, _, js) = get(&app, "/assets/painel.js").await;
+    for pedaco in [
+        "projetosPage",
+        "flux.ocultar_meus",              // toggle compartilhado dash×events
+        "GAP_GRUPO_MS",                   // agrupar ×N só dentro de 30 min
+        "/api/dashboard/follow?minutos=", // janela da curva no SSE
+        "linkAnomalia",                   // anomalia clicável com pista
+        "nunca-subiu",                    // doctor neutro pintado de cinza
+        "porPagina: 6",                   // 6 projetos por página
+    ] {
+        assert!(js.contains(pedaco), "painel.js sem `{pedaco}`");
+    }
+    assert!(!js.contains("innerHTML"), "innerHTML continua proibido");
+    // Toggle presente nas duas páginas que filtram por "meu IP".
+    let (_, _, dash) = get(&app, "/").await;
+    let (_, _, eventos) = get(&app, "/events").await;
+    assert!(dash.contains("ocultarMeus"), "toggle no dashboard");
+    assert!(eventos.contains("ocultarMeus"), "toggle no /events");
+    // Curva nova é Chart.js (o sparkline de barras não volta).
+    assert!(
+        dash.contains("/assets/chart.umd.min.js"),
+        "Chart.js na shell do dashboard"
+    );
+}
+
+/// Cards de projeto são o MESMO bloco no dashboard e na listagem — a shell
+/// duplica o markup de propósito (estática, sem build); o teste trava a
+/// PARIDADE das bindings pra duplicação não virar drift de contrato.
+#[tokio::test]
+async fn cards_de_projeto_espelhados_nas_duas_shells() {
+    let app = app_sem_docker();
+    let (_, _, dash) = get(&app, "/").await;
+    let (_, _, lista) = get(&app, "/projetos").await;
+    for binding in [
+        "acordar(p.nome)",
+        "p.dev_host",
+        "p.prod_host",
+        "e.sono_erro",
+        "p.sync.last_error",
+        "dotDe(e.estado)",
+        "'/projects/' + encodeURIComponent(p.nome)",
+    ] {
+        assert!(dash.contains(binding), "dashboard sem `{binding}`");
+        assert!(lista.contains(binding), "projetos sem `{binding}`");
+    }
+}
+
+/// Cache-busting (03/11): TODAS as shells apontam os assets com `?v=<hash>`
+/// REAL (o placeholder sai na hora do serve) e os assets saem com cache
+/// longo + immutable — conteúdo novo vira URL nova, e a borda (CF) nunca
+/// mais serve JS velho com shell nova. O deploy de 03/11 ficou horas assim:
+/// shell usando `visiveis`, painel.js cached sem o getter — erro direto no
+/// console do celular do Gabriel.
+#[tokio::test]
+async fn assets_com_versao_e_cache_imutavel() {
+    let app = app_sem_docker();
+    for uri in ["/", "/projetos", "/events", "/projects/vipers", "/observe"] {
+        let (_, _, shell) = get(&app, uri).await;
+        assert!(
+            shell.contains("/assets/painel.js?v="),
+            "{uri} sem versão nos assets"
+        );
+        assert!(
+            !shell.contains("__ASSETS_V__"),
+            "{uri} serviu o placeholder CRU — handler não substituiu"
+        );
+    }
+    let (_, headers, _) = get(&app, "/assets/painel.js").await;
+    let cc = headers
+        .get(header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cc.contains("immutable") && cc.contains("max-age=31536000"),
+        "cache-control dos assets: {cc}"
+    );
+}
+
+/// Dois crashes do 1º deploy no celular do Gabriel (console 03/11):
+/// (1) `snap.ultimos15_total` em x-text CRU — x-text avalia MESMO com
+///     x-show falso, snap=null na 1ª renderização estourava;
+/// (2) Chart guardado em ESTADO do Alpine — o proxy wrapa a instância e o
+///     SET `chart.data = …` do update entra em loop com o getter interno
+///     ("too much recursion"). A instância tem que viver fora do componente.
+#[tokio::test]
+async fn dashboard_sem_os_dois_crashes_do_primeiro_deploy() {
+    let app = app_sem_docker();
+    let (_, _, dash) = get(&app, "/").await;
+    assert!(
+        dash.contains("snap && snap.ultimos15_total > 0 ? ("),
+        "x-text do 15min tem que carregar o guard NELE (x-show não impede avaliação)"
+    );
+    assert!(
+        !dash.contains("x-text=\"'— ' + snap."),
+        "x-text cru acessando snap sem guard"
+    );
+    let (_, _, js) = get(&app, "/assets/painel.js").await;
+    assert!(
+        js.contains("let curvaChart"),
+        "instância do Chart fora do estado reativo"
+    );
+    // O /observe usa this.graficos (destroy+recreate, sem SET de .data no
+    // proxy — escapou do loop). O padrão PROIBIDO é ler/atribuir o chart
+    // singular: "this.grafico." casaria em "this.graficos" — por isso o dot.
+    assert!(
+        !js.contains("this.grafico.") && !js.contains("if (this.grafico)"),
+        "Chart NUNCA em propriedade do componente (proxy do Alpine recursa)"
     );
 }
 
@@ -1922,21 +2256,29 @@ async fn eventos_filtram_por_host_e_ambiente() {
     // access COM host de dev e de prod + evento interno (sem host).
     crate::events::access(
         &app.state,
-        "vipers-d.bitello.xyz",
-        "GET",
-        "/",
-        200,
-        3,
-        &crate::events::Origem::local(),
+        &crate::events::Acesso {
+            host: "vipers-d.bitello.xyz",
+            method: "GET",
+            path: "        ",
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::Origem::local(),
+            projeto: "",
+            env: "",
+        },
     );
     crate::events::access(
         &app.state,
-        "vippers.bitello.xyz",
-        "GET",
-        "/",
-        200,
-        3,
-        &crate::events::Origem::local(),
+        &crate::events::Acesso {
+            host: "vippers.bitello.xyz",
+            method: "GET",
+            path: "        ",
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::Origem::local(),
+            projeto: "",
+            env: "",
+        },
     );
     crate::events::event(&app.state, "info", "painel", "interno sem host");
 
@@ -1985,12 +2327,16 @@ async fn api_eventos_filtra_por_ambiente_e_lista_hosts() {
     let app = app_sem_docker();
     crate::events::access(
         &app.state,
-        "djm-d.bitello.xyz",
-        "GET",
-        "/cms",
-        200,
-        3,
-        &crate::events::Origem::local(),
+        &crate::events::Acesso {
+            host: "djm-d.bitello.xyz",
+            method: "GET",
+            path: "        ",
+            status: 200,
+            dur_ms: 3,
+            origem: &crate::events::Origem::local(),
+            projeto: "",
+            env: "",
+        },
     );
     let (router, _dir) = painel_com_auth(&app).await;
     let cookie = cookie_de_sessao(&app, &router).await;
@@ -2189,5 +2535,240 @@ async fn painel_nao_manda_mais_no_referrer() {
     assert_eq!(
         pol, "strict-origin-when-cross-origin",
         "referrer-policy do painel: {pol}"
+    );
+}
+
+/// O script do live_off NÃO pode se matar: o cmdline do próprio shell
+/// carrega o literal `*node*` do case, então sem o guard de `$$` o loop
+/// mandava SIGTERM pra ele mesmo (exit 143 = 128+15) antes do rm/echo —
+/// "ação live_off dev em vippers: FALHOU: exit 143" ao vivo no 04/11.
+/// O teste trava o guard E prova que ele é necessário (o texto do shell
+/// de fato casa com o padrão).
+#[test]
+fn live_off_nao_mata_o_proprio_shell() {
+    let cmd = super::acoes::cmd_live_off();
+    assert!(
+        cmd.contains("[ \"$d\" = \"/proc/$$\" ] && continue"),
+        "guard do próprio pid ausente no script do live_off"
+    );
+    // Sem o guard, o próprio shell casaria com *node* — a prova de que o
+    // guard não é decorativo.
+    let cmdline_do_shell = format!("sh -c {cmd}");
+    assert!(
+        cmdline_do_shell.contains("node"),
+        "cmdline do shell deveria casar com *node* (senão o guard é desnecessário)"
+    );
+}
+
+/// Schema v8 (04/11): access do router nasce com emissor (projeto/env) e
+/// código de resposta (st); evento interno fica vazio/null — a borda é
+/// deliberada (emissor por coluna nos access, mensagem nos internos).
+#[tokio::test]
+async fn access_grava_emissor_e_st_v8() {
+    let app = app_sem_docker();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.5"),
+    );
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "loja.bitello.xyz",
+            method: "GET",
+            path: "produtos",
+            status: 502,
+            dur_ms: 9,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.5"),
+            projeto: "vippers",
+            env: "prod",
+        },
+    );
+    crate::events::event(&app.state, "info", "up", "interno sem emissor");
+    let rows: Vec<(String, String, Option<i64>)> = app
+        .state
+        .with(|c| {
+            let mut stmt = c.prepare("SELECT projeto, env, st FROM events ORDER BY id ASC")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .unwrap();
+    let (proj, env, st) = &rows[0];
+    assert_eq!(proj, "vippers", "projeto do access na coluna: {rows:?}");
+    assert_eq!(env, "prod");
+    assert_eq!(*st, Some(502), "código de resposta na coluna: {rows:?}");
+    let (proj2, env2, st2) = &rows[1];
+    assert_eq!(proj2, "", "interno sem projeto");
+    assert_eq!(env2, "");
+    assert_eq!(*st2, None, "interno sem st");
+}
+
+/// Filtro ?projeto= (04/11): casa a COLUNA nos access v8+ e, pra linha
+/// antiga/interna (coluna vazia), o nome citado na mensagem — o filtro
+/// nunca encolhe o histórico.
+#[tokio::test]
+async fn filtro_projeto_casa_coluna_e_mensagem() {
+    let app = app_sem_docker();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.6"),
+    );
+    // access NOVO: coluna preenchida, mensagem SEM o nome do projeto.
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "outra-cosia.bitello.xyz",
+            method: "GET",
+            path: "sem-vipa-no-texto",
+            status: 200,
+            dur_ms: 1,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.6"),
+            projeto: "vipa",
+            env: "dev",
+        },
+    );
+    // interno antigo: coluna vazia, nome citado na mensagem.
+    crate::events::event(&app.state, "info", "up", "flux-vipa-dev acordou (wake)");
+    // fora do filtro nos dois mundos.
+    crate::events::event(&app.state, "info", "up", "flux-outro: nada a ver");
+    let filtro = super::leitura::FiltroEventos {
+        projeto: Some("vipa".into()),
+        ..Default::default()
+    };
+    let (_, rows, total) = super::leitura::eventos_filtrados(&app, 1, 50, &filtro).unwrap();
+    assert_eq!(total, 2, "coluna + mensagem: {rows:?}");
+    assert!(
+        rows.iter()
+            .all(|r| r.projeto == "vipa" || r.message.contains("vipa"))
+    );
+}
+
+/// O detalhe do projeto ganha a coluna: access cujo TEXTO não menciona o
+/// nome mas cuja COLUNA diz o projeto entra na lista (era invisível na
+/// era do LIKE puro).
+#[tokio::test]
+async fn detalhe_cobre_projeto_por_coluna() {
+    let app = app_sem_docker();
+    app.state
+        .register_project("vipa", "name = \"vipa\"", "h")
+        .unwrap();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.7"),
+    );
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "dominio-alheio.bitello.xyz",
+            method: "GET",
+            path: "texto-sem-vipa",
+            status: 200,
+            dur_ms: 1,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.7"),
+            projeto: "vipa",
+            env: "dev",
+        },
+    );
+    let snap = super::leitura::detalhe(&app, "vipa", None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        snap.eventos.iter().any(|e| e.projeto == "vipa"),
+        "detalhe pela COLUNA de projeto: {:?}",
+        snap.eventos
+    );
+}
+
+/// API `/api/events?projeto=` server-side (04/11) + frame do SSE carregando
+/// emissor e st — o append ao vivo usa os mesmos badges da lista.
+#[tokio::test]
+async fn api_eventos_filtro_projeto_e_frame_emissor() {
+    let app = app_sem_docker();
+    gravar_token_leitura(&app);
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_static("203.0.113.8"),
+    );
+    crate::events::access(
+        &app.state,
+        &crate::events::Acesso {
+            host: "loja-d.bitello.xyz",
+            method: "GET",
+            path: "no-filtro",
+            status: 429,
+            dur_ms: 2,
+            origem: &crate::events::origem_de(&h, false, "203.0.113.8"),
+            projeto: "vippers",
+            env: "dev",
+        },
+    );
+    crate::events::event(&app.state, "info", "up", "flux-outro: fora");
+    let (router, _dir) = painel_com_auth(&app).await;
+    let (status, body) = pedir_api(
+        &app,
+        router,
+        "/api/events?projeto=vippers",
+        None,
+        &[
+            ("x-forwarded-for", "192.168.140.50".into()),
+            ("authorization", format!("Bearer {TOKEN_LEITURA}")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["total"], 1, "só o access com a coluna: {body}");
+    let ev = &d["eventos"][0];
+    assert_eq!(ev["projeto"], "vippers");
+    assert_eq!(ev["env"], "dev");
+    assert_eq!(ev["st"], 429, "código de resposta no JSON: {body}");
+}
+
+/// Intenção manual do live (04/11): off pelo painel grava o hash do toml;
+/// toml mudou = intenção EXPIRA (apaga) e o acordar volta a religar — CLI
+/// e painel convergem sem o CLI saber do marcador.
+#[test]
+fn live_intencao_expira_quando_toml_muda() {
+    let app = app_sem_docker();
+    let toml_a = "name = \"vipa\"\n[dev]\nlive = \"npm run dev\"";
+    let toml_b = "name = \"vipa\"\n[dev]\nlive = \"npm run dev -- --host\"\n[x] novo = 1";
+    crate::compose::live_intencao_off_gravar(&app.state, "vipa", toml_a);
+    assert!(
+        crate::compose::live_intencao_off(&app.state, "vipa", toml_a),
+        "toml intacto = intenção vale"
+    );
+    assert!(
+        !crate::compose::live_intencao_off(&app.state, "vipa", toml_b),
+        "toml mudou = intenção expira"
+    );
+    assert!(
+        !crate::compose::live_intencao_off(&app.state, "vipa", toml_a),
+        "expirada APAGA o marcador: nem o toml original vale de novo"
+    );
+}
+
+/// O detalhe carrega off_manual no LiveJson — o botão único do painel usa
+/// isso pra explicar pro operador que o wake NÃO religa.
+#[tokio::test]
+async fn detalhe_mostra_off_manual_no_live() {
+    let app = app_sem_docker();
+    let toml = "name = \"vipa\"";
+    app.state.register_project("vipa", toml, "h").unwrap();
+    crate::compose::live_intencao_off_gravar(&app.state, "vipa", toml);
+    let snap = super::leitura::detalhe(&app, "vipa", Some((true, true)))
+        .unwrap()
+        .unwrap();
+    let live = snap.live.expect("live medido");
+    assert!(live.off_manual, "intenção válida aparece no JSON");
+    crate::compose::live_intencao_limpar(&app.state, "vipa");
+    let snap = super::leitura::detalhe(&app, "vipa", Some((true, true)))
+        .unwrap()
+        .unwrap();
+    assert!(
+        !snap.live.expect("live medido").off_manual,
+        "limpar a intenção volta o estado neutro"
     );
 }

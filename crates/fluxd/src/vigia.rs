@@ -318,6 +318,14 @@ fn recargas_anomalas(st: &State) -> Result<Vec<RecargaAnomala>, String> {
     let mut contagem: HashMap<(String, String, String), i64> = HashMap::new();
     for (ip, message) in &linhas {
         if let Some((caminho, host)) = caminho_host(message) {
+            // API não é recarga de página (03/11): os GETs do próprio painel
+            // (/api/* — fetch de snapshot, SSE de follow) bateriam na régua
+            // quando vários painéis abertos reconectam junto (4G trocando de
+            // torre, fluxd reiniciado). Burst de reconexão não é reload — quem
+            // martela /api/* continua coberto pela régua de 3 min.
+            if caminho.starts_with("/api/") {
+                continue;
+            }
             *contagem
                 .entry((ip.clone(), host.to_owned(), caminho.to_owned()))
                 .or_insert(0) += 1;
@@ -524,6 +532,45 @@ mod tests {
         // Cooldown: ciclo imediatamente seguinte NÃO duplica.
         ciclo(state(&a));
         assert_eq!(anomalias(state(&a)), 1, "cooldown de 15 min segura");
+    }
+
+    /// Painel com vários navegadores abertos reconectando o SSE junto (5
+    /// painéis, 2 em realtime, 03/11): burst de GET /api/* NÃO é recarga de
+    /// página — a régua de recarga ignora; a de página real segue viva.
+    #[test]
+    fn burst_da_api_do_painel_nao_e_recarga() {
+        let a = app();
+        for _ in 0..(BASE_RECARGA_POR_MIN * 3) {
+            acessar(
+                state(&a),
+                "203.0.113.9",
+                "GET",
+                "/api/dashboard/follow",
+                200,
+                "-30 seconds",
+            );
+            acessar(
+                state(&a),
+                "203.0.113.10",
+                "GET",
+                "/api/events?page=2",
+                200,
+                "-30 seconds",
+            );
+        }
+        ciclo(state(&a));
+        assert_eq!(
+            anomalias(state(&a)),
+            0,
+            "martelada de /api/* não vira anomalia de recarga"
+        );
+        // A mesma rajada numa PÁGINA continua disparando (a régua não morreu):
+        let b = app();
+        for _ in 0..(BASE_RECARGA_POR_MIN + 1) {
+            acessar(state(&b), "203.0.113.9", "GET", "/", 200, "-30 seconds");
+        }
+        ciclo(state(&b));
+        assert_eq!(anomalias(state(&b)), 1, "recarga de página segue detectada");
     }
 
     #[test]

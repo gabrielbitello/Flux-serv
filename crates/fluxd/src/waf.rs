@@ -415,7 +415,7 @@ where
                 true,
                 &ip.map(|i| i.to_string()).unwrap_or_default(),
             );
-            crate::events::event_com_ip(
+            crate::events::event_com_ip_st(
                 &app.state,
                 "warn",
                 "waf",
@@ -431,6 +431,7 @@ where
                     )
                 ),
                 &ip.map(|i| i.to_string()).unwrap_or_default(),
+                403,
             );
             let wants_json = decision::wants_json(parts.headers.get(header::ACCEPT), &path);
             Ok(bloqueado(wants_json))

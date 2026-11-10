@@ -7,16 +7,111 @@
    - Hora LOCAL do navegador; UTC fica no `cru` (escopo decidido com o
      Gabriel).
    - Append no topo COM scroll compensado: nada desliza sob os olhos.
-   - Agrupa repetidos em sequência (escopo+mensagem+nível) com contador ×N.
+   - Agrupa repetidos em sequência (escopo+mensagem+nível) com contador ×N,
+     SÓ dentro de 30 min de distância (03/11) — sequência que esfria não é
+     "em sequência".
    Componentes registrados via Alpine.data (porta aberta pro build CSP). */
+
+// ------------------------------------------------------------ formato (comum)
+// Fonte única de formatação/decisão compartilhada pelas páginas — o servidor
+// também tem um formato.rs; os contratos dos dois lados são espelhos.
+const formato = {
+  // MESMO formato de events.rs::linha_access — os dois lados têm de concordar.
+  RE_ACCESS: /^(\S+) (\S+) (\d{3}) (\d+)ms host=([^\s]+)/,
+  // IPs da própria infra (loopback, VM, host Windows do túnel): badge "host".
+  IPS_INFRA: ['127.0.0.1', '::1', '192.168.140.1', '192.168.140.2'],
+  // Janela máxima do agrupamento ×N (03/11).
+  GAP_GRUPO_MS: 30 * 60 * 1000,
+
+  // "YYYY-MM-DD HH:MM:SS" (UTC do banco) → Date local.
+  data(utc) {
+    return new Date(utc.replace(' ', 'T') + 'Z');
+  },
+  // Mesma data → hora LOCAL HH:MM:SS.
+  quando(utc) {
+    const d = this.data(utc);
+    if (isNaN(d)) return utc;
+    const p = (n) => String(n).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  },
+  // Access da mensagem (null quando não é linha de access).
+  parseAccess(msg) {
+    const m = this.RE_ACCESS.exec(msg);
+    return m
+      ? { metodo: m[1], caminho: m[2], status: m[3], st: this.stClasse(+m[3]), dur: m[4], host: m[5] }
+      : null;
+  },
+  // Mesmo mapeamento de formato.rs::classe_status (contrato).
+  stClasse(s) {
+    return s >= 500 || s === 429 ? 'st-err' : s >= 400 ? 'st-warn' : s >= 300 ? 'st-3' : 'st-ok';
+  },
+  dotDe(level) {
+    const grave = level === 'warn' || level === 'error' || level === 'err';
+    return level === 'warn'
+      ? 'warn'
+      : grave && level !== 'warn'
+        ? 'err'
+        : 'idle';
+  },
+  linhaDe(level) {
+    const grave = level === 'warn' || level === 'error' || level === 'err';
+    return level === 'warn' ? 'lwarn' : grave && level !== 'warn' ? 'lerr' : '';
+  },
+  // Marca de origem do evento (03/11): "você" = ip do NAVEGADOR aberto
+  // (meuIp vem do snapshot, mesma régua ip_real do servidor); "host" = ip
+  // da infra. null = sem marca (internet ou evento interno).
+  marcaDe(ev, meuIp) {
+    if (meuIp && ev.ip === meuIp) return { classe: 'voce', rotulo: 'você' };
+    if (ev.ip && this.IPS_INFRA.includes(ev.ip)) return { classe: 'infra', rotulo: 'host' };
+    return null;
+  },
+  // O evento merece sumir no modo "ocultar meus eventos"? SÓ info vinda do
+  // meu IP (warn/error meu continuam visíveis — falha minha é sinal).
+  eMeuInfo(ev, meuIp) {
+    return !!meuIp && ev.ip === meuIp && ev.level === 'info';
+  },
+  // Link de investigação do evento: access → /events do host de origem;
+  // sem host → busca pelo host da linha; interno → o escopo.
+  linkDe(ev) {
+    if (ev.host) return '/events?host=' + encodeURIComponent(ev.host);
+    const a = this.parseAccess(ev.message);
+    if (a) return '/events?q=' + encodeURIComponent(a.host);
+    return '/events?escopo=' + encodeURIComponent(ev.scope);
+  },
+  // Anomalia do vigia → /events com a PISTA que o evento carrega: o ip do
+  // ofensor (coluna ip) ou o caminho citado no texto ("caminho `/x`").
+  linkAnomalia(ev) {
+    if (ev.ip) return '/events?q=' + encodeURIComponent(ev.ip);
+    const m = /caminho `([^`]+)`/.exec(ev.message);
+    if (m) return '/events?q=' + encodeURIComponent(m[1]);
+    return '/events?escopo=anomalia';
+  },
+  // Emissor (schema v8): tag "projeto" dos access do router — null nos
+  // internos/antigos (coluna vazia). O clique abre o /events filtrado pela
+  // coluna (?projeto=), com fallback de mensagem no servidor.
+  tagProjeto(ev) {
+    if (!ev.projeto) return null;
+    return { classe: ev.env === 'dev' || ev.env === 'prod' ? ev.env : 'infra', rotulo: ev.projeto };
+  },
+  // Código de resposta (schema v8): coluna nos access/waf novos; fallback =
+  // parse da mensagem (linhas antigas). null = sem código.
+  stDe(ev) {
+    if (ev.st != null) return { code: ev.st, classe: this.stClasse(ev.st) };
+    const a = this.parseAccess(ev.message);
+    return a ? { code: +a.status, classe: this.stClasse(+a.status) } : null;
+  },
+};
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('eventosPage', () => ({
+    formato, // helpers compartilhados expostos pros templates
     escopos: [],
     escopo: '',
     nivel: '',
     busca: '',
     host: '',
     ambiente: '',
+    projeto: '',
     hosts: [],
     eventos: [], // grupos, mais novo primeiro
     total: 0,
@@ -34,18 +129,23 @@ document.addEventListener('alpine:init', () => {
     timerBusca: null,
     observer: null,
     janela: [], // access dos últimos 5 min {t, st}
-
-    // MESMO formato de events.rs::linha_access — os dois lados têm de
-    // concordar; o teste Rust fixa a forma.
-    RE_ACCESS: /^(\S+) (\S+) (\d{3}) (\d+)ms host=([^\s]+)/,
+    meuIp: '', // IP real da request (mesma régua do servidor)
+    ocultarMeus: false, // toggle: esconde os eventos de INFO do meu IP
 
     async init() {
+      // URL vence o localStorage: os cliques do painel (anomalia, evento,
+      // tag de projeto) chegam como ?escopo=/?host=/?projeto=/?q= — sem
+      // isso o link caía SEM filtro (buraco do rework, 04/11).
+      const q = new URLSearchParams(location.search);
       const salvo = JSON.parse(localStorage.getItem('flux.eventos.filtros') || '{}');
-      this.escopo = salvo.escopo || '';
-      this.nivel = salvo.nivel || '';
-      this.busca = salvo.busca || '';
-      this.host = salvo.host || '';
-      this.ambiente = salvo.ambiente || '';
+      const pega = (k, salvoK) => q.get(k) || salvo[salvoK] || '';
+      this.escopo = pega('escopo', 'escopo');
+      this.nivel = pega('nivel', 'nivel');
+      this.busca = pega('q', 'busca');
+      this.host = pega('host', 'host');
+      this.ambiente = pega('ambiente', 'ambiente');
+      this.projeto = pega('projeto', 'projeto');
+      this.ocultarMeus = localStorage.getItem('flux.ocultar_meus') === '1';
       await this.recarregar();
       this.conectar();
       this.observer = new IntersectionObserver((entradas) => {
@@ -55,6 +155,18 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => this.podaJanela(), 30000);
     },
 
+    // Grupos visíveis com o toggle ligado: info VINDO DO MEU IP sai; warn e
+    // erro meu continuam (falha minha é sinal, ruído meu é lixo).
+    get visiveis() {
+      if (!this.ocultarMeus || !this.meuIp) return this.eventos;
+      return this.eventos.filter((g) => !formato.eMeuInfo(g, this.meuIp));
+    },
+
+    alternarMeus() {
+      this.ocultarMeus = !this.ocultarMeus;
+      localStorage.setItem('flux.ocultar_meus', this.ocultarMeus ? '1' : '0');
+    },
+
     urlFiltros(extra) {
       const qs = new URLSearchParams();
       if (this.escopo) qs.set('escopo', this.escopo);
@@ -62,6 +174,7 @@ document.addEventListener('alpine:init', () => {
       if (this.busca) qs.set('q', this.busca);
       if (this.host) qs.set('host', this.host);
       if (this.ambiente) qs.set('ambiente', this.ambiente);
+      if (this.projeto) qs.set('projeto', this.projeto);
       if (extra) for (const [k, v] of Object.entries(extra)) qs.set(k, v);
       return qs.toString();
     },
@@ -74,6 +187,7 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         this.escopos = d.escopos || [];
         this.hosts = d.hosts || [];
+        this.meuIp = d.meu_ip || '';
         this.total = d.total;
         this.pagina = d.pagina;
         this.paginas = d.paginas;
@@ -99,6 +213,7 @@ document.addEventListener('alpine:init', () => {
           busca: this.busca,
           host: this.host,
           ambiente: this.ambiente,
+          projeto: this.projeto,
         }),
       );
       this.eventos = [];
@@ -144,11 +259,17 @@ document.addEventListener('alpine:init', () => {
       this.dobra(ev, true);
     },
 
-    // Junta no grupo de cima quando escopo+mensagem+nível coincidem (×N).
+    // Junta no grupo de cima quando escopo+mensagem+nível coincidem E a
+    // distância pro anterior é ≤ 30 min (03/11): sequência que esfria vira
+    // grupo novo — ×N não mente "em sequência".
     dobra(ev, aoVivo) {
       const g = this.grupoDe(ev);
       const topo = this.eventos[0];
-      if (topo && topo.chave === g.chave) {
+      const noGap =
+        topo &&
+        topo.chave === g.chave &&
+        formato.data(g.ultimo) - formato.data(topo.times[0]) <= formato.GAP_GRUPO_MS;
+      if (noGap) {
         topo.count++;
         topo.times.unshift(g.times[0]);
         topo.ultimo = g.ultimo;
@@ -161,42 +282,24 @@ document.addEventListener('alpine:init', () => {
     },
 
     grupoDe(ev) {
-      const m = this.RE_ACCESS.exec(ev.message);
-      const grave = ev.level === 'warn' || ev.level === 'error' || ev.level === 'err';
       const g = {
         chave: ev.scope + '\u0000' + ev.message,
         message: ev.message,
         scope: ev.scope,
         level: ev.level,
+        ip: ev.ip || '',
+        host: ev.host || '',
+        projeto: ev.projeto || '',
+        env: ev.env || '',
+        st: ev.st == null ? null : ev.st,
         times: [ev.created_at],
         ultimo: ev.created_at,
         count: 1,
-        dot: ev.level === 'warn' ? 'warn' : grave && ev.level !== 'warn' ? 'err' : 'idle',
-        linha: ev.level === 'warn' ? 'lwarn' : grave && ev.level !== 'warn' ? 'lerr' : '',
-        access: null,
+        dot: formato.dotDe(ev.level),
+        linha: formato.linhaDe(ev.level),
+        access: formato.parseAccess(ev.message),
       };
-      if (m) {
-        g.access = {
-          metodo: m[1],
-          caminho: m[2],
-          status: m[3],
-          st: this.stClasse(+m[3]),
-          dur: m[4],
-          host: m[5],
-        };
-      }
       return g;
-    },
-
-    // Mesmo mapeamento de formato.rs::classe_status.
-    stClasse(s) {
-      return s >= 500 || s === 429
-        ? 'st-err'
-        : s >= 400
-          ? 'st-warn'
-          : s >= 300
-            ? 'st-3'
-            : 'st-ok';
     },
 
     // Append no topo não desliza o conteúdo: mede o empurrão do corpo da
@@ -218,10 +321,17 @@ document.addEventListener('alpine:init', () => {
         if (!r.ok) throw new Error('api ' + r.status);
         const d = await r.json();
         for (const ev of d.eventos) {
-          // DESC: apenda no fim; dobra com a calda se a sequência continua.
+          // DESC: apenda no fim; dobra com a calda se a sequência continua
+          // (mesma régua de 30 min — o tempo MAIS ANTIGO da calda é quem
+          // encosta no evento mais velho que está chegando).
           const g = this.grupoDe(ev);
           const calda = this.eventos[this.eventos.length - 1];
-          if (calda && calda.chave === g.chave) {
+          const maisVelho = calda ? calda.times[calda.times.length - 1] : null;
+          const noGap =
+            maisVelho &&
+            calda.chave === g.chave &&
+            formato.data(maisVelho) - formato.data(g.ultimo) <= formato.GAP_GRUPO_MS;
+          if (noGap) {
             calda.count++;
             calda.times.push(g.times[0]);
             this.eventos.splice(this.eventos.length - 1, 1, { ...calda });
@@ -237,9 +347,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     medir(ev) {
-      const m = this.RE_ACCESS.exec(ev.message);
+      const m = formato.parseAccess(ev.message);
       if (!m) return;
-      this.janela.push({ t: Date.now() / 1000, st: +m[3] });
+      this.janela.push({ t: Date.now() / 1000, st: +m.status });
       this.podaJanela();
     },
 
@@ -287,17 +397,19 @@ document.addEventListener('alpine:init', () => {
 
     // "YYYY-MM-DD HH:MM:SS" (UTC do banco) → hora LOCAL do navegador.
     quando(utc) {
-      const d = new Date(utc.replace(' ', 'T') + 'Z');
-      if (isNaN(d)) return utc;
-      const p = (n) => String(n).padStart(2, '0');
-      return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+      return formato.quando(utc);
     },
   }));
 });
 
 // ------------------------------------------------------------------ dashboard
 document.addEventListener('alpine:init', () => {
+  // Instância do Chart da curva FORA do estado reativo do Alpine (doc no
+  // desenharCurva). Observe usa destroy+recreate e escapa do loop; aqui o
+  // update é por SET de .data — pelo proxy do Alpine isso era recursão.
+  let curvaChart = null;
   Alpine.data('dashboardPage', () => ({
+    formato, // helpers compartilhados expostos pros templates
     snap: null,
     saude: null,
     saudeErro: '',
@@ -310,6 +422,19 @@ document.addEventListener('alpine:init', () => {
     vivo: 'conectando…',
     acordando: {},
     es: null,
+    // Curva (03/11): janela em minutos + realtime (últimos 10 min via SSE —
+    // o servidor coalesce os pushes em ≥300 ms). A instância do Chart NÃO
+    // mora aqui: ver curvaChart no escopo do módulo, logo acima.
+    janela: 1440,
+    realtime: false,
+    JANELAS: [1440, 720, 360, 60, 30, 15],
+    valorSelecionado: null,
+    // Projetos: 6 por página (03/11) — paginação no cliente, lista vem do
+    // snapshot.
+    porPagina: 6,
+    paginaProjetos: 1,
+    // Toggle "ocultar meus eventos" — MESMA chave do /events (03/11).
+    ocultarMeus: false,
 
     init() {
       const q = new URLSearchParams(location.search);
@@ -317,10 +442,232 @@ document.addEventListener('alpine:init', () => {
       else if (q.get('rescan') === 'falha') {
         this.aviso = 'rescan recusado — o motivo está nos eventos (escopo painel)';
       }
+      this.ocultarMeus = localStorage.getItem('flux.ocultar_meus') === '1';
       this.puxaSaude();
       setInterval(() => this.puxaSaude(), 60000);
       this.puxaLimiares();
       this.conectar();
+      // Tema do SO mudou → gráfico redesenha com as cores novas.
+      window
+        .matchMedia('(prefers-color-scheme: dark)')
+        .addEventListener('change', () => this.desenharCurva());
+    },
+
+    get meuIp() {
+      return (this.snap && this.snap.meu_ip) || '';
+    },
+
+    // "Últimos eventos" com o toggle ligado: info VINDO DO MEU IP sai
+    // (mesma regra do /events, MESMA chave de localStorage).
+    get visiveis() {
+      const lista = (this.snap && this.snap.eventos) || [];
+      if (!this.ocultarMeus || !this.meuIp) return lista;
+      return lista.filter((ev) => !formato.eMeuInfo(ev, this.meuIp));
+    },
+
+    alternarMeus() {
+      this.ocultarMeus = !this.ocultarMeus;
+      localStorage.setItem('flux.ocultar_meus', this.ocultarMeus ? '1' : '0');
+    },
+
+    // ------------------------------------------------------------ curva
+    // Janela mudou: busca o snapshot já na janela e REABRE o follow com o
+    // ?minutos= novo (o hash do push é por janela — fonte única no servidor).
+    async mudarJanela(v) {
+      this.valorSelecionado = null;
+      if (v === 'rt') {
+        this.realtime = true;
+        this.janela = 10;
+      } else {
+        this.realtime = false;
+        this.janela = v;
+      }
+      await this.puxar();
+      this.conectar();
+    },
+
+    async puxar() {
+      try {
+        const r = await fetch('/api/dashboard?minutos=' + this.janela);
+        if (!r.ok) throw new Error('api ' + r.status);
+        this.aplicarSnap(await r.json());
+      } catch (e) {
+        this.vivo = 'falhou: ' + e.message;
+      }
+    },
+
+    aplicarSnap(snap) {
+      this.snap = snap;
+      this.$nextTick(() => this.desenharCurva());
+    },
+
+    // Min/max/média POR MINUTO da janela (03/11) + onde está o pico.
+    stats() {
+      const c = this.snap && this.snap.curva ? this.snap.curva.conts : [];
+      if (!c.length) return null;
+      const max = Math.max(...c);
+      const media = c.reduce((a, b) => a + b, 0) / c.length;
+      return {
+        min: Math.min(...c),
+        max,
+        media: Math.round(media * 10) / 10,
+        maxIdx: c.indexOf(max),
+      };
+    },
+
+    // Hora local do bucket i (o ÚLTIMO bucket é o minuto corrente).
+    quandoBucket(i) {
+      const c = this.snap && this.snap.curva ? this.snap.curva.conts : [];
+      const agora = Math.floor(Date.now() / 60000) * 60000;
+      const d = new Date(agora - (c.length - 1 - i) * 60000);
+      const p = (n) => String(n).padStart(2, '0');
+      return p(d.getHours()) + ':' + p(d.getMinutes());
+    },
+
+    // Gráfico da curva (Chart.js vendido, MESMO padrão do observe): linha de
+    // eventos/min; CLIQUE no ponto fixa o valor selecionado (03/11).
+    // A instância vive em curvaChart (módulo, FORA do estado reativo):
+    // guardada no componente, o Alpine proxy-wraps o Chart e o SET
+    // `chart.data = …` do update entra em loop com o getter interno do
+    // próprio Chart — "too much recursion", console do Gabriel 03/11.
+    desenharCurva() {
+      if (!this.snap || !this.snap.curva || typeof Chart === 'undefined') return;
+      const cor = {
+        linha: this.corCss('--info') || '#58a6ff',
+        grade: this.corCss('--line') || '#262d37',
+        texto: this.corCss('--muted') || '#8b98a7',
+      };
+      const conts = this.snap.curva.conts;
+      const agora = Math.floor(Date.now() / 60000) * 60000;
+      const pontos = conts.map((v, i) => ({ x: agora - (conts.length - 1 - i) * 60000, y: v }));
+      const self = this;
+      if (curvaChart) {
+        curvaChart.data.datasets[0].data = pontos;
+        curvaChart.update('none');
+        return;
+      }
+      curvaChart = new Chart(this.$refs.curva.getContext('2d'), {
+        type: 'line',
+        data: {
+          datasets: [
+            {
+              label: 'eventos/min',
+              data: pontos,
+              borderColor: cor.linha,
+              backgroundColor: cor.linha,
+              pointRadius: 0,
+              borderWidth: 1.5,
+              tension: 0.25,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          animation: false,
+          maintainAspectRatio: false,
+          interaction: { mode: 'nearest', intersect: false },
+          onClick(_evt, els) {
+            if (!els.length) return;
+            const p = pontos[els[0].index];
+            self.valorSelecionado = {
+              quando: self.quandoBucket(els[0].index),
+              valor: p.y,
+              pico: self.stats() ? p.y === self.stats().max : false,
+            };
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: (itens) =>
+                  itens.length ? new Date(itens[0].parsed.x).toLocaleTimeString() : '',
+              },
+            },
+          },
+          scales: {
+            x: {
+              type: 'linear',
+              ticks: {
+                color: cor.texto,
+                maxTicksLimit: 6,
+                callback: (v) => new Date(v).toLocaleTimeString(),
+              },
+              grid: { color: cor.grade },
+            },
+            y: {
+              beginAtZero: true,
+              ticks: { color: cor.texto, precision: 0 },
+              grid: { color: cor.grade },
+            },
+          },
+        },
+      });
+    },
+
+    corCss(nome) {
+      return getComputedStyle(document.documentElement).getPropertyValue(nome).trim();
+    },
+
+    // ------------------------------------------------------------ vigia
+    // Idade do último ciclo em s (null = nunca rodou). O ciclo é de 60 s:
+    // ≤2 min saudável, até 10 min desconfiado, mais que isso = morto.
+    vigiaIdade() {
+      if (!this.snap || !this.snap.vigia_marca) return null;
+      return Math.max(0, Math.round(Date.now() / 1000 - parseInt(this.snap.vigia_marca, 10)));
+    },
+    vigiaDot() {
+      const s = this.vigiaIdade();
+      if (s === null) return 'idle';
+      return s <= 120 ? 'ok pulse' : s <= 600 ? 'warn' : 'err';
+    },
+    vigiaTexto() {
+      const s = this.vigiaIdade();
+      if (s === null) return 'nunca rodou';
+      const p = (n) => String(n).padStart(2, '0');
+      const d = new Date(parseInt(this.snap.vigia_marca, 10) * 1000);
+      const rel =
+        s < 60 ? s + ' s' : s < 3600 ? Math.round(s / 60) + ' min' : Math.round(s / 3600) + ' h';
+      return 'há ' + rel + ' (' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + ' local)';
+    },
+
+    // ------------------------------------------------------------ projetos
+    paginasProjetos() {
+      const n = this.snap ? this.snap.projetos.length : 0;
+      return Math.max(1, Math.ceil(n / this.porPagina));
+    },
+    projetosPagina() {
+      if (!this.snap) return [];
+      const ini = (this.paginaProjetos - 1) * this.porPagina;
+      return this.snap.projetos.slice(ini, ini + this.porPagina);
+    },
+    mudaPaginaProjetos(d) {
+      const novo = this.paginaProjetos + d;
+      if (novo >= 1 && novo <= this.paginasProjetos()) this.paginaProjetos = novo;
+    },
+
+    // Dot dos itens do doctor: NEUTRO (projeto que nunca subiu) é CINZA —
+    // verde pareceria "rodando" e vermelho alarmaria à toa (03/11).
+    classeItem(it) {
+      if (!it) return 'idle';
+      return it.neutro ? 'idle' : it.ok ? 'ok' : 'err';
+    },
+
+    conectar() {
+      if (this.es) this.es.close();
+      this.es = new EventSource('/api/dashboard/follow?minutos=' + this.janela);
+      this.es.onopen = () => {
+        this.vivo = 'ao vivo';
+      };
+      this.es.onerror = () => {
+        this.vivo = 'reconectando…';
+      };
+      this.es.onmessage = (m) => {
+        try {
+          this.aplicarSnap(JSON.parse(m.data));
+        } catch (_) {
+          /* frame não-JSON (ping é comentário) */
+        }
+      };
     },
 
     async puxaSaude() {
@@ -376,33 +723,28 @@ document.addEventListener('alpine:init', () => {
       } catch (_) {}
     },
 
-    conectar() {
-      this.es = new EventSource('/api/dashboard/follow');
-      this.es.onopen = () => {
-        this.vivo = 'ao vivo';
-      };
-      this.es.onerror = () => {
-        this.vivo = 'reconectando…';
-      };
-      this.es.onmessage = (m) => {
-        try {
-          this.snap = JSON.parse(m.data);
-        } catch (_) {
-          /* frame não-JSON (ping é comentário) */
-        }
-      };
-    },
+    // conectar() (com ?minutos=) vive no bloco de cima — declarado DUAS vezes
+    // num literal de objeto a última vence e matava a janela da curva.
 
     // Verde do dot: MESMA regra de doctor::Veredito::ok (contrato) + o
-    // fluxd são. Erro de rede no doctor = vermelho honesto.
+    // fluxd são. Erro de rede no doctor = vermelho honesto. Projeto que
+    // nunca subiu é neutro — não segura o verde, mas aparece na contagem.
     saudeDot() {
       if (this.saudeErro) return { c: 'err', t: 'doctor falhou' };
       if (!this.saude) return { c: 'idle', t: 'saúde…' };
       const tudo = this.saude.fluxd.ok && this.saude.projetos.every((p) => this.projetoOk(p));
       const n = this.saude.projetos.length;
+      const nunca = this.nNuncaSubiu();
+      const espera = nunca > 0 ? ' · ' + nunca + ' aguardando 1º up' : '';
       return tudo
-        ? { c: 'ok pulse', t: 'fábrica ok · ' + n + '/' + n }
+        ? { c: 'ok pulse', t: 'fábrica ok · ' + n + '/' + n + espera }
         : { c: 'err', t: 'atenção · veja os itens' };
+    },
+
+    // Projetos que nunca rodaram `flux up` (doctor: containers nunca-subiu).
+    nNuncaSubiu() {
+      if (!this.saude) return 0;
+      return this.saude.projetos.filter((p) => p.containers.estado === 'nunca-subiu').length;
     },
 
     projetoOk(p) {
@@ -446,21 +788,102 @@ document.addEventListener('alpine:init', () => {
       );
     },
 
-    // Curva 24h → barras (teto de DOM: reduz pra ≤96 buckets). Número puro,
-    // nenhum dado do servidor vira HTML.
-    barras() {
-      const c = this.snap && this.snap.curva ? this.snap.curva.conts : [];
-      if (!c.length) return [];
-      const alvo = 96;
-      const passo = Math.max(1, Math.ceil(c.length / alvo));
-      const b = [];
-      for (let i = 0; i < c.length; i += passo) {
-        let soma = 0;
-        for (let j = i; j < Math.min(i + passo, c.length); j++) soma += c[j];
-        b.push(soma);
+    // Curva 24h → BARRAS removidas (03/11): a curva é Chart.js (desenharCurva)
+    // com janelas e realtime — o sparkline de divs não volta.
+
+    async acordar(nome) {
+      this.acordando = { ...this.acordando, [nome]: true };
+      try {
+        const r = await fetch(
+          '/api/projects/' + encodeURIComponent(nome) + '/acordar',
+          { method: 'POST' },
+        );
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          this.aviso = 'acordar ' + nome + ' falhou: ' + (d.error || r.status);
+        }
+      } catch (e) {
+        this.aviso = 'acordar ' + nome + ' falhou: ' + e.message;
       }
-      const max = Math.max(...b, 1);
-      return b.map((v) => Math.max(2, Math.round((v / max) * 100)));
+      this.acordando = { ...this.acordando, [nome]: false };
+    },
+  }));
+});
+
+// ------------------------------------------------------------- projetos (03/11)
+document.addEventListener('alpine:init', () => {
+  Alpine.data('projetosPage', () => ({
+    formato,
+    snap: null,
+    vivo: 'conectando…',
+    aviso: '',
+    es: null,
+    porPagina: 6,
+    pagina: 1,
+    acordando: {},
+
+    init() {
+      const q = new URLSearchParams(location.search);
+      if (q.get('rescan') === '1') this.aviso = 'rescan na fila — o flux watch executa';
+      else if (q.get('rescan') === 'falha') {
+        this.aviso = 'rescan recusado — o motivo está nos eventos (escopo painel)';
+      }
+      this.conectar();
+    },
+
+    conectar() {
+      this.es = new EventSource('/api/dashboard/follow');
+      this.es.onopen = () => {
+        this.vivo = 'ao vivo';
+      };
+      this.es.onerror = () => {
+        this.vivo = 'reconectando…';
+      };
+      this.es.onmessage = (m) => {
+        try {
+          this.snap = JSON.parse(m.data);
+        } catch (_) {
+          /* frame não-JSON (ping é comentário) */
+        }
+      };
+    },
+
+    // MESMAS funções dos cards do dashboardPage — os cards são o MESMO bloco
+    // nas duas shells (teste Rust garante a paridade das bindings).
+    dotDe(estado) {
+      return (
+        {
+          awake: { c: 'ok pulse', t: 'acordado' },
+          paused: { c: 'warn', t: 'pausado' },
+          sleeping: { c: 'idle', t: 'dormindo' },
+          starting: { c: 'warn', t: 'subindo' },
+          failed: { c: 'err', t: 'falhou' },
+        }[estado] || { c: 'idle', t: estado || '?' }
+      );
+    },
+
+    quandoRel(v) {
+      if (!v) return '—';
+      const diff = Math.round(v - Date.now() / 1000);
+      const abs = Math.abs(diff);
+      const pre = diff < 0 ? 'há ' : 'em ';
+      if (abs < 60) return pre + abs + ' s';
+      if (abs < 3600) return pre + Math.round(abs / 60) + ' min';
+      return pre + Math.round(abs / 3600) + ' h';
+    },
+
+    paginas() {
+      const n = this.snap ? this.snap.projetos.length : 0;
+      return Math.max(1, Math.ceil(n / this.porPagina));
+    },
+    paginaAtual() {
+      if (!this.snap) return [];
+      const ini = (this.pagina - 1) * this.porPagina;
+      return this.snap.projetos.slice(ini, ini + this.porPagina);
+    },
+    muda(d) {
+      const novo = this.pagina + d;
+      if (novo >= 1 && novo <= this.paginas()) this.pagina = novo;
     },
 
     async acordar(nome) {
@@ -597,7 +1020,18 @@ document.addEventListener('alpine:init', () => {
 
     liveTexto() {
       const l = this.snap && this.snap.live;
-      return l ? 'hot=' + l.hot + ' · porta 5173=' + l.porta : '(sem engine ou sem IP no state)';
+      if (!l) return '(sem engine ou sem IP no state)';
+      const base = 'hot=' + l.hot + ' · porta 5173=' + l.porta;
+      return l.off_manual
+        ? base + ' — desligado pelo painel: o acordar NÃO religa enquanto o flux.toml não mudar'
+        : base;
+    },
+
+    // Estado MEDIDO manda no botão único: hot + porta vivos = "ligado",
+    // o botão mostra o movimento que faz sentido agora.
+    liveLigado() {
+      const l = this.snap && this.snap.live;
+      return !!(l && l.hot && l.porta);
     },
 
     conectar() {

@@ -2336,3 +2336,141 @@ domínio próprio do cliente (Cloudflare for SaaS), redirects na borda,
 edge cache, e-mail transacional, domínio do cliente, analytics/heatmap
 próprios (factíveis — analytics server-side é fácil, heatmap pede JS injetado),
 kit LGPD, domínio de e-mail do cliente (fronteira: nunca).
+
+## 2026-11-03 — Rework do dashboard (branch `agente/03-11`, worktree `.worktree/`)
+
+Lista do Gabriel para a primeira página (dashboard) + extras, escopo fechado em
+1 rodada de perguntas (o que é "comphania" virou: projetos registrados que
+nunca subiram). Fatias com TRIO verde escopado `-p fluxd`:
+
+- `a77afca` **doctor neutro**: projeto que nunca subiu (`nunca-subiu`) não é
+  vermelho — `Item.neutro` (ok=true não conta no CLI; neutro=true pinta cinza
+  no painel), banco ausente e assets sem build neutros SÓ quando containers
+  dizem nunca-subiu.
+- `71f568d` **vigia**: régua de recarga ignora `/api/*` (5 painéis + 2
+  realtime reconectando não é reload de página; martelada de 3 min segue
+  contando tudo).
+- `79d34b6` **contratos da API**: `ip`/`host` nas linhas de evento (broadcast
+  + JSON + frame SSE), `meu_ip` pela mesma régua `waf::ip_real`, curva com
+  `?minutos=` (1..=1440), `ultimos15` (warns da janela + total), dashboard
+  SSE acordando por evento com push coalescido ≥300 ms. **BUG**: lista de
+  eventos do detalhe de projeto voltava vazia SEMPRE — `'\'` no Rust escapava
+  a aspa, SQL quebrava, `unwrap_or_default` engolia (consertado + teste).
+- `5d392d2` **cliente**: dashboard com curva Chart.js (24h..15m + realtime
+  10m, min/média/pico, clique fixa valor), card "últimos 15 min", vigia
+  legível com anomalias clicáveis, últimos eventos no formato do /events com
+  badges você/host e toggle "ocultar meus eventos", projetos 6/página;
+  `/projetos` nova na nav de TODAS as shells (paridade dos cards travada por
+  teste); `/events` agrupa ×N só dentro de 30 min.
+- docs commit: `docs/panel.md`, `docs/status.md`, este arquivo.
+
+334 testes no fluxd. **DEPLOYADO 03/11** por ordem do Gabriel ("deploya mas não
+dá merge na main"): archive da branch `agente/03-11` (LF) → `~/flux-src` →
+`cargo build --release -p fluxd` 1m50s → backup
+`/usr/local/bin/fluxd.bak-20261103b-rework` → stop/mv/start → `active`.
+Regressão ao vivo: `/api/dashboard?minutos=10` 200 com `meu_ip` (XFF honrado),
+curva com 10 buckets, `ultimos15_total` contando, eventos com `ip`; `/projetos`
+303→login (guard); painel.js/chart vendidos 200 (painel.js com `projetosPage`);
+via CF login 200 e `/projetos` 303; frames de `/api/dashboard/follow` e
+`/api/events/follow` entregando (backlog com ip/host). Branch NÃO mergeada na
+master (ordem dele).
+
+**+1 deploy no mesmo dia (`4a8cc72`, backup
+`fluxd.bak-20261103c-cachebust`)**: o primeiro deploy quebrou no celular do
+Gabriel — console com `visiveis is not defined`: shell NOVA + painel.js VELHO
+cacheado na CF (HIT de ~8 h; origem mandava `max-age=86400`, o padrão que
+deixa 24 h de JS velho por deploy; content-length provou: 29685 na borda vs
+43400 na origem). Fix de raiz: **cache-busting** — `assets::versao()` (sha256
+dos bytes embutidos, 12 chars) substitui `__ASSETS_V__` nas 5 shells
+(`painel.js?v=<hash>`), cache dos assets sobe pra `max-age=31536000,
+immutable` (seguro agora que conteúdo novo = URL nova). Sem purge da CF: a
+shell (no-store) traz a URL nova, a borda busca fresca. Provas: painel.js
+versionado via CF com `visiveis`, `immutable` na origem, teste novo trava
+placeholder cru.
+
+**+1 deploy no mesmo dia (`4e96c8b`, backup
+`fluxd.bak-20261103d-crashes`)**: dois crashes do rework no console dele —
+(1) `snap.ultimos15_total` em x-text cru: x-show esconde mas x-text AVALIA,
+snap=null na 1ª renderização estourava (guard movido pra dentro da
+expressão); (2) `too much recursion` no Chart: instância guardada em
+propriedade do componente → Alpine proxy-wraps o Chart → o SET `chart.data`
+do update recursava com o getter interno; instância agora vive em
+`curvaChart`, variável de MÓDULO (o /observe escapa porque faz
+destroy+recreate, sem SET de .data no proxy — documentado no código e
+travado por teste). Gabriel respondeu "Não" à pergunta sobre reverter
+toggle/badges do /events: FICAM.
+
+## 2026-11-04 — fix live_off (exit 143) achado ao vivo no painel novo
+
+Gabriel clicou "live off" (vippers dev) no painel e o evento saiu vermelho:
+`ação live_off dev em vippers: FALHOU: comando saiu com exit 143`. Causa
+proposta por código e provada A/B em busybox: o cmdline do `sh -c` do exec
+carrega o literal `*node*` do case, então o loop de kill varria `/proc`,
+achava o PRÓPRIO shell e se matava (SIGTERM = 128+15) antes do rm/echo. O
+vite morria de verdade (o wrapper do live faz o `rm -f public/hot` na morte
+do npm — `compose.rs:959`), então o objetivo se cumpria; o bug era de RELATO
+(evento error à toa). Bug pré-existente do master (`26570db`, fatia 6b) — o
+CLI `live off` tem o MESMO script e segue sem mexer (decisão dele: só o
+painel; lá o exit é ignorado). O rework não causou: só deixou o erro
+VISÍVEL (card "Últimos 15 min").
+
+`83dac38`: guard `[ "$d" = "/proc/$$" ] && continue` antes do case +
+`cmd_live_off()` extraído pra fonte única do teste. Prova A/B no VM
+(container busybox jogável, MESMO caminho `docker exec sh -c` do fluxd):
+script velho rc=143 sem chegar no echo; script novo rc=0 + "live OFF" e o
+fake node (`sh /tmp/node`) morre com o shell sobrevivendo. Teste novo
+`live_off_nao_mata_o_proprio_shell` trava o guard e prova que o cmdline do
+shell casa com *node* (senão o guard seria decorativo). TRIO verde escopado
+`-p fluxd` (337 testes). **DEPLOYADO 04/11 por ordem dele ("conserta e
+deploya")**: build 42s → backup `/usr/local/bin/fluxd.bak-20261104a-liveoff`
+→ stop/mv/start `active`; strings do binary prova o guard; regressão ao
+vivo painel 303 + `/api/dashboard` 401. Armadilha nova: `cargo` não está no
+PATH de ssh não-login na VM — build com `bash -lc`. Nota pro painel: o
+live_off do PAINEL não remove o `[live]` do flux.toml — o próximo acordar
+RE-LIGA o vite (`decidir_live` só pula com hot+porta vivos); off
+permanente = `flux live off` no CLI, que limpa o toml.
+
+## 2026-11-04 (tarde) — VM degradada de novo + events v8 + botão do live de verdade
+
+**VM degradada ~14:23 local (2º incidente em 2 dias)**: kernel com RCU
+stall (serial.log: `rcu_preempt self-detected stall`, dump de tasks por
+NMI, systemd-journald morto por WATCHDOG 3×). Sintoma: sshd não completa
+handshake (TCP abre, morre antes do banner), journald sem logs, túnel do
+watch do PC morto → reports parados (o painel do doctor só acusaria
+>1h). fluxd/Caddy/CF/ICMP/mutagen-estabelecida VIVOS — travada PARCIAL.
+Gabriel aprovou o restart: ACPI graceful pendurou (igual 03/11) →
+poweroff → boot rápido, tudo verde; zcode-api acordou por demanda (200
+na prova). Pós-boot o watch do PC estava ZUMBI (túnel morto, sem
+rediscagem — PID vivo desde 03/11 06:04): kill → guard regenerou em
+~10s → reports fresh. **Armadilha nova: watch do PC sem rediscagem após
+queda longa do sshd — kill + guard regenera.**
+
+**Auditoria de coleta (pedido dele: "verifica se coleta todos tipos")**:
+20 escopos no DB ⊆ emissores no código (tudo que emite, chega). Cegos
+declarados: (1) host-level (sshd/journald — o incidente de HOJE foi
+invisível pro fluxd); (2) serviços atrás do Caddy direto (zcode-api só
+aparece como wake/sleep); (3) opencode = app CLIENTE no PC alimentado
+pela API — raio zero pro fluxd. Vigilância de host (probe sshd/journal/
+disk pelo watch) OFERECIDA sem decisão.
+
+**events v8 (`46b151e`)** — "mais dados do emissor e pelo menos o código
+de resposta, sem ficar gordo": colunas `projeto`/`env`/`st` null-áveis;
+access do router nasce com projeto/env derivados do ManagedHost UMA vez
+por request; waf leva st=403; internos vazios (borda declarada).
+Filtro `?projeto=` (coluna nos novos + nome citado na mensagem nas
+antigas/internas — nunca encolhe histórico); detalhe do projeto casa por
+coluna OU mensagem (o access cujo texto não cita o nome agora aparece);
+tags de projeto clicáveis + badge de st no cliente. Estrutura de quebra:
+frame_de genérico serde (EventoNovo/EventoRow serializam direto,
+EventoJson redundante morto), Meta/Acesso agrupando parâmetros (clippy,
+sem allow novo). **Buraco consertado**: eventosPage NUNCA leu params de
+URL — os cliques do painel (?host=/?escopo=) caíam SEM filtro desde o
+rework; agora URL vence localStorage.
+
+**Botão do live de verdade (`2e7ec89`)** — botão ÚNICO na página do
+projeto refletindo o estado MEDIDO (hot+porta); live_off grava INTENÇÃO
+(settings `live_off_manual:{projeto}` = sha256 do flux.toml do momento)
+e o acordar respeita enquanto o toml não mudar; toml mudou = intenção
+expira sozinha — CLI live on convergE SEM uma linha de CLI nova.
+live_on limpa a intenção (volta na hora). LiveJson.carrega off_manual e
+o texto explica pro operador. (343 testes, TRIO verde nas duas fatias.)

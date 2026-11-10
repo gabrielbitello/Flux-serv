@@ -74,6 +74,8 @@ pub fn escolher_compose(dir: &Path) -> Option<PathBuf> {
 
 use std::path::{Path, PathBuf};
 
+use rusqlite::OptionalExtension;
+
 use crate::events;
 
 /// Gera o YAML de override para os services dados. `stripped` = services da
@@ -885,6 +887,66 @@ pub fn decidir_live(hot: bool, porta_viva: bool) -> AcaoLive {
     }
 }
 
+// ------------------------------------------------- intenção manual do live
+// (04/11, pedido do Gabriel — o botão do painel decide DE VERDADE): live
+// off pelo painel grava a INTENÇÃO no estado, amarrada ao hash do
+// flux.toml do momento. O acordar respeita a intenção enquanto o toml não
+// mudar; toml mudou (CLI live on, edição sincronizada) = intenção expira
+// sozinha e o live volta a religar — CLI e painel convergem SEM o CLI
+// saber do marcador. Chave por projeto (live é conceito de dev).
+
+const PREFIXE_LIVE_OFF: &str = "live_off_manual:";
+
+fn toml_hash(src: &str) -> String {
+    crate::api::auth::sha256_hex(src.as_bytes())
+}
+
+fn chave_live_off(name: &str) -> String {
+    format!("{PREFIXE_LIVE_OFF}{name}")
+}
+
+/// A intenção de off vale pro toml ATUAL? Toml mudou = intenção velha:
+/// apaga e devolve false (o acordar volta a religar).
+pub(crate) fn live_intencao_off(st: &crate::state::State, name: &str, toml_src: &str) -> bool {
+    let hash = toml_hash(toml_src);
+    let salvo: Option<String> = st
+        .with(|c| {
+            c.query_row(
+                "SELECT v FROM settings WHERE k = ?1",
+                [chave_live_off(name)],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten();
+    match salvo {
+        Some(h) if h == hash => true,
+        Some(_) => {
+            let _ =
+                st.with(|c| c.execute("DELETE FROM settings WHERE k = ?1", [chave_live_off(name)]));
+            false
+        }
+        None => false,
+    }
+}
+
+/// Grava a intenção de off amarrada ao toml do momento (painel live_off).
+pub(crate) fn live_intencao_off_gravar(st: &crate::state::State, name: &str, toml_src: &str) {
+    let _ = st.with(|c| {
+        c.execute(
+            "INSERT INTO settings(k, v) VALUES (?1, ?2) \
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            rusqlite::params![chave_live_off(name), toml_hash(toml_src)],
+        )
+    });
+}
+
+/// Limpa a intenção (painel live_on) — o acordar volta a religar.
+pub(crate) fn live_intencao_limpar(st: &crate::state::State, name: &str) {
+    let _ = st.with(|c| c.execute("DELETE FROM settings WHERE k = ?1", [chave_live_off(name)]));
+}
+
 /// A porta do dev server responde no IP do container? TCP connect rápido —
 /// não importa O QUE escuta na porta para o "já está de pé" do up; o
 /// roteamento same-origin do router valida o tráfego por cima.
@@ -1051,6 +1113,16 @@ async fn subir_live_se_configurado(
             "warn",
             origem,
             &format!("{projeto}: [dev] live declarado VAZIO no flux.toml — nada a executar"),
+        );
+        return;
+    }
+
+    // Intenção manual (04/11): off pelo painel vale ENQUANTO o flux.toml
+    // não mudar. Toml mudou = intenção expira (dentro do helper) e o
+    // acordar segue pro religar normal.
+    if live_intencao_off(st, name, &toml_src) {
+        tracing::debug!(
+            "religar live {projeto}: intenção manual de off vale (toml intacto) — pulado"
         );
         return;
     }

@@ -233,22 +233,44 @@ fn autoridade(url: &str) -> Option<String> {
     Some(sem_porta.to_owned())
 }
 
+/// IP real do cliente como STRING — MESMA régua `waf::ip_real` do access
+/// (cf-connecting-ip > XFF > ConnectInfo). Vai no JSON como `meu_ip`: o
+/// painel marca os eventos "é você" (toggle ocultar meus eventos, 03/11) sem
+/// parsear a mensagem e sem eu decidir IP por UA.
+fn meu_ip_de(headers: &HeaderMap, req: &Request) -> String {
+    let connect = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(a)| a.ip());
+    waf::ip_real(headers, connect)
+        .map(|i| i.to_string())
+        .unwrap_or_default()
+}
+
+/// Janela da curva em minutos (`?minutos=`): 15|30|60|360|720|1440 e o
+/// realtime (10) do cliente — clamp 1..=1440, default 24 h. Valor inválido
+/// não é erro: cai no default (a curva é leve, a página é a fonte).
+fn minutos_de(q: Option<&str>) -> usize {
+    q.and_then(|s| s.split('&').find_map(|kv| kv.strip_prefix("minutos=")))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(leitura::CURVA_TETO_MINUTOS)
+        .clamp(1, leitura::CURVA_TETO_MINUTOS)
+}
+
 // ------------------------------------------------------------------ rotas
 
-#[derive(serde::Serialize)]
-struct EventoJson {
-    id: i64,
-    created_at: String,
-    level: String,
-    scope: String,
-    message: String,
-}
+/// Evento no JSON da lista: o `EventoRow` do leitura DIRETO — mesmo struct
+/// do frame SSE (v7 ip/host, v8 projeto/env/st), sem espelho de campos.
+type EventoJson = leitura::EventoRow;
 
 #[derive(serde::Serialize)]
 struct ListaEventos {
     pagina: i64,
     paginas: i64,
     total: i64,
+    /// IP real do cliente da request (mesma régua do access) — o toggle
+    /// "ocultar meus eventos" casa evento.ip == meu_ip (03/11).
+    meu_ip: String,
     /// Escopos distintos — os chips do filtro nunca inventam opção (mesma
     /// leitura da página server-side antiga).
     escopos: Vec<String>,
@@ -267,8 +289,14 @@ pub(super) struct HostJson {
 /// `GET /api/events?escopo=&nivel=&q=&page=` — MESMA leitura (e MESMOS
 /// filtros) da página /events, em JSON. O `id` é a chave que o cliente novo
 /// usa pra append/scroll compensado sem perder a posição.
-async fn eventos(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Response {
+async fn eventos(
+    State(st): State<PanelState>,
+    headers: HeaderMap,
+    RawQuery(q): RawQuery,
+    req: Request,
+) -> Response {
     let filtro = leitura::filtro_de(q.as_deref());
+    let meu_ip = meu_ip_de(&headers, &req);
     match leitura::eventos_filtrados(
         &st.app,
         page_de(q.as_deref()),
@@ -282,22 +310,14 @@ async fn eventos(State(st): State<PanelState>, RawQuery(q): RawQuery) -> Respons
                 pagina: page,
                 paginas,
                 total,
+                meu_ip,
                 escopos: leitura::escopos_distintos(&st.app).unwrap_or_default(),
                 hosts: leitura::hosts_distintos(&st.app)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(host, ambiente)| HostJson { host, ambiente })
                     .collect(),
-                eventos: rows
-                    .into_iter()
-                    .map(|ev| EventoJson {
-                        id: ev.id,
-                        created_at: ev.created_at,
-                        level: ev.level,
-                        scope: ev.scope,
-                        message: ev.message,
-                    })
-                    .collect(),
+                eventos: rows.into_iter().collect(),
             })
             .into_response()
         }
@@ -318,17 +338,14 @@ pub(super) fn erro_json(status: StatusCode, msg: &str) -> Response {
 const PING_CADA: Duration = Duration::from_secs(15);
 
 /// Frame SSE de um evento: JSON na linha `data` (o cliente faz parse e
-/// appenda — o `id` é a chave de dedupe/posição).
-fn frame_de(id: i64, created_at: &str, level: &str, scope: &str, message: &str) -> String {
+/// appenda — o `id` é a chave de dedupe/posição). Genérico sobre o tipo da
+/// linha (EventoNovo do broadcast, EventoRow do backlog) — MESMOS campos do
+/// JSON da lista (v7 ip/host, v8 projeto/env/st): uma definição, zero
+/// espelho de campos.
+fn frame_de<T: serde::Serialize>(ev: &T) -> String {
     format!(
         "data: {}\n\n",
-        serde_json::json!({
-            "id": id,
-            "created_at": created_at,
-            "level": level,
-            "scope": scope,
-            "message": message,
-        })
+        serde_json::to_string(ev).expect("serialização de evento não falha (campos planos)")
     )
 }
 
@@ -351,6 +368,18 @@ fn casa_filtro(f: &leitura::FiltroEventos, ev: &crate::events::EventoNovo) -> bo
         && !ev.message.to_lowercase().contains(&q.to_lowercase())
     {
         return false;
+    }
+    if let Some(p) = &f.projeto {
+        // Espelho do clausula_filtro: coluna nos access v8+; linha antiga/
+        // interna (coluna vazia) casa pelo nome citado na mensagem.
+        let casa = if ev.projeto.is_empty() {
+            ev.message.to_lowercase().contains(&p.to_lowercase())
+        } else {
+            &ev.projeto == p
+        };
+        if !casa {
+            return false;
+        }
     }
     true
 }
@@ -381,18 +410,8 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
         }
     };
     let ultimo = backlog.last().map(|ev| ev.id).unwrap_or(desde);
-    let fila: VecDeque<Result<String, Infallible>> = backlog
-        .iter()
-        .map(|ev| {
-            Ok(frame_de(
-                ev.id,
-                &ev.created_at,
-                &ev.level,
-                &ev.scope,
-                &ev.message,
-            ))
-        })
-        .collect();
+    let fila: VecDeque<Result<String, Infallible>> =
+        backlog.iter().map(|ev| Ok(frame_de(ev))).collect();
 
     let app = Arc::clone(&st.app);
     let frames = futures_util::stream::unfold(
@@ -425,8 +444,7 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
                                 continue;
                             }
                             ultimo = ev.id;
-                            let frame =
-                                Ok(frame_de(ev.id, &ev.created_at, &ev.level, &ev.scope, &ev.message));
+                            let frame = Ok(frame_de(&ev));
                             return Some((frame, (rx, tick, ultimo, filtro, app, fila)));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -436,11 +454,9 @@ async fn eventos_follow(State(st): State<PanelState>, RawQuery(q): RawQuery) -> 
                                     if let Some(m) = ausentes.last() {
                                         ultimo = m.id;
                                     }
-                                    fila.extend(ausentes.iter().map(|ev| {
-                                        Ok(frame_de(
-                                            ev.id, &ev.created_at, &ev.level, &ev.scope, &ev.message,
-                                        ))
-                                    }));
+                                    fila.extend(
+                                        ausentes.iter().map(|ev| Ok(frame_de(ev))),
+                                    );
                                     continue;
                                 }
                                 Err(e) => {
@@ -568,10 +584,21 @@ fn gravar_arquivo_token(arquivo: &std::path::Path, token: &str) -> std::io::Resu
 
 // ---------------------------------------------------- dashboard (fatia 5)
 
-/// GET /api/dashboard — snapshot completo (MESMAS consultas do render HTML
-/// antigo; a saúde pesada tem endpoint próprio, /api/saude).
-async fn dashboard(State(st): State<PanelState>) -> Response {
-    Json(leitura::dashboard(&st.app)).into_response()
+/// GET /api/dashboard?minutos= — snapshot completo (MESMAS consultas do
+/// render HTML antigo; a saúde pesada tem endpoint próprio, /api/saude).
+/// `minutos` é a janela da curva (clamp 1..=1440, default 24 h).
+async fn dashboard(
+    State(st): State<PanelState>,
+    headers: HeaderMap,
+    RawQuery(q): RawQuery,
+    req: Request,
+) -> Response {
+    Json(leitura::dashboard(
+        &st.app,
+        minutos_de(q.as_deref()),
+        meu_ip_de(&headers, &req),
+    ))
+    .into_response()
 }
 
 /// GET /api/saude — o doctor (mesma máquina do `flux doctor`), puxado pelo
@@ -591,40 +618,119 @@ async fn saude(State(st): State<PanelState>) -> Response {
 /// do escopo): hash sha256 do JSON; igual = nada no fio.
 const DASH_CADA: Duration = Duration::from_secs(5);
 
-/// GET /api/dashboard/follow — SSE do snapshot: recomputa a cada 5 s e só
-/// empurra quando muda; `: ping` a cada 15 s entre mudanças (o custo no
-/// servidor é o mesmo do meta refresh de 5 s que o dashboard carregava —
-/// o ganho é o cliente sem recarga e sem estado perdido).
-async fn dashboard_follow(State(st): State<PanelState>) -> Response {
+/// Janela mínima ENTRE dois pushes reagindo a eventos (03/11, pedido do
+/// Gabriel para o realtime da curva): rajada de eventos coalesce num push só
+/// a cada 300 ms — tempo real sem virar fio de snapshot.
+const PUSH_CADA: Duration = Duration::from_millis(300);
+
+/// Recomputa o snapshot (janela + meu_ip do cliente) e devolve o frame SE o
+/// hash mudou desde o último push; atualiza o hash de referência.
+async fn push_se_mudou(
+    app: &AppState,
+    ultimo: &mut Option<String>,
+    meu_ip: &str,
+    minutos: usize,
+) -> Option<String> {
+    let json = serde_json::to_string(&leitura::dashboard(app, minutos, meu_ip.to_owned()))
+        .unwrap_or_default();
+    let hash = sha256_hex(json.as_bytes());
+    if ultimo.as_deref() == Some(hash.as_str()) {
+        return None;
+    }
+    *ultimo = Some(hash);
+    Some(format!("data: {json}\n\n"))
+}
+
+/// GET /api/dashboard/follow?minutos= — SSE do snapshot, push SÓ QUANDO
+/// MUDA. Três fontes de acordar: evento novo no broadcast (o realtime da
+/// curva — coalescido na janela PUSH_CADA de 300 ms), re-scan periódico de
+/// 5 s (mudanças que NÃO são evento: sono, sync, migrations) e `: ping` de
+/// 15 s entre mudanças. Lagged do broadcast não é buraco: o snapshot é
+/// recompute stateless — o tick de 5 s cura sozinho.
+async fn dashboard_follow(
+    State(st): State<PanelState>,
+    headers: HeaderMap,
+    RawQuery(q): RawQuery,
+    req: Request,
+) -> Response {
+    let minutos = minutos_de(q.as_deref());
+    let meu_ip = meu_ip_de(&headers, &req);
     let app = Arc::clone(&st.app);
+    let rx = crate::events::assinar();
     let frames = futures_util::stream::unfold(
         (
             tokio::time::interval(DASH_CADA),
             tokio::time::interval(PING_CADA),
-            None::<String>,
+            rx,
+            None::<String>,               // hash do último push
+            None::<tokio::time::Instant>, // quando foi o último push
+            false,                        // evento novo desde o último push
             app,
+            meu_ip,
+            minutos,
         ),
-        |(mut snap_t, mut ping_t, mut ultimo, app)| async move {
+        |(
+            mut snap_t,
+            mut ping_t,
+            mut rx,
+            mut ultimo,
+            mut ultimo_push,
+            mut sujou,
+            app,
+            meu_ip,
+            minutos,
+        )| async move {
             loop {
                 tokio::select! {
                     _ = ping_t.tick() => {
                         return Some((
                             Ok(": ping\n\n".to_owned()),
-                            (snap_t, ping_t, ultimo, app),
+                            (snap_t, ping_t, rx, ultimo, ultimo_push, sujou, app, meu_ip, minutos),
                         ));
                     }
+                    // Re-scan periódico — mudanças sem evento novo também
+                    // chegam (dot do sono, sync, migrations aplicadas).
                     _ = snap_t.tick() => {
-                        let json =
-                            serde_json::to_string(&leitura::dashboard(&app)).unwrap_or_default();
-                        let hash = sha256_hex(json.to_string().as_bytes());
-                        if ultimo.as_deref() == Some(hash.as_str()) {
-                            continue; // nada mudou: silêncio É o comportamento
+                        if let Some(frame) =
+                            push_se_mudou(&app, &mut ultimo, &meu_ip, minutos).await
+                        {
+                            ultimo_push = Some(tokio::time::Instant::now());
+                            return Some((
+                                Ok(frame),
+                                (snap_t, ping_t, rx, ultimo, ultimo_push, sujou, app, meu_ip, minutos),
+                            ));
                         }
-                        ultimo = Some(hash);
-                        return Some((
-                            Ok(format!("data: {json}\n\n")),
-                            (snap_t, ping_t, ultimo, app),
-                        ));
+                    }
+                    ev = rx.recv() => match ev {
+                        Ok(_) => sujou = true,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            sujou = true; // o snapshot é recompute — sem buraco possível
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    },
+                    // Realtime reagindo a evento novo: espera a janela de 300 ms
+                    // desde o último push (rajada = UM push), depois recomputa —
+                    // o hash pode nem mudar (evento fora do filtro de exibição).
+                    _ = async {
+                        if !sujou {
+                            futures_util::future::pending::<()>().await;
+                        }
+                        let agora = tokio::time::Instant::now();
+                        let liberado = ultimo_push.map(|t| t + PUSH_CADA).unwrap_or(agora);
+                        if liberado > agora {
+                            tokio::time::sleep(liberado - agora).await;
+                        }
+                    } => {
+                        sujou = false;
+                        if let Some(frame) =
+                            push_se_mudou(&app, &mut ultimo, &meu_ip, minutos).await
+                        {
+                            ultimo_push = Some(tokio::time::Instant::now());
+                            return Some((
+                                Ok(frame),
+                                (snap_t, ping_t, rx, ultimo, ultimo_push, sujou, app, meu_ip, minutos),
+                            ));
+                        }
                     }
                 }
             }

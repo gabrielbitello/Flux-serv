@@ -11,7 +11,7 @@ use flux_common::protocol::{ContainerState, Env};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Versão do schema guardada em `settings.schema_version`.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Linha de sono de um projeto/ambiente (epoch segundos; `None` = nunca).
 pub type SleepRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -157,6 +157,16 @@ CREATE TABLE IF NOT EXISTS vigia_alerta(
 /// Vazio = evento interno (sem host).
 const SCHEMA_V7: &str = r#"
 ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT '';
+"#;
+
+/// v8 (04/11, pedido do Gabriel — "mais dados do emissor e pelo menos o
+/// código de resposta, sem ficar pesado"): `events.projeto`/`events.env`
+/// (emissor, preenchido nos access do router) e `events.st` (código HTTP de
+/// resposta — access e waf). Eventos internos: vazio/null (borda declarada).
+const SCHEMA_V8: &str = r#"
+ALTER TABLE events ADD COLUMN projeto TEXT NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN env TEXT NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN st INTEGER;
 "#;
 
 #[derive(Debug, thiserror::Error)]
@@ -671,6 +681,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
             conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
             conn.execute(
                 "INSERT INTO settings(k, v) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION],
@@ -686,6 +697,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
             conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -699,6 +711,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
             conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -710,6 +723,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
             conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -720,6 +734,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
             conn.execute_batch(SCHEMA_V5)?;
             conn.execute_batch(SCHEMA_V6)?;
             conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -729,6 +744,7 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         Some(5) => {
             conn.execute_batch(SCHEMA_V6)?;
             conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],
@@ -737,6 +753,15 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         // v6 → atual (painel API+SSE, fatia 9a): `events.host`.
         Some(6) => {
             conn.execute_batch(SCHEMA_V7)?;
+            conn.execute_batch(SCHEMA_V8)?;
+            conn.execute(
+                "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        // v7 → atual (04/11): emissor (projeto/env) + código de resposta (st).
+        Some(7) => {
+            conn.execute_batch(SCHEMA_V8)?;
             conn.execute(
                 "UPDATE settings SET v = ?1 WHERE k = 'schema_version'",
                 params![SCHEMA_VERSION],

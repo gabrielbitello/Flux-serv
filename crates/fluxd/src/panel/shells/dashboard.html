@@ -1,26 +1,32 @@
 <!doctype html>
-<!-- Shell do dashboard (fatia 5, style guide 02/11): snapshot por
-     /api/dashboard (SSE, push só quando muda), saúde por /api/saude (1/min),
-     acordar por POST /api/projects/{name}/acordar. O HTML não carrega dado. -->
+<!-- Shell do dashboard (rework 03/11): snapshot por /api/dashboard (SSE com
+     push coalescido ≥300ms — realtime), saúde por /api/saude (1/min),
+     acordar por POST /api/projects/{name}/acordar. Curva em Chart.js com
+     janelas 24h..15m + realtime (10m); card dos últimos 15 min (warns);
+     vigia com idade legível e anomalias clicáveis; últimos eventos no MESMO
+     formato do /events com toggle "ocultar meus eventos" (ip do navegador);
+     projetos paginados 6/página (lista completa também em /projetos).
+     O HTML não carrega dado. -->
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
 <meta name="robots" content="noindex, nofollow, noarchive">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flux — painel</title>
-<link rel="stylesheet" href="/assets/estilo.css">
+<link rel="stylesheet" href="/assets/estilo.css?v=__ASSETS_V__">
 <!-- painel.js ANTES do alpine: o build CDN do Alpine auto-inicia via
      queueMicrotask no fim do PRÓPRIO script — alpine:init dispara antes
      do próximo defer executar; registrado depois = componente nunca existe -->
-<script defer src="/assets/painel.js" data-cfasync="false"></script>
-<script defer src="/assets/alpine.min.js" data-cfasync="false"></script>
+<script defer src="/assets/chart.umd.min.js?v=__ASSETS_V__" data-cfasync="false"></script>
+<script defer src="/assets/painel.js?v=__ASSETS_V__" data-cfasync="false"></script>
+<script defer src="/assets/alpine.min.js?v=__ASSETS_V__" data-cfasync="false"></script>
 </head>
 <body>
 <div x-data="dashboardPage">
 <header class="top">
   <span class="mark">flux<span>/painel</span></span>
   <nav aria-label="Páginas">
-    <a class="on" href="/">dashboard</a><a href="/events">eventos</a><a href="/observe">monitor</a>
+    <a class="on" href="/">dashboard</a><a href="/projetos">projetos</a><a href="/events">eventos</a><a href="/observe">monitor</a>
   </nav>
   <div class="topdir">
     <span class="muted" x-text="vivo"></span>
@@ -45,18 +51,19 @@
     <template x-if="saude">
       <ul>
         <li>
-          fluxd: <span class="dot" :class="saude.fluxd.ok ? 'ok' : 'err'"></span>
+          fluxd: <span class="dot" :class="classeItem(saude.fluxd)"></span>
           <span x-text="saude.fluxd.estado"></span>
           <span class="muted" x-text="saude.fluxd.detalhe || ''"></span>
         </li>
         <template x-for="p in saude.projetos" :key="p.projeto">
           <li>
             <span class="mono" x-text="p.projeto"></span>:
-            <span class="dot" :class="projetoOk(p) ? 'ok' : 'err'"></span>
-            containers <span x-text="p.containers.estado"></span> ·
-            sync <span x-text="p.sync.estado"></span> ·
-            banco <span x-text="p.banco.estado"></span> ·
-            assets <span x-text="p.assets.estado"></span>
+            <span class="dot" :class="p.containers.neutro ? 'idle' : (projetoOk(p) ? 'ok' : 'err')"></span>
+            <span class="muted" x-show="p.containers.neutro" x-text="'nunca subiu — '"></span>
+            containers <span class="dot" :class="classeItem(p.containers)"></span> ·
+            sync <span class="dot" :class="classeItem(p.sync)"></span> ·
+            banco <span class="dot" :class="classeItem(p.banco)"></span> ·
+            assets <span class="dot" :class="classeItem(p.assets)"></span>
             <span class="muted" x-text="p.containers.detalhe || p.sync.detalhe || p.banco.detalhe || ''"></span>
           </li>
         </template>
@@ -69,8 +76,180 @@
     <span class="sub" x-text="resumo()"></span>
   </div>
 
+  <!-- ÚLTIMOS 15 MIN — o que é importante AGORA (warns da janela). -->
+  <section class="secao">
+    <h2>
+      Últimos 15 min
+      <!-- x-text avalia MESMO com x-show falso: o guard tem que estar NA
+           expressão — snap=null na 1ª renderização estourava aqui. -->
+      <span class="warn-t"
+            x-text="snap && snap.ultimos15_total > 0 ? ('— ' + snap.ultimos15_total + ' aviso' + (snap.ultimos15_total > 1 ? 's' : '')) : ''"></span>
+    </h2>
+    <table x-show="snap && snap.ultimos15.length > 0">
+      <tbody>
+        <template x-for="ev in (snap ? snap.ultimos15 : [])" :key="ev.id">
+          <tr class="clica" :class="formato.linhaDe(ev.level)"
+              :title="ev.created_at + ' UTC — abrir no /events'"
+              @click="location.href = formato.linkDe(ev)">
+            <td class="mono muted" x-text="formato.quando(ev.created_at)"></td>
+            <td><span class="dot" :class="formato.dotDe(ev.level)"></span></td>
+            <td class="mono" x-text="ev.scope"></td>
+            <td>
+              <span x-text="ev.message"></span>
+              <template x-if="formato.marcaDe(ev, meuIp)">
+                <span class="tag" :class="formato.marcaDe(ev, meuIp).classe"
+                      x-text="formato.marcaDe(ev, meuIp).rotulo"></span>
+              </template>
+              <template x-if="formato.tagProjeto(ev)">
+                <a class="tag" :class="formato.tagProjeto(ev).classe" @click.stop
+                   :href="'/events?projeto=' + encodeURIComponent(formato.tagProjeto(ev).rotulo)"
+                   x-text="formato.tagProjeto(ev).rotulo"></a>
+              </template>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="empty" x-cloak x-show="snap && snap.ultimos15_total === 0">
+      silêncio — nada grave nos últimos 15 min
+    </div>
+    <p><a href="/events?nivel=warn">todos os avisos →</a></p>
+  </section>
+
+  <!-- CURVA — Chart.js, janelas 24h..15m + realtime (10m, push ≥300ms). -->
+  <section class="secao">
+    <h2>Eventos por minuto</h2>
+    <div class="janelas" role="group" aria-label="janela da curva">
+      <template x-for="j in JANELAS" :key="j">
+        <button class="chip" :class="!realtime && janela === j ? 'on' : ''"
+                @click="mudarJanela(j)"
+                x-text="j >= 60 ? (j / 60) + 'h' : j + 'm'"></button>
+      </template>
+      <button class="chip" :class="realtime ? 'on' : ''" @click="mudarJanela('rt')">
+        realtime (10m)
+      </button>
+    </div>
+    <div class="canvas-curva">
+      <canvas x-ref="curva" role="img" aria-label="eventos por minuto na janela escolhida"></canvas>
+    </div>
+    <template x-if="stats()">
+      <div class="statlinha">
+        <span>mín <b x-text="stats().min"></b>/min</span>
+        <span>média <b x-text="stats().media"></b>/min</span>
+        <span>pico <b x-text="stats().max"></b>/min às <b x-text="quandoBucket(stats().maxIdx)"></b></span>
+        <span class="muted"
+              x-text="realtime ? 'realtime — o servidor avisa por SSE (≥300 ms entre avisos)' : 'clique num ponto do gráfico pra fixar o valor'"></span>
+      </div>
+    </template>
+    <template x-if="valorSelecionado">
+      <p class="statlinha"
+         x-text="'selecionado: ' + valorSelecionado.quando + ' — ' + valorSelecionado.valor + ' eventos/min' + (valorSelecionado.pico ? ' — é o PICO da janela' : '')"></p>
+    </template>
+    <p class="muted" x-show="snap && !snap.curva">sem dados ainda</p>
+  </section>
+
+  <!-- VIGIA — idade legível do último ciclo + anomalia clicável (abre o
+       /events com a pista: ip do ofensor ou caminho citado). -->
+  <section class="secao">
+    <h2>Vigia</h2>
+    <p class="muted" x-show="snap">
+      último ciclo: <span class="dot" :class="vigiaDot()"></span>
+      <b x-text="vigiaTexto()"></b>
+      <span class="err-t" x-show="vigiaIdade() !== null && vigiaIdade() > 600">
+        — silêncio sem marca = vigia morto
+      </span>
+    </p>
+    <table x-show="snap && snap.anomalias.length > 0">
+      <thead><tr><th>quando (local)</th><th>anomalia</th></tr></thead>
+      <tbody>
+        <template x-for="ev in (snap ? snap.anomalias : [])" :key="ev.id">
+          <tr class="clica" :title="'abrir no /events com a pista: ' + (ev.ip || ev.message)"
+              @click="location.href = formato.linkAnomalia(ev)">
+            <td class="mono muted" :title="ev.created_at + ' UTC'"
+                x-text="formato.quando(ev.created_at)"></td>
+            <td>
+              <span x-text="ev.message"></span>
+              <span class="tag infra mono" x-show="ev.ip" x-text="ev.ip"></span>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="empty" x-cloak x-show="snap && snap.anomalias.length === 0">sem anomalias — silêncio saudável</div>
+  </section>
+
+  <!-- ÚLTIMOS EVENTOS — MESMO formato do /events: hora local, access
+       parseado, badges de origem, clique abre /events filtrado. -->
+  <section class="secao">
+    <div class="head">
+      <h2>Últimos eventos</h2>
+      <label class="muted">
+        <input type="checkbox" :checked="ocultarMeus" @change="alternarMeus()">
+        ocultar meus eventos
+        <span class="mono" x-show="meuIp" x-text="'(info do ip ' + meuIp + ')'"></span>
+      </label>
+    </div>
+    <table x-show="snap && visiveis.length > 0">
+      <thead><tr><th>quando (local)</th><th>nível</th><th>escopo</th><th>conteúdo</th></tr></thead>
+      <tbody>
+        <template x-for="ev in visiveis" :key="ev.id">
+          <tr class="clica" :class="formato.linhaDe(ev.level)"
+              :title="ev.created_at + ' UTC — abrir no /events'"
+              @click="location.href = formato.linkDe(ev)">
+            <td class="mono muted" x-text="formato.quando(ev.created_at)"></td>
+            <td><span class="dot" :class="formato.dotDe(ev.level)"></span></td>
+            <td class="mono" x-text="ev.scope"></td>
+            <td>
+              <template x-if="formato.parseAccess(ev.message)">
+                <div class="access">
+                  <code x-text="formato.parseAccess(ev.message).metodo + ' ' + formato.parseAccess(ev.message).caminho"></code>
+                  <span class="st" :class="formato.parseAccess(ev.message).st"
+                        x-text="formato.parseAccess(ev.message).status"></span>
+                  <span class="muted"
+                        x-text="formato.parseAccess(ev.message).dur + ' ms · ' + formato.parseAccess(ev.message).host"></span>
+                </div>
+              </template>
+              <template x-if="!formato.parseAccess(ev.message)">
+                <span>
+                  <span x-text="ev.message"></span>
+                  <!-- Código de resposta (schema v8): coluna nos waf/access
+                       novos; fallback = parse da mensagem (linhas antigas). -->
+                  <template x-if="formato.stDe(ev)">
+                    <span class="st" :class="formato.stDe(ev).classe"
+                          x-text="formato.stDe(ev).code"></span>
+                  </template>
+                </span>
+              </template>
+              <template x-if="formato.marcaDe(ev, meuIp)">
+                <span class="tag" :class="formato.marcaDe(ev, meuIp).classe"
+                      x-text="formato.marcaDe(ev, meuIp).rotulo"></span>
+              </template>
+              <!-- Emissor (schema v8, 04/11): clique abre o /events
+                   filtrado pela coluna de projeto. -->
+              <template x-if="formato.tagProjeto(ev)">
+                <a class="tag" :class="formato.tagProjeto(ev).classe" @click.stop
+                   :href="'/events?projeto=' + encodeURIComponent(formato.tagProjeto(ev).rotulo)"
+                   x-text="formato.tagProjeto(ev).rotulo"></a>
+              </template>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="empty" x-cloak x-show="snap && visiveis.length === 0">sem eventos registrados ainda</div>
+    <p><a href="/events">todos os eventos →</a></p>
+  </section>
+
+  <!-- PROJETOS — 6 por página (lista completa com paginação também em
+       /projetos; MESMO bloco de cards nas duas shells). -->
+  <section class="secao">
+    <div class="head">
+      <h2>Projetos</h2>
+      <a href="/projetos">listagem completa →</a>
+    </div>
+  </section>
   <div class="grid">
-    <template x-for="p in (snap ? snap.projetos : [])" :key="p.nome">
+    <template x-for="p in projetosPagina()" :key="p.nome">
       <div class="card">
         <h3>
           <a :href="'/projects/' + encodeURIComponent(p.nome)" x-text="p.nome"></a>
@@ -120,64 +299,20 @@
       </div>
     </template>
   </div>
+  <div class="pager" x-show="paginasProjetos() > 1">
+    <button class="btn ghost" type="button" @click="mudaPaginaProjetos(-1)"
+            :disabled="paginaProjetos <= 1">‹ anterior</button>
+    <span class="muted">página <span x-text="paginaProjetos"></span> de <span x-text="paginasProjetos()"></span></span>
+    <button class="btn ghost" type="button" @click="mudaPaginaProjetos(1)"
+            :disabled="paginaProjetos >= paginasProjetos()">próxima ›</button>
+  </div>
   <div class="empty" x-cloak x-show="snap && snap.projetos.length === 0">
     Nenhum projeto registrado ainda — projetos aparecem quando o fluxd conhece o flux.toml.
   </div>
-
-  <section class="secao">
-    <h2>Eventos por minuto — últimas 24 h</h2>
-    <template x-if="snap && snap.curva">
-      <div class="spark" role="img" aria-label="eventos por minuto nas últimas 24 horas">
-        <template x-for="(b, i) in barras()" :key="i">
-          <span :style="'height:' + b + '%'"></span>
-        </template>
-      </div>
-    </template>
-    <template x-if="snap && !snap.curva">
-      <p class="muted">sem dados ainda</p>
-    </template>
-    <p class="muted" x-show="snap && snap.curva"
-       x-text="snap && snap.curva ? ('pico ' + snap.curva.max + '/min · ' + snap.curva.total + ' eventos') : ''"></p>
-  </section>
-
-  <section class="secao">
-    <h2>Vigia</h2>
-    <p class="muted" x-show="snap && snap.vigia_marca"
-       x-text="snap && snap.vigia_marca ? ('último ciclo: ' + snap.vigia_marca + ' UTC — silêncio sem marca = vigia morto') : ''"></p>
-    <p class="muted" x-show="snap && !snap.vigia_marca">vigia ainda não rodou nenhum ciclo</p>
-    <table x-show="snap && snap.anomalias.length > 0">
-      <thead><tr><th>quando (UTC)</th><th>anomalia</th></tr></thead>
-      <tbody>
-        <template x-for="ev in (snap ? snap.anomalias : [])" :key="ev.id">
-          <tr><td class="mono muted" x-text="ev.created_at"></td><td x-text="ev.message"></td></tr>
-        </template>
-      </tbody>
-    </table>
-    <div class="empty" x-cloak x-show="snap && snap.anomalias.length === 0">sem anomalias — silêncio saudável</div>
-  </section>
-
-  <section class="secao">
-    <h2>Últimos eventos</h2>
-    <table x-show="snap && snap.eventos.length > 0">
-      <thead><tr><th>quando (UTC)</th><th>nível</th><th>escopo</th><th>mensagem</th></tr></thead>
-      <tbody>
-        <template x-for="ev in (snap ? snap.eventos : [])" :key="ev.id">
-          <tr :class="ev.level === 'warn' ? 'lwarn' : ((ev.level === 'error' || ev.level === 'err') ? 'lerr' : '')">
-            <td class="mono muted" x-text="ev.created_at"></td>
-            <td x-text="ev.level"></td>
-            <td><code x-text="ev.scope"></code></td>
-            <td x-text="ev.message"></td>
-          </tr>
-        </template>
-      </tbody>
-    </table>
-    <div class="empty" x-cloak x-show="snap && snap.eventos.length === 0">sem eventos registrados ainda</div>
-    <p><a href="/events">todos os eventos →</a></p>
-  </section>
 </main>
 
 <footer class="wrap-rodape">
-  fluxd — painel API+SSE · snapshot muda → push; saúde recalculada a cada minuto · horários UTC onde marcado
+  fluxd — painel API+SSE · snapshot muda → push (realtime coalescido em ≥300 ms) · saúde recalculada a cada minuto · horários no fuso do navegador
 </footer>
 </div>
 <noscript><p style="padding:1rem">Este painel precisa de JavaScript: os dados chegam por API e SSE, sem recarga de página.</p></noscript>

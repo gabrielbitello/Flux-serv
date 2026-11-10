@@ -8,19 +8,19 @@
 <meta name="robots" content="noindex, nofollow, noarchive">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flux — projeto</title>
-<link rel="stylesheet" href="/assets/estilo.css">
+<link rel="stylesheet" href="/assets/estilo.css?v=__ASSETS_V__">
 <!-- painel.js ANTES do alpine: o build CDN do Alpine auto-inicia via
      queueMicrotask no fim do PRÓPRIO script — alpine:init dispara antes
      do próximo defer executar; registrado depois = componente nunca existe -->
-<script defer src="/assets/painel.js" data-cfasync="false"></script>
-<script defer src="/assets/alpine.min.js" data-cfasync="false"></script>
+<script defer src="/assets/painel.js?v=__ASSETS_V__" data-cfasync="false"></script>
+<script defer src="/assets/alpine.min.js?v=__ASSETS_V__" data-cfasync="false"></script>
 </head>
 <body>
 <div x-data="projetoPage">
 <header class="top">
   <span class="mark">flux<span>/painel</span></span>
   <nav aria-label="Páginas">
-    <a href="/">dashboard</a><a href="/events">eventos</a><a href="/observe">monitor</a>
+    <a href="/">dashboard</a><a href="/projetos">projetos</a><a href="/events">eventos</a><a href="/observe">monitor</a>
   </nav>
   <div class="topdir">
     <span class="muted" x-text="vivo"></span>
@@ -95,8 +95,14 @@
       <span class="muted" x-text="liveTexto()"></span>
     </div>
     <div class="acoes">
-      <button class="btn" type="button" @click="acao('live_on')">live ON</button>
-      <button class="btn" type="button" @click="acao('live_off')">live OFF</button>
+      <!-- Botão ÚNICO que reflete o estado MEDIDO (hot + porta 5173): o
+           que aparece é o próximo movimento que faz sentido. Off pelo
+           painel grava INTENÇÃO — o acordar não religa enquanto o
+           flux.toml não mudar (o liveTexto explica). -->
+      <button class="btn" type="button" x-show="liveLigado()"
+              @click="acao('live_off')">live OFF</button>
+      <button class="btn" type="button" x-show="!liveLigado()"
+              @click="acao('live_on')">live ON</button>
     </div>
   </section>
 

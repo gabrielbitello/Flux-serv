@@ -315,20 +315,32 @@ async fn rodar(
 
     match acao {
         // artisan direto no container app (mesma via do exec da :7420).
-        Acao::Migrate => {
-            rodar_cmd(&app, &docker, nome, env, &cmd_migrate(&toml)?, nome).await
+        Acao::Migrate => rodar_cmd(&app, &docker, nome, env, &cmd_migrate(&toml)?, nome).await,
+        Acao::Seed => {
+            rodar_cmd(
+                &app,
+                &docker,
+                nome,
+                env,
+                "php artisan db:seed --force",
+                nome,
+            )
+            .await
         }
-        Acao::Seed => rodar_cmd(&app, &docker, nome, env, "php artisan db:seed --force", nome).await,
-        Acao::Optimize => rodar_cmd(&app, &docker, nome, env, "php artisan optimize:clear", nome).await,
-        Acao::Shield => rodar_cmd(
-            &app,
-            &docker,
-            nome,
-            env,
-            "php artisan shield:generate --all --no-interaction",
-            nome,
-        )
-        .await,
+        Acao::Optimize => {
+            rodar_cmd(&app, &docker, nome, env, "php artisan optimize:clear", nome).await
+        }
+        Acao::Shield => {
+            rodar_cmd(
+                &app,
+                &docker,
+                nome,
+                env,
+                "php artisan shield:generate --all --no-interaction",
+                nome,
+            )
+            .await
+        }
         // Fresh = o caminho CANÔNICO (05): laravel-only, limpa a trilha de
         // migrations, evento warn. FreshSeed = seed ligado incondicional.
         Acao::Fresh => {
@@ -361,26 +373,47 @@ async fn rodar(
             rodar_cmd(&app, &docker, nome, env, &cmd, nome).await
         }
         // Live ON = o caminho idempotente do wake (decide sozinho: em pé =
-        // pula; órfão = limpa e ressuscita).
+        // pula; órfão = limpa e ressuscita). Limpa a intenção de off ANTES:
+        // o acordar volta a religar na hora, sem esperar o toml mudar.
         Acao::LiveOn => {
+            crate::compose::live_intencao_limpar(&app.state, nome);
             crate::compose::religar_live_pos_acordar(&app.state, &app, &docker, nome, env).await;
             enviar(nome, "live religado (idempotente — em pé = pulado)");
             Ok(())
         }
-        // Live OFF = os mesmos execs do CLI live: mata node, limpa hot.
+        // Live OFF = os mesmos execs do CLI live: mata node, limpa hot — e
+        // grava a INTENÇÃO amarrada ao hash do flux.toml do momento
+        // (04/11): o acordar respeita o off enquanto o toml não mudar. CLI
+        // live on muda o toml → intenção expira → convergem sem o CLI saber
+        // do marcador.
         Acao::LiveOff => {
-            rodar_cmd(
-                &app,
-                &docker,
-                nome,
-                env,
-                "for d in /proc/[0-9]*; do c=$(tr '\\0' ' ' < $d/cmdline 2>/dev/null); \
-                 case \"$c\" in *node*) kill ${d#/proc/} 2>/dev/null;; esac; done; rm -f public/hot; echo live OFF",
-                nome,
-            )
-            .await
+            let r = rodar_cmd(&app, &docker, nome, env, cmd_live_off(), nome).await;
+            if r.is_ok() {
+                crate::compose::live_intencao_off_gravar(&app.state, nome, &toml_src);
+                crate::events::event(
+                    &app.state,
+                    "info",
+                    "painel",
+                    &format!(
+                        "{nome}: live desligado pelo painel — o acordar não religa \
+                         enquanto o flux.toml não mudar"
+                    ),
+                );
+            }
+            r
         }
     }
+}
+
+/// Live OFF: mata os processos node do container e limpa o `public/hot`.
+/// O guard de `$$` é OBRIGATÓRIO: o cmdline do próprio shell carrega o
+/// literal `*node*` do case, então SEM o guard o loop se mata (SIGTERM =
+/// exit 143) antes do rm/echo — "ação live_off … FALHOU: exit 143" do
+/// 04/11. O node de verdade morre; só o próprio shell é pulado.
+pub(super) fn cmd_live_off() -> &'static str {
+    "for d in /proc/[0-9]*; do [ \"$d\" = \"/proc/$$\" ] && continue; \
+     c=$(tr '\\0' ' ' < $d/cmdline 2>/dev/null); case \"$c\" in *node*) \
+     kill ${d#/proc/} 2>/dev/null;; esac; done; rm -f public/hot; echo live OFF"
 }
 
 /// migrate: laravel = artisan --force; node/rust = migrate_cmd do toml
